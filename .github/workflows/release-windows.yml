@@ -17,6 +17,10 @@ jobs:
   release:
     name: Build and publish Windows release
     runs-on: windows-2022
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: false
+      GH_TOKEN: ${{ github.token }}
+      GITHUB_TOKEN: ${{ github.token }}
 
     steps:
       - name: Check out source
@@ -64,9 +68,7 @@ jobs:
       - name: Build installer and update metadata
         if: steps.version.outputs.exists != 'true'
         shell: pwsh
-        env:
-          CSC_IDENTITY_AUTO_DISCOVERY: false
-        run: npm run dist
+        run: npx electron-builder --win nsis --publish never
 
       - name: Smoke-test packaged app
         if: steps.version.outputs.exists != 'true'
