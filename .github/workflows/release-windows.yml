@@ -16,7 +16,7 @@ concurrency:
 jobs:
   release:
     name: Build and publish Windows release
-    runs-on: windows-latest
+    runs-on: windows-2022
 
     steps:
       - name: Check out source
@@ -51,12 +51,27 @@ jobs:
         run: |
           Write-Host "::notice::Release ${{ steps.version.outputs.tag }} already exists. Bump package.json version to publish another auto-update."
 
+      - name: Generate app icon
+        if: steps.version.outputs.exists != 'true'
+        shell: pwsh
+        run: npm run icon
+
+      - name: Bundle Python and FFmpeg runtimes
+        if: steps.version.outputs.exists != 'true'
+        shell: pwsh
+        run: npm run bundle:runtime
+
       - name: Build installer and update metadata
         if: steps.version.outputs.exists != 'true'
         shell: pwsh
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: false
-        run: npm run release:check
+        run: npm run dist
+
+      - name: Smoke-test packaged app
+        if: steps.version.outputs.exists != 'true'
+        shell: pwsh
+        run: npm run smoke:packaged
 
       - name: Create version tag
         if: steps.version.outputs.exists != 'true'
