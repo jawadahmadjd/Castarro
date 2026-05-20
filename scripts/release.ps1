@@ -17,7 +17,7 @@ if (-not $SkipBuild) {
 
 $Package = Get-Content -Raw -LiteralPath (Join-Path $Root "package.json") | ConvertFrom-Json
 $Dist = Join-Path $Root "dist"
-$Installer = Join-Path $Dist "Castarro Setup $($Package.version).exe"
+$Installer = Join-Path $Dist "Castarro-Setup-$($Package.version).exe"
 $BlockMap = "$Installer.blockmap"
 
 if (-not (Test-Path -LiteralPath $Installer)) {

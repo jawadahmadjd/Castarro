@@ -1,4 +1,5 @@
 const { app, BrowserWindow, Menu, Tray, shell } = require("electron");
+const { autoUpdater } = require("electron-updater");
 const { spawn } = require("child_process");
 const fs = require("fs");
 const http = require("http");
@@ -7,6 +8,7 @@ const path = require("path");
 
 const HEALTHCHECK_TIMEOUT_MS = 30000;
 const HEALTHCHECK_INTERVAL_MS = 500;
+const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const PRODUCT_NAME = "Castarro";
 const LEGACY_PRODUCT_NAME = ["FFmpeg", "Live", "Streaming"].join(" ");
 
@@ -17,6 +19,7 @@ let backendPort = null;
 let backendUrl = null;
 let isQuitting = false;
 let legacyDataRoot = null;
+let updateCheckTimer = null;
 
 function configureUserDataPath() {
   const configured = process.env.STREAM_DESKTOP_USER_DATA_DIR;
@@ -290,6 +293,33 @@ function createTray() {
   ]));
 }
 
+function configureAutoUpdates() {
+  if (!app.isPackaged || process.env.STREAM_DISABLE_AUTO_UPDATE === "1" || process.env.STREAM_HEADLESS_SMOKE === "1") {
+    diagnosticLog("auto updates skipped");
+    return;
+  }
+
+  autoUpdater.autoDownload = true;
+  autoUpdater.autoInstallOnAppQuit = true;
+  autoUpdater.on("checking-for-update", () => diagnosticLog("checking for update"));
+  autoUpdater.on("update-available", (info) => diagnosticLog(`update available ${info.version || ""}`));
+  autoUpdater.on("update-not-available", (info) => diagnosticLog(`update not available ${info.version || ""}`));
+  autoUpdater.on("download-progress", (progress) => {
+    diagnosticLog(`update download ${Math.round(progress.percent || 0)}%`);
+  });
+  autoUpdater.on("update-downloaded", (info) => {
+    diagnosticLog(`update downloaded ${info.version || ""}; will install when app quits`);
+  });
+  autoUpdater.on("error", (error) => diagnosticLog("auto update failed", error));
+
+  const check = () => {
+    autoUpdater.checkForUpdates().catch((error) => diagnosticLog("update check failed", error));
+  };
+  setTimeout(check, 15000);
+  updateCheckTimer = setInterval(check, UPDATE_CHECK_INTERVAL_MS);
+  updateCheckTimer.unref();
+}
+
 function writePidFile(pid) {
   fs.writeFileSync(path.join(dataRoot(), "backend.pid"), `${pid}\n`, "utf8");
 }
@@ -415,7 +445,9 @@ async function boot() {
 
 app.whenReady().then(() => {
   app.setName(PRODUCT_NAME);
+  app.setAppUserModelId("com.jawadahmad.castarro");
   diagnosticLog("app ready");
+  configureAutoUpdates();
   boot().catch((error) => {
     diagnosticLog("boot failed", error);
     showError(error);
@@ -431,6 +463,7 @@ app.on("activate", () => {
 app.on("before-quit", () => {
   diagnosticLog("before quit");
   isQuitting = true;
+  if (updateCheckTimer) clearInterval(updateCheckTimer);
   stopBackend();
 });
 

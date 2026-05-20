@@ -348,6 +348,21 @@ Release verification:
 npm run release:check
 ```
 
+## Automatic Updates
+
+Castarro checks GitHub Releases for updates when the packaged app starts and then periodically while it is open. Updates are downloaded in the background and installed when the app quits, so users do not need to download a new installer manually.
+
+GitHub Actions publishes Windows releases from `main`. To ship an update:
+
+```powershell
+npm version patch --no-git-tag-version
+git add package.json package-lock.json
+git commit -m "Release 1.0.1"
+git push
+```
+
+Use `minor` or `major` instead of `patch` when appropriate. The workflow creates a `vX.Y.Z` tag, builds the installer, uploads `latest.yml`, and publishes the GitHub release. If the version already has a release, the workflow skips publishing; bump the version before pushing another update.
+
 Create a release manifest after a build:
 
 ```powershell

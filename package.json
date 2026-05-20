@@ -26,6 +26,15 @@
     "appId": "com.jawadahmad.castarro",
     "productName": "Castarro",
     "asar": false,
+    "artifactName": "${productName}-Setup-${version}.${ext}",
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "jawadahmadjd",
+        "repo": "Castarro",
+        "releaseType": "release"
+      }
+    ],
     "directories": {
       "output": "dist"
     },
@@ -74,5 +83,8 @@
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true
     }
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.3"
   }
 }

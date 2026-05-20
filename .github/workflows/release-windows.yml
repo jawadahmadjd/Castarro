@@ -1,0 +1,82 @@
+name: Release Windows App
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: castarro-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and publish Windows release
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Read package version
+        id: version
+        shell: pwsh
+        run: |
+          $Package = Get-Content -Raw package.json | ConvertFrom-Json
+          $Tag = "v$($Package.version)"
+          $Existing = git ls-remote --tags origin "refs/tags/$Tag"
+          $Exists = if ([string]::IsNullOrWhiteSpace($Existing)) { "false" } else { "true" }
+          "version=$($Package.version)" >> $env:GITHUB_OUTPUT
+          "tag=$Tag" >> $env:GITHUB_OUTPUT
+          "exists=$Exists" >> $env:GITHUB_OUTPUT
+
+      - name: Skip existing release
+        if: steps.version.outputs.exists == 'true'
+        shell: pwsh
+        run: |
+          Write-Host "::notice::Release ${{ steps.version.outputs.tag }} already exists. Bump package.json version to publish another auto-update."
+
+      - name: Build installer and update metadata
+        if: steps.version.outputs.exists != 'true'
+        shell: pwsh
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+        run: npm run release:check
+
+      - name: Create version tag
+        if: steps.version.outputs.exists != 'true'
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "${{ steps.version.outputs.tag }}" -m "Castarro ${{ steps.version.outputs.version }}"
+          git push origin "${{ steps.version.outputs.tag }}"
+
+      - name: Publish GitHub release
+        if: steps.version.outputs.exists != 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: Castarro ${{ steps.version.outputs.version }}
+          generate_release_notes: true
+          make_latest: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/Castarro-Setup-${{ steps.version.outputs.version }}.exe
+            dist/Castarro-Setup-${{ steps.version.outputs.version }}.exe.blockmap
+            dist/latest.yml
