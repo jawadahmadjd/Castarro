@@ -9,7 +9,7 @@
   "scripts": {
     "electron": "electron .",
     "pack": "electron-builder --dir",
-    "dist": "electron-builder --win nsis",
+    "dist": "electron-builder --win nsis --publish never",
     "bundle:runtime": "powershell -ExecutionPolicy Bypass -File scripts/package_runtime.ps1",
     "icon": "node scripts/create_icon.js",
     "smoke:backend": "python scripts/web_ui.py",
