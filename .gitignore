@@ -1,0 +1,51 @@
+# Dependencies
+node_modules/
+
+# Build and packaging output
+dist/
+.packaged-smoke-user-data/
+*.blockmap
+*.exe
+
+# Runtime caches and generated app state
+.runtime/
+logs/
+debug.log
+stream_control.db
+*.db
+*.sqlite
+*.sqlite3
+
+# Local/private configuration
+config.json
+config.ready.json
+.env
+.env.*
+
+# User media and generated streaming assets
+Raw Videos/
+Go Live/
+encoded/
+media/
+playlists/*.normalized.txt
+
+# Bundled third-party runtimes created by scripts/package_runtime.ps1
+desktop/resources/python/*
+desktop/resources/ffmpeg/*
+!desktop/resources/ffmpeg/README.txt
+!desktop/resources/ffmpeg/LICENSE
+!desktop/resources/seed-data/
+!desktop/resources/seed-data/.gitkeep
+
+# Python and test output
+__pycache__/
+*.py[cod]
+.pytest_cache/
+test-results/
+tests/*.png
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+*.tmp
+*.log

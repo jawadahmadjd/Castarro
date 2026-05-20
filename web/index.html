@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Castarro</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero">
+        <div>
+          <p class="eyebrow">Local control room</p>
+          <h1>Castarro</h1>
+          <p class="subtitle">Normalize once, then run clean multi-channel YouTube live streams from your own desktop.</p>
+        </div>
+        <div class="hero-side">
+          <div class="status-pill" id="serverState">Checking...</div>
+          <nav class="tabs" aria-label="Main sections">
+            <button class="tab active" id="tabControl" type="button">Control</button>
+            <button class="tab" id="tabSettings" type="button">Settings</button>
+          </nav>
+        </div>
+      </section>
+
+      <section id="viewControl" class="tab-view active">
+        <section class="panel controls">
+          <div class="section-head">
+            <div>
+              <h2>Live Controls</h2>
+              <p class="helper">Use these after your channel videos are normalized and ready.</p>
+            </div>
+            <span id="activeConfigLabel">No config</span>
+          </div>
+          <div class="row wrap">
+            <button class="pill success" id="startAll">Start streams</button>
+            <button class="pill danger" id="stopAll">Stop streams</button>
+          </div>
+          <div class="notice" id="autoNotice">
+            YouTube Auto Start/Stop readiness will appear after a config is loaded.
+          </div>
+        </section>
+
+        <section class="panel preview-panel">
+          <div class="section-head">
+            <div>
+              <h2>Program Preview</h2>
+              <p class="helper">Live monitor feed generated from the same outgoing stream process.</p>
+            </div>
+            <div class="row wrap">
+              <label>
+                <span class="field-hint">Channel</span>
+                <select id="previewChannelSelect"></select>
+              </label>
+              <span class="badge" id="previewStatus">Idle</span>
+            </div>
+          </div>
+          <div class="preview-frame">
+            <video id="programPreview" playsinline controls autoplay muted></video>
+            <div class="preview-empty" id="previewEmpty">Start a stream to see live preview here.</div>
+          </div>
+        </section>
+
+        <section>
+          <div class="panel">
+            <div class="section-head">
+              <h2>Channels</h2>
+              <span id="channelCount">0 channels</span>
+            </div>
+            <div class="cards" id="channels"></div>
+          </div>
+        </section>
+      </section>
+
+      <section id="viewSettings" class="tab-view">
+        <section class="panel">
+          <div class="settings-menu">
+            <div class="tabs">
+              <button class="tab active" id="settingsNormalizeTab" type="button">Video Normalization</button>
+              <button class="tab" id="settingsLiveTab" type="button">Live</button>
+            </div>
+            <button class="pill primary" id="saveSettings">Save settings</button>
+          </div>
+        </section>
+
+        <section id="settingsNormalizeView" class="settings-section active">
+          <section class="panel">
+            <div class="section-head">
+              <div>
+                <h2>Videos To Normalize</h2>
+                <p class="helper">Each channel contains Add Videos, selected source files, and its normalization profile.</p>
+              </div>
+              <div class="row wrap">
+                <button class="pill primary" id="addChannelNormalize">Add Channel</button>
+                <button class="pill" id="refreshRawFiles">Refresh Raw Videos</button>
+              </div>
+            </div>
+            <div class="channel-settings-list" id="normalizationChannels"></div>
+          </section>
+        </section>
+
+        <section id="settingsLiveView" class="settings-section">
+          <section class="panel">
+            <div class="section-head">
+              <div>
+                <h2>Channel Settings</h2>
+                <p class="helper">Add as many channels as you need. Open a channel to edit it.</p>
+              </div>
+              <button class="pill primary" id="addChannel">Add Channel</button>
+            </div>
+            <div class="channel-settings-list" id="channelSettings"></div>
+          </section>
+        </section>
+
+        <section class="grid">
+          <div class="panel">
+            <div class="section-head">
+              <h2>Activity</h2>
+              <div class="row wrap">
+                <span id="taskState">Idle</span>
+                <span class="helper">Latest first</span>
+              </div>
+            </div>
+            <div id="tasks" class="tasks"></div>
+          </div>
+
+          <section class="panel logs">
+            <div class="section-head">
+              <h2>Stream Logs</h2>
+              <div class="row wrap">
+                <button class="pill ghost small" type="button" onclick="copyStreamLogs()">Copy</button>
+                <span>Latest tails</span>
+              </div>
+            </div>
+            <pre id="streamLogs">No stream logs yet.</pre>
+          </section>
+        </section>
+
+        <section class="panel editor">
+          <div class="section-head">
+            <div>
+              <h2>Advanced JSON</h2>
+              <p class="helper">Optional fallback for exact manual edits.</p>
+            </div>
+            <button class="pill" id="saveConfig">Save JSON</button>
+          </div>
+          <textarea id="configEditor" spellcheck="false" placeholder="Create or load config.json to edit it here."></textarea>
+        </section>
+      </section>
+    </main>
+
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@1"></script>
+    <script src="/app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,78 @@
+{
+  "name": "castarro-desktop",
+  "version": "1.0.0",
+  "description": "Windows desktop package for Castarro, a local multi-channel live streaming dashboard.",
+  "main": "desktop/main.js",
+  "author": "Jawad Ahmad",
+  "license": "UNLICENSED",
+  "private": true,
+  "scripts": {
+    "electron": "electron .",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder --win nsis",
+    "bundle:runtime": "powershell -ExecutionPolicy Bypass -File scripts/package_runtime.ps1",
+    "icon": "node scripts/create_icon.js",
+    "smoke:backend": "python scripts/web_ui.py",
+    "smoke:packaged": "powershell -ExecutionPolicy Bypass -File scripts/smoke_packaged.ps1",
+    "release": "powershell -ExecutionPolicy Bypass -File scripts/release.ps1",
+    "release:check": "npm run icon && npm run bundle:runtime && npm run dist && npm run smoke:packaged"
+  },
+  "devDependencies": {
+    "electron": "^31.7.7",
+    "electron-builder": "^24.13.3",
+    "playwright": "^1.60.0"
+  },
+  "build": {
+    "appId": "com.jawadahmad.castarro",
+    "productName": "Castarro",
+    "asar": false,
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "desktop/**/*",
+      "!desktop/resources/**/*",
+      "scripts/**/*",
+      "web/**/*",
+      "config.example.json",
+      "README.md"
+    ],
+    "extraResources": [
+      {
+        "from": "desktop/resources/python",
+        "to": "python",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "desktop/resources/ffmpeg",
+        "to": "ffmpeg",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "desktop/resources/seed-data",
+        "to": "seed-data",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "win": {
+      "icon": "desktop/assets/icon.ico",
+      "target": [
+        "nsis"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "perMachine": false,
+      "deleteAppDataOnUninstall": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
+  }
+}

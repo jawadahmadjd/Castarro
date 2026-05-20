@@ -1,0 +1,97 @@
+{
+  "defaults": {
+    "ffmpeg_path": "ffmpeg",
+    "ffprobe_path": "ffprobe",
+    "rtmp_base": "rtmp://a.rtmp.youtube.com/live2",
+    "log_dir": "logs",
+    "runtime_dir": ".runtime",
+    "raw_dir": "Raw Videos",
+    "normalized_dir": "Go Live",
+    "normalized_playlist_dir": "playlists",
+    "restart_delay_seconds": 10
+  },
+  "normalize_profile": {
+    "width": 1920,
+    "height": 1080,
+    "fps": 30,
+    "video_encoder": "libx264",
+    "rate_control": "vbr",
+    "video_bitrate": "6000k",
+    "video_minrate": "4500k",
+    "video_maxrate": "6800k",
+    "video_bufsize": "12000k",
+    "audio_bitrate": "160k",
+    "audio_sample_rate": 48000,
+    "x264_preset": "medium",
+    "x264_profile": "high"
+  },
+  "live_profile": {
+    "mode": "copy",
+    "video_encoder": "libx264",
+    "preset": "veryfast",
+    "profile": "high",
+    "pixel_format": "yuv420p",
+    "width": 1920,
+    "height": 1080,
+    "fps": 30,
+    "video_bitrate": "6800k",
+    "minrate": "6800k",
+    "maxrate": "6800k",
+    "bufsize": "13600k",
+    "gop_seconds": 2,
+    "audio_codec": "aac",
+    "audio_bitrate": "128k",
+    "audio_sample_rate": 44100,
+    "audio_channels": 2
+  },
+  "channels": [
+    {
+      "name": "channel_1",
+      "enabled": true,
+      "stream_key_env": "YT_CHANNEL_1_KEY",
+      "raw_playlist": [
+        "Raw Videos/channel_1/video-001.mp4"
+      ],
+      "playlist": [],
+      "normalize_profile": {
+        "width": 1920,
+        "height": 1080,
+        "fps": 30,
+        "video_encoder": "libx264",
+        "rate_control": "vbr",
+        "video_bitrate": "6000k",
+        "video_minrate": "4500k",
+        "video_maxrate": "6800k",
+        "video_bufsize": "12000k",
+        "audio_bitrate": "160k",
+        "audio_sample_rate": 48000,
+        "x264_preset": "medium",
+        "x264_profile": "high"
+      },
+      "live_profile": {
+        "mode": "copy",
+        "video_encoder": "libx264",
+        "preset": "veryfast",
+        "profile": "high",
+        "pixel_format": "yuv420p",
+        "width": 1920,
+        "height": 1080,
+        "fps": 30,
+        "video_bitrate": "6800k",
+        "minrate": "6800k",
+        "maxrate": "6800k",
+        "bufsize": "13600k",
+        "gop_seconds": 2,
+        "audio_codec": "aac",
+        "audio_bitrate": "128k",
+        "audio_sample_rate": 44100,
+        "audio_channels": 2
+      },
+      "youtube_auto_start": true,
+      "youtube_auto_stop": true,
+      "youtube_studio_url": "",
+      "loop": true,
+      "restart_on_exit": true
+    }
+  ]
+}
