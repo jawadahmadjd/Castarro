@@ -8,6 +8,7 @@ const path = require("path");
 const HEALTHCHECK_TIMEOUT_MS = 30000;
 const HEALTHCHECK_INTERVAL_MS = 500;
 const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const TRAY_TOOLTIP_REFRESH_MS = 5000;
 const PRODUCT_NAME = "Castarro";
 const LEGACY_PRODUCT_NAME = ["FFmpeg", "Live", "Streaming"].join(" ");
 const BACKEND_INFO_FILE = "backend-info.json";
@@ -24,6 +25,9 @@ let appBootstrapped = false;
 let installUpdateOnQuit = false;
 let legacyDataRoot = null;
 let updateCheckTimer = null;
+let trayStatusTimer = null;
+let lastTrayTooltip = "";
+let lastTrayStatusLabel = "";
 const updateState = {
   status: "idle",
   version: null,
@@ -92,6 +96,10 @@ if (!gotLock) {
 }
 
 app.on("second-instance", () => {
+  if (isQuitting) {
+    diagnosticLog("second instance launch ignored while quitting");
+    return;
+  }
   if (!mainWindow) return;
   if (mainWindow.isMinimized()) mainWindow.restore();
   mainWindow.show();
@@ -327,7 +335,7 @@ async function requestQuit(source = "unknown", mode = "ui-only", options = {}) {
         diagnosticLog("full-stop requested without backend URL; continuing with app quit");
       }
       quitMode = "full-stop";
-      installUpdateOnQuit = Boolean(options.installUpdate) && updateState.status === "downloaded";
+      installUpdateOnQuit = Boolean(options.installUpdate) && (updateState.downloaded || updateState.status === "downloaded");
     } else {
       const running = await liveStreamCount();
       if (running > 0 && source === "window-close") {
@@ -348,7 +356,17 @@ async function requestQuit(source = "unknown", mode = "ui-only", options = {}) {
 
     isQuitting = true;
     if (installUpdateOnQuit && autoUpdater && typeof autoUpdater.quitAndInstall === "function") {
-      autoUpdater.quitAndInstall(false, true);
+      // Release lock early so the relaunched app can start while this instance exits.
+      app.releaseSingleInstanceLock();
+      diagnosticLog("installing downloaded update on quit");
+      try {
+        autoUpdater.autoInstallOnAppQuit = true;
+        autoUpdater.autoRunAppAfterInstall = true;
+        autoUpdater.quitAndInstall(false, true);
+      } catch (error) {
+        diagnosticLog("quitAndInstall failed; falling back to app quit", error);
+        app.quit();
+      }
     } else {
       app.quit();
     }
@@ -555,14 +573,50 @@ function createTray() {
   if (!iconPath) return;
   tray = new Tray(iconPath);
   tray.setToolTip(PRODUCT_NAME);
-  tray.setContextMenu(Menu.buildFromTemplate([
+  tray.setContextMenu(buildTrayMenu(0));
+
+  const refresh = () => refreshTrayPresentation().catch((error) => diagnosticLog("tray status refresh failed", error));
+  refresh();
+  if (trayStatusTimer) clearInterval(trayStatusTimer);
+  trayStatusTimer = setInterval(refresh, TRAY_TOOLTIP_REFRESH_MS);
+  trayStatusTimer.unref();
+}
+
+function trayTooltipText(streamCount) {
+  const count = Number.isFinite(streamCount) && streamCount >= 0 ? Math.floor(streamCount) : 0;
+  return `${PRODUCT_NAME} - ${count} stream${count === 1 ? "" : "s"} running`;
+}
+
+function trayStatusMenuLabel(streamCount) {
+  const count = Number.isFinite(streamCount) && streamCount >= 0 ? Math.floor(streamCount) : 0;
+  return `Background status: ${count} stream${count === 1 ? "" : "s"} running`;
+}
+
+function buildTrayMenu(streamCount) {
+  return Menu.buildFromTemplate([
     { label: "Show", click: () => mainWindow && mainWindow.show() },
+    { label: trayStatusMenuLabel(streamCount), enabled: false },
     { label: "Open Data Folder", click: () => shell.openPath(dataRoot()) },
     { label: "Open Logs Folder", click: () => shell.openPath(logRoot()) },
     { type: "separator" },
     { label: "Close UI (Keep Stream Running)", click: () => requestQuit("tray", "ui-only").catch((error) => diagnosticLog("tray close ui failed", error)) },
     { label: "Stop Streams and Exit", click: () => requestQuit("tray", "stop-streams-and-exit").catch((error) => diagnosticLog("tray full stop failed", error)) }
-  ]));
+  ]);
+}
+
+async function refreshTrayPresentation() {
+  if (!tray || (typeof tray.isDestroyed === "function" && tray.isDestroyed())) return;
+  const running = await liveStreamCount();
+  const tooltip = trayTooltipText(running);
+  if (tooltip !== lastTrayTooltip) {
+    tray.setToolTip(tooltip);
+    lastTrayTooltip = tooltip;
+  }
+  const statusLabel = trayStatusMenuLabel(running);
+  if (statusLabel !== lastTrayStatusLabel) {
+    tray.setContextMenu(buildTrayMenu(running));
+    lastTrayStatusLabel = statusLabel;
+  }
 }
 
 function configureAutoUpdates() {
@@ -830,6 +884,7 @@ app.on("before-quit", (event) => {
   }
   diagnosticLog(`before quit mode=${quitMode}`);
   if (updateCheckTimer) clearInterval(updateCheckTimer);
+  if (trayStatusTimer) clearInterval(trayStatusTimer);
   if (quitMode === "full-stop") {
     stopBackend();
   }

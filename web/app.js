@@ -474,7 +474,8 @@ function renderPreview(streams) {
   const badge = $("previewStatus");
   const video = $("programPreview");
   const empty = $("previewEmpty");
-  if (!select || !badge || !video || !empty) return;
+  const warning = $("previewWarning");
+  if (!select || !badge || !video || !empty || !warning) return;
 
   const running = Object.values(streams || {})
     .filter((stream) => stream.running && stream.preview_url);
@@ -486,6 +487,8 @@ function renderPreview(streams) {
     badge.className = "badge";
     empty.textContent = "Start a stream to see live preview here.";
     empty.style.display = "grid";
+    warning.textContent = "";
+    warning.classList.add("hidden");
     detachPreviewPlayer();
     state.previewChannel = "";
     return;
@@ -514,6 +517,14 @@ function renderPreview(streams) {
   badge.className = `badge ${buffering ? "" : "live"}`;
   empty.textContent = buffering ? "Preview is warming up..." : "";
   empty.style.display = buffering ? "grid" : "none";
+  const previewWarningText = String(selected.preview_warning || "").trim();
+  if (previewWarningText) {
+    warning.textContent = previewWarningText;
+    warning.classList.remove("hidden");
+  } else {
+    warning.textContent = "";
+    warning.classList.add("hidden");
+  }
   attachPreviewPlayer(selected.preview_url);
 }
 

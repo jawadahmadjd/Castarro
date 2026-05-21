@@ -232,6 +232,10 @@ h3 {
   font-weight: 700;
 }
 
+#previewWarning {
+  margin-top: 2px;
+}
+
 .notice {
   border: 1px dashed var(--line);
   border-radius: 20px;

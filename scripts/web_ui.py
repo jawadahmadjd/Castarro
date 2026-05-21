@@ -193,6 +193,7 @@ class StreamState:
             "log_tail": tail_file(self.log_path),
             "preview_url": f"/preview/{quote(channel_name, safe='')}/index.m3u8" if preview_manifest else None,
             "preview_ready": bool(preview_manifest and preview_manifest.exists()),
+            "preview_warning": self.running.preview_warning,
         }
 
 

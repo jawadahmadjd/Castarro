@@ -53,6 +53,7 @@ class RunningStream:
     log_handle: Any
     command: list[str]
     preview_manifest: Path | None = None
+    preview_warning: str | None = None
 
 
 def load_config(config_path: Path) -> tuple[dict[str, Any], Path]:
@@ -318,12 +319,100 @@ def transcode_args(config: dict[str, Any], channel: dict[str, Any]) -> list[str]
     return args
 
 
+def concat_playlist_media_paths(playlist_path: Path) -> list[Path]:
+    paths: list[Path] = []
+    for raw in playlist_path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line.startswith("file "):
+            continue
+        value = line[5:].strip()
+        if value.startswith("'") and value.endswith("'") and len(value) >= 2:
+            value = value[1:-1].replace("'\\''", "'")
+        paths.append(Path(value))
+    return paths
+
+
+def ffprobe_signature(ffprobe_path: str, media_path: Path) -> tuple[tuple[Any, ...] | None, str | None]:
+    command = [
+        ffprobe_path,
+        "-v",
+        "error",
+        "-print_format",
+        "json",
+        "-show_streams",
+        str(media_path),
+    ]
+    try:
+        completed = subprocess.run(command, capture_output=True, text=True)
+    except OSError as exc:
+        return None, f"ffprobe unavailable: {exc}"
+    if completed.returncode != 0:
+        message = (completed.stderr or completed.stdout or "ffprobe failed").strip()
+        return None, message
+
+    try:
+        payload = json.loads(completed.stdout or "{}")
+    except json.JSONDecodeError:
+        return None, "ffprobe returned invalid JSON."
+
+    streams = payload.get("streams", [])
+    video = next((stream for stream in streams if stream.get("codec_type") == "video"), {})
+    audio = next((stream for stream in streams if stream.get("codec_type") == "audio"), {})
+    signature = (
+        video.get("codec_name"),
+        video.get("width"),
+        video.get("height"),
+        video.get("pix_fmt"),
+        video.get("avg_frame_rate"),
+        audio.get("codec_name"),
+        audio.get("sample_rate"),
+        audio.get("channels"),
+    )
+    return signature, None
+
+
+def preview_copy_compatibility(
+    config: dict[str, Any],
+    channel: dict[str, Any],
+    defaults: dict[str, Any],
+    playlist_path: Path,
+) -> tuple[bool, list[str]]:
+    ffprobe_path = str(channel.get("ffprobe_path") or defaults.get("ffprobe_path", "ffprobe")).strip() or "ffprobe"
+    media_paths = concat_playlist_media_paths(playlist_path)
+    if not media_paths:
+        return False, ["playlist has no readable media entries"]
+
+    issues: list[str] = []
+    signatures: list[tuple[Any, ...]] = []
+    for media in media_paths:
+        if not media.exists():
+            issues.append(f"missing file: {media}")
+            continue
+        signature, probe_error = ffprobe_signature(ffprobe_path, media)
+        if probe_error:
+            issues.append(f"{media.name}: {probe_error}")
+            continue
+        assert signature is not None
+        signatures.append(signature)
+        video_codec = signature[0]
+        audio_codec = signature[5]
+        if video_codec != "h264":
+            issues.append(f"{media.name}: video codec is {video_codec or 'unknown'} (needs h264 for copy preview).")
+        if audio_codec and audio_codec != "aac":
+            issues.append(f"{media.name}: audio codec is {audio_codec} (aac is safest for preview).")
+
+    if len(set(signatures)) > 1:
+        issues.append("playlist streams are mixed (codec/resolution/fps/audio mismatch).")
+
+    return len(issues) == 0, issues
+
+
 def build_command(
     config_dir: Path,
     config: dict[str, Any],
     channel: dict[str, Any],
     preview_manifest: Path | None = None,
-) -> tuple[list[str], Path, str]:
+) -> tuple[list[str], Path, str, str | None]:
     defaults = config.get("defaults", {})
     runtime_dir = resolve_path(config_dir, defaults.get("runtime_dir", ".runtime"))
     playlist_path = write_concat_playlist(defaults, config_dir, runtime_dir, channel)
@@ -356,6 +445,7 @@ def build_command(
     stream_output_args = ["-c", "copy"]
     if transcode_enabled(config, channel):
         stream_output_args = transcode_args(config, channel)
+    preview_warning: str | None = None
 
     if preview_manifest is None:
         command += [
@@ -366,7 +456,14 @@ def build_command(
             "flv",
             url,
         ]
-        return command, playlist_path, url
+        return command, playlist_path, url, preview_warning
+
+    if not transcode_enabled(config, channel):
+        copy_safe, issues = preview_copy_compatibility(config, channel, defaults, playlist_path)
+        if not copy_safe:
+            preview_warning = (
+                "Provided video is not fully compatible and you have to normalize the video first to get live preview."
+            )
 
     segment_pattern = preview_manifest.parent / "segment_%05d.ts"
     command += [
@@ -380,8 +477,7 @@ def build_command(
         "0:v:0",
         "-map",
         "0:a:0?",
-        "-c",
-        "copy",
+        *stream_output_args,
         "-hls_time",
         "2",
         "-hls_list_size",
@@ -396,7 +492,7 @@ def build_command(
         "hls",
         str(preview_manifest),
     ]
-    return command, playlist_path, url
+    return command, playlist_path, url, preview_warning
 
 
 def log_path(config_dir: Path, config: dict[str, Any], channel: dict[str, Any]) -> Path:
@@ -416,9 +512,12 @@ def start_stream(
     if preview_manifest is not None:
         preview_manifest.parent.mkdir(parents=True, exist_ok=True)
         clear_directory(preview_manifest.parent)
-    command, _playlist_path, url = build_command(config_dir, config, channel, preview_manifest)
+    command, _playlist_path, url, preview_warning = build_command(config_dir, config, channel, preview_manifest)
     path = log_path(config_dir, config, channel)
     log_handle = path.open("ab")
+    if preview_warning:
+        log_handle.write((f"PREVIEW_WARNING {preview_warning}\n").encode("utf-8", errors="replace"))
+        log_handle.flush()
 
     print(f"[{channel['name']}] starting -> {mask_url(url)}")
     print(f"[{channel['name']}] log: {path}")
@@ -437,6 +536,7 @@ def start_stream(
         log_handle=log_handle,
         command=command,
         preview_manifest=preview_manifest,
+        preview_warning=preview_warning,
     )
 
 
@@ -521,7 +621,7 @@ def start_all(config_path: Path, channel_name: str | None) -> None:
 def print_commands(config_path: Path, channel_name: str | None, reveal_keys: bool) -> None:
     config, config_dir = load_config(config_path)
     for channel in enabled_channels(config, channel_name):
-        command, _playlist_path, url = build_command(config_dir, config, channel)
+        command, _playlist_path, url, _preview_note = build_command(config_dir, config, channel)
         final_url = url if reveal_keys else mask_url(url)
         print(f"\n[{channel['name']}]")
         print(command_as_text(command, final_url))
