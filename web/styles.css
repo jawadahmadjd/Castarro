@@ -114,6 +114,20 @@ h1 {
   line-height: 0.95;
 }
 
+.app-version {
+  display: inline-block;
+  margin-left: 10px;
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.5);
+  color: var(--muted);
+  font-size: 0.32em;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  vertical-align: middle;
+}
+
 h2 {
   margin-bottom: 0;
   font-size: 1.05rem;

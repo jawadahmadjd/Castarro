@@ -30,6 +30,18 @@ DEFAULT_CONFIG = runtime_paths.default_config_name()
 VIDEO_EXTENSIONS = {".mp4", ".m4v", ".mov", ".flv", ".mkv"}
 
 
+def app_version() -> str | None:
+    package_json = CODE_ROOT / "package.json"
+    if not package_json.exists():
+        return None
+    try:
+        payload = json.loads(package_json.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    version = str(payload.get("version") or "").strip()
+    return version or None
+
+
 def mask_secret(value: Any) -> str:
     text = str(value or "")
     if not text:
@@ -636,6 +648,7 @@ def status_payload(config_name: str) -> dict[str, Any]:
     return {
         "root": str(ROOT),
         "code_root": str(CODE_ROOT),
+        "app_version": app_version(),
         "config": config_name,
         "config_exists": config is not None,
         "config_error": error,

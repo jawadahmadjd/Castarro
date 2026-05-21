@@ -319,6 +319,25 @@ async function liveStreamCount() {
   }
 }
 
+async function hideUiToTray(source = "unknown") {
+  const running = await liveStreamCount();
+  if (running > 0 && source === "window-close") {
+    const countLabel = running === 1 ? "1 live stream is still running." : `${running} live streams are still running.`;
+    await dialog.showMessageBox(mainWindow || undefined, {
+      type: "info",
+      buttons: ["OK"],
+      defaultId: 0,
+      noLink: true,
+      title: "UI closed, stream continues",
+      message: countLabel,
+      detail: "Castarro UI will hide to tray, and your backend/live streams keep running in the background.",
+    });
+  }
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.hide();
+  }
+}
+
 async function requestQuit(source = "unknown", mode = "ui-only", options = {}) {
   if (isQuitting || quitRequestInFlight) return false;
   quitRequestInFlight = true;
@@ -337,21 +356,10 @@ async function requestQuit(source = "unknown", mode = "ui-only", options = {}) {
       quitMode = "full-stop";
       installUpdateOnQuit = Boolean(options.installUpdate) && (updateState.downloaded || updateState.status === "downloaded");
     } else {
-      const running = await liveStreamCount();
-      if (running > 0 && source === "window-close") {
-        const countLabel = running === 1 ? "1 live stream is still running." : `${running} live streams are still running.`;
-        await dialog.showMessageBox(mainWindow || undefined, {
-          type: "info",
-          buttons: ["OK"],
-          defaultId: 0,
-          noLink: true,
-          title: "UI closed, stream continues",
-          message: countLabel,
-          detail: "Castarro UI will close now, but your backend and live stream keep running in the background.",
-        });
-      }
       quitMode = "ui-only";
       installUpdateOnQuit = false;
+      await hideUiToTray(source);
+      return true;
     }
 
     isQuitting = true;
@@ -389,6 +397,7 @@ async function requestQuit(source = "unknown", mode = "ui-only", options = {}) {
 }
 
 ipcMain.handle("desktop:get-update-status", () => ({ ...updateState }));
+ipcMain.handle("desktop:get-app-version", () => app.getVersion());
 ipcMain.handle("desktop:select-folder", async (_event, payload) => {
   const defaultPath = typeof payload?.defaultPath === "string" && payload.defaultPath.trim()
     ? payload.defaultPath.trim()
@@ -594,7 +603,12 @@ function trayStatusMenuLabel(streamCount) {
 
 function buildTrayMenu(streamCount) {
   return Menu.buildFromTemplate([
-    { label: "Show", click: () => mainWindow && mainWindow.show() },
+    { label: "Show", click: () => {
+      if (!mainWindow || mainWindow.isDestroyed()) return;
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.show();
+      mainWindow.focus();
+    } },
     { label: trayStatusMenuLabel(streamCount), enabled: false },
     { label: "Open Data Folder", click: () => shell.openPath(dataRoot()) },
     { label: "Open Logs Folder", click: () => shell.openPath(logRoot()) },

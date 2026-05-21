@@ -13,6 +13,9 @@ contextBridge.exposeInMainWorld("desktopShell", {
   getUpdateStatus() {
     return ipcRenderer.invoke("desktop:get-update-status");
   },
+  getAppVersion() {
+    return ipcRenderer.invoke("desktop:get-app-version");
+  },
   selectFolder(options = {}) {
     return ipcRenderer.invoke("desktop:select-folder", options);
   },

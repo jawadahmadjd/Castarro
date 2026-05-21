@@ -12,6 +12,7 @@ const state = {
   previewChannel: "",
   previewUrl: "",
   previewHls: null,
+  appVersion: null,
   updateStatus: null,
 };
 
@@ -125,6 +126,8 @@ async function refresh() {
   }
 
   renderConfigSelect(payload.configs);
+  state.appVersion = payload.app_version || state.appVersion;
+  renderAppVersion();
   renderStatus(payload);
   renderChannels(payload);
   renderPreview(payload.streams);
@@ -157,12 +160,31 @@ async function initDesktopIntegration() {
     }
   }
 
+  if (typeof bridge.getAppVersion === "function") {
+    try {
+      const version = await bridge.getAppVersion();
+      if (version) {
+        state.appVersion = version;
+        renderAppVersion();
+      }
+    } catch (_error) {
+      // Keep UI usable if desktop bridge is unavailable.
+    }
+  }
+
   if (typeof bridge.onUpdateStatus === "function") {
     bridge.onUpdateStatus((payload) => {
       state.updateStatus = payload || null;
       renderUpdateBanner();
     });
   }
+}
+
+function renderAppVersion() {
+  const node = $("appVersionLabel");
+  if (!node) return;
+  const version = String(state.appVersion || "").trim();
+  node.textContent = version ? `v${version}` : "v-";
 }
 
 async function closeUiOnly() {
