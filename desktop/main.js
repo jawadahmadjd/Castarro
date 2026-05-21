@@ -1,5 +1,4 @@
-const { app, BrowserWindow, Menu, Tray, shell } = require("electron");
-const { autoUpdater } = require("electron-updater");
+const { app, BrowserWindow, Menu, Tray, dialog, ipcMain, shell } = require("electron");
 const { spawn } = require("child_process");
 const fs = require("fs");
 const http = require("http");
@@ -18,8 +17,17 @@ let backend = null;
 let backendPort = null;
 let backendUrl = null;
 let isQuitting = false;
+let quitRequestInFlight = false;
 let legacyDataRoot = null;
 let updateCheckTimer = null;
+const updateState = {
+  status: "idle",
+  version: null,
+  downloaded: false,
+  percent: 0,
+  message: ""
+};
+let autoUpdater = null;
 
 function configureUserDataPath() {
   const configured = process.env.STREAM_DESKTOP_USER_DATA_DIR;
@@ -51,6 +59,16 @@ function diagnosticLog(message, error = null) {
   } catch (_error) {
     // Diagnostics must never become the startup problem.
   }
+}
+
+function publishUpdateState() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.webContents.send("desktop:update-status", { ...updateState });
+}
+
+function setUpdateState(patch) {
+  Object.assign(updateState, patch);
+  publishUpdateState();
 }
 
 diagnosticLog("main loaded");
@@ -147,22 +165,86 @@ function findOpenPort() {
   });
 }
 
-function requestStatus(url) {
+function requestBackendStatus(url) {
   return new Promise((resolve, reject) => {
     const request = http.get(`${url}/api/status`, (response) => {
-      response.resume();
-      if (response.statusCode && response.statusCode >= 200 && response.statusCode < 300) {
-        resolve();
-      } else {
-        reject(new Error(`Backend returned HTTP ${response.statusCode}`));
-      }
+      let body = "";
+      response.setEncoding("utf8");
+      response.on("data", (chunk) => {
+        body += chunk;
+      });
+      response.on("error", reject);
+      response.on("end", () => {
+        if (!response.statusCode || response.statusCode < 200 || response.statusCode >= 300) {
+          reject(new Error(`Backend returned HTTP ${response.statusCode}`));
+          return;
+        }
+        try {
+          resolve(body ? JSON.parse(body) : {});
+        } catch (error) {
+          reject(new Error(`Backend returned invalid JSON: ${error.message}`));
+        }
+      });
     });
     request.on("error", reject);
     request.setTimeout(2000, () => {
-      request.destroy(new Error("Backend healthcheck timed out."));
+      request.destroy(new Error("Backend status request timed out."));
     });
   });
 }
+
+async function requestStatus(url) {
+  await requestBackendStatus(url);
+}
+
+async function liveStreamCount() {
+  if (!backendUrl) return 0;
+  try {
+    const payload = await requestBackendStatus(backendUrl);
+    if (!payload || typeof payload !== "object" || typeof payload.streams !== "object" || !payload.streams) {
+      return 0;
+    }
+    return Object.values(payload.streams).filter((stream) => stream && stream.running).length;
+  } catch (error) {
+    diagnosticLog("live stream status check failed", error);
+    return 0;
+  }
+}
+
+async function requestQuit(source = "unknown") {
+  if (isQuitting || quitRequestInFlight) return false;
+  quitRequestInFlight = true;
+  diagnosticLog(`quit requested source=${source}`);
+  try {
+    const running = await liveStreamCount();
+    if (running > 0) {
+      const countLabel = running === 1 ? "1 live stream is" : `${running} live streams are`;
+      const streamLabel = running === 1 ? "stream" : "streams";
+      await dialog.showMessageBox(mainWindow || undefined, {
+        type: "warning",
+        buttons: ["OK"],
+        defaultId: 0,
+        noLink: true,
+        title: "Stop streams before closing",
+        message: `${countLabel} still running.`,
+        detail: `To protect your live broadcast, Castarro cannot close right now.\n\nPlease stop all running ${streamLabel}, then close or restart the app.`
+      });
+      return false;
+    }
+
+    isQuitting = true;
+    app.quit();
+    return true;
+  } finally {
+    quitRequestInFlight = false;
+  }
+}
+
+ipcMain.handle("desktop:get-update-status", () => ({ ...updateState }));
+ipcMain.handle("desktop:request-quit", async () => {
+  const ok = await requestQuit("renderer");
+  return { ok };
+});
 
 async function waitForBackend(url) {
   const startedAt = Date.now();
@@ -237,11 +319,19 @@ function createMainWindow() {
   });
 
   mainWindow.once("ready-to-show", () => mainWindow.show());
+  mainWindow.webContents.on("did-finish-load", () => {
+    publishUpdateState();
+  });
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   mainWindow.webContents.on("will-navigate", (event, url) => {
     if (backendUrl && url.startsWith(backendUrl)) return;
     if (url.startsWith("data:text/html")) return;
     event.preventDefault();
+  });
+  mainWindow.on("close", (event) => {
+    if (isQuitting) return;
+    event.preventDefault();
+    requestQuit("window-close").catch((error) => diagnosticLog("window close guard failed", error));
   });
   mainWindow.on("closed", () => {
     diagnosticLog("main window closed");
@@ -258,7 +348,7 @@ function createMenu() {
         { label: "Open Data Folder", click: () => shell.openPath(dataRoot()) },
         { label: "Open Logs Folder", click: () => shell.openPath(logRoot()) },
         { type: "separator" },
-        { label: "Quit", role: "quit" }
+        { label: "Quit", click: () => requestQuit("menu").catch((error) => diagnosticLog("menu quit failed", error)) }
       ]
     },
     {
@@ -289,28 +379,92 @@ function createTray() {
     { label: "Open Data Folder", click: () => shell.openPath(dataRoot()) },
     { label: "Open Logs Folder", click: () => shell.openPath(logRoot()) },
     { type: "separator" },
-    { label: "Quit", role: "quit" }
+    { label: "Quit", click: () => requestQuit("tray").catch((error) => diagnosticLog("tray quit failed", error)) }
   ]));
 }
 
 function configureAutoUpdates() {
   if (!app.isPackaged || process.env.STREAM_DISABLE_AUTO_UPDATE === "1" || process.env.STREAM_HEADLESS_SMOKE === "1") {
     diagnosticLog("auto updates skipped");
+    setUpdateState({
+      status: "disabled",
+      version: null,
+      downloaded: false,
+      percent: 0,
+      message: ""
+    });
     return;
+  }
+
+  if (!autoUpdater) {
+    try {
+      ({ autoUpdater } = require("electron-updater"));
+    } catch (error) {
+      diagnosticLog("auto updater unavailable", error);
+      setUpdateState({
+        status: "error",
+        message: "Auto update module could not be loaded."
+      });
+      return;
+    }
   }
 
   autoUpdater.autoDownload = true;
   autoUpdater.autoInstallOnAppQuit = true;
-  autoUpdater.on("checking-for-update", () => diagnosticLog("checking for update"));
-  autoUpdater.on("update-available", (info) => diagnosticLog(`update available ${info.version || ""}`));
-  autoUpdater.on("update-not-available", (info) => diagnosticLog(`update not available ${info.version || ""}`));
+  autoUpdater.on("checking-for-update", () => {
+    diagnosticLog("checking for update");
+    setUpdateState({
+      status: "checking",
+      message: ""
+    });
+  });
+  autoUpdater.on("update-available", (info) => {
+    const version = info.version || null;
+    diagnosticLog(`update available ${version || ""}`);
+    setUpdateState({
+      status: "available",
+      version,
+      downloaded: false,
+      percent: 0,
+      message: ""
+    });
+  });
+  autoUpdater.on("update-not-available", (info) => {
+    diagnosticLog(`update not available ${info.version || ""}`);
+    setUpdateState({
+      status: "idle",
+      version: null,
+      downloaded: false,
+      percent: 0,
+      message: ""
+    });
+  });
   autoUpdater.on("download-progress", (progress) => {
-    diagnosticLog(`update download ${Math.round(progress.percent || 0)}%`);
+    const percent = Math.round(progress.percent || 0);
+    diagnosticLog(`update download ${percent}%`);
+    setUpdateState({
+      status: "downloading",
+      percent
+    });
   });
   autoUpdater.on("update-downloaded", (info) => {
-    diagnosticLog(`update downloaded ${info.version || ""}; will install when app quits`);
+    const version = info.version || null;
+    diagnosticLog(`update downloaded ${version || ""}; will install when app quits`);
+    setUpdateState({
+      status: "downloaded",
+      version,
+      downloaded: true,
+      percent: 100,
+      message: "Update downloaded and ready for next restart."
+    });
   });
-  autoUpdater.on("error", (error) => diagnosticLog("auto update failed", error));
+  autoUpdater.on("error", (error) => {
+    diagnosticLog("auto update failed", error);
+    setUpdateState({
+      status: "error",
+      message: error?.message || String(error || "Update error")
+    });
+  });
 
   const check = () => {
     autoUpdater.checkForUpdates().catch((error) => diagnosticLog("update check failed", error));
@@ -460,9 +614,13 @@ app.on("activate", () => {
   }
 });
 
-app.on("before-quit", () => {
+app.on("before-quit", (event) => {
+  if (!isQuitting) {
+    event.preventDefault();
+    requestQuit("before-quit").catch((error) => diagnosticLog("before-quit guard failed", error));
+    return;
+  }
   diagnosticLog("before quit");
-  isQuitting = true;
   if (updateCheckTimer) clearInterval(updateCheckTimer);
   stopBackend();
 });

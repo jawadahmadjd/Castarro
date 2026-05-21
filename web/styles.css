@@ -234,6 +234,33 @@ h3 {
   font-size: 0.92rem;
 }
 
+.hidden {
+  display: none !important;
+}
+
+.update-banner {
+  margin-bottom: 18px;
+  border-style: solid;
+  border-color: rgba(31, 111, 98, 0.35);
+  background: rgba(31, 111, 98, 0.08);
+  color: var(--ink);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.update-banner.ready {
+  border-color: rgba(45, 123, 79, 0.45);
+  background: rgba(45, 123, 79, 0.14);
+}
+
+.update-banner.error {
+  border-color: rgba(179, 66, 56, 0.45);
+  background: rgba(179, 66, 56, 0.08);
+  color: var(--danger);
+}
+
 .notice.warn {
   border-color: rgba(179, 66, 56, 0.45);
   color: var(--danger);
@@ -781,6 +808,11 @@ pre {
   }
 
   .row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .update-banner {
     align-items: stretch;
     flex-direction: column;
   }

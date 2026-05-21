@@ -1,5 +1,19 @@
-const { contextBridge } = require("electron");
+const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("desktopShell", {
-  packaged: true
+  packaged: true,
+  onUpdateStatus(callback) {
+    if (typeof callback !== "function") {
+      return () => {};
+    }
+    const listener = (_event, payload) => callback(payload);
+    ipcRenderer.on("desktop:update-status", listener);
+    return () => ipcRenderer.removeListener("desktop:update-status", listener);
+  },
+  getUpdateStatus() {
+    return ipcRenderer.invoke("desktop:get-update-status");
+  },
+  requestQuit() {
+    return ipcRenderer.invoke("desktop:request-quit");
+  }
 });
