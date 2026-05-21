@@ -12,9 +12,11 @@ const state = {
   previewChannel: "",
   previewUrl: "",
   previewHls: null,
+  updateStatus: null,
 };
 
 const $ = (id) => document.getElementById(id);
+const desktopBridge = () => (window.desktopShell && typeof window.desktopShell === "object" ? window.desktopShell : null);
 
 const defaultLiveProfile = () => ({
   mode: "copy",
@@ -133,6 +135,76 @@ async function refresh() {
     renderSettingsForms();
   }
   state.hadRunningSettingsTask = runningSettingsTask;
+  renderUpdateBanner();
+}
+
+async function initDesktopIntegration() {
+  const bridge = desktopBridge();
+  if (!bridge) return;
+
+  if (typeof bridge.getUpdateStatus === "function") {
+    try {
+      state.updateStatus = await bridge.getUpdateStatus();
+      renderUpdateBanner();
+    } catch (_error) {
+      // Keep UI usable if desktop bridge is unavailable.
+    }
+  }
+
+  if (typeof bridge.onUpdateStatus === "function") {
+    bridge.onUpdateStatus((payload) => {
+      state.updateStatus = payload || null;
+      renderUpdateBanner();
+    });
+  }
+}
+
+function renderUpdateBanner() {
+  const banner = $("updateBanner");
+  const textNode = $("updateBannerText");
+  const restartButton = $("restartToUpdate");
+  if (!banner || !textNode) return;
+
+  const update = state.updateStatus || {};
+  const status = String(update.status || "idle");
+  const version = update.version ? ` ${update.version}` : "";
+  const percent = Number.isFinite(update.percent) ? Math.max(0, Math.min(100, Math.round(update.percent))) : 0;
+
+  let show = false;
+  let ready = false;
+  let hasError = false;
+  let message = "";
+
+  if (status === "available") {
+    show = true;
+    message = `Update${version} is available. Downloading in the background.`;
+  } else if (status === "downloading") {
+    show = true;
+    message = `Update${version} is downloading in the background (${percent}%).`;
+  } else if (status === "downloaded") {
+    show = true;
+    ready = true;
+    message = `Update${version} is ready and will install automatically on your next restart.`;
+  } else if (status === "error") {
+    show = true;
+    hasError = true;
+    message = `Update check failed${update.message ? `: ${update.message}` : "."}`;
+  }
+
+  if (!show) {
+    banner.classList.add("hidden");
+    banner.classList.remove("ready", "error");
+    if (restartButton) restartButton.hidden = true;
+    return;
+  }
+
+  banner.classList.remove("hidden");
+  banner.classList.toggle("ready", ready);
+  banner.classList.toggle("error", hasError);
+  textNode.textContent = message;
+  if (restartButton) {
+    restartButton.hidden = !ready || typeof desktopBridge()?.requestQuit !== "function";
+  }
 }
 
 function renderConfigSelect(configs) {
@@ -204,26 +276,17 @@ function renderChannels(payload) {
 }
 
 function streamKeyLabel(channel) {
-  const configChannel = configChannelForStatus(channel);
-  const inlineKeyMasked = channel.stream_key_masked || maskSecret(configChannel.stream_key);
   const envFieldValue = channel.stream_key_env || "";
   if (channel.stream_key_env && channel.stream_key_env_has_value) {
     return `key env: ${channel.stream_key_env} (set)`;
   }
-  if (inlineKeyMasked) {
-    return `inline key: ${inlineKeyMasked}`;
-  }
   if (looksLikeDirectStreamKey(envFieldValue)) {
-    return `inline key (from env field): ${maskSecret(envFieldValue)}`;
+    return `direct key: ${maskSecret(envFieldValue)}`;
   }
   if (envFieldValue) {
     return `key env: ${channel.stream_key_env} (not set)`;
   }
   return "stream key missing";
-}
-
-function configChannelForStatus(channel) {
-  return (state.configData?.channels || []).find((configChannel) => configChannel.name === channel.name) || {};
 }
 
 function maskSecret(value) {
@@ -902,9 +965,7 @@ function liveChannelCard(channel, index) {
         </div>
         <div class="form-grid">
           ${channelInput("name", "Channel name", channel.name || "")}
-          ${channelInput("stream_key_env", "Stream key env name or direct key", channel.stream_key_env || "", "text", "Example env name: YT_INSIDE_US_KEY. You can also paste stream key directly here.")}
-          ${channelInput("stream_key", "Inline stream key (optional)", channel.stream_key || "", "password", maskedKeyHint(channel.stream_key))}
-          ${channelInput("rtmp_url", "Full RTMP URL (optional)", channel.rtmp_url || "")}
+          ${channelInput("stream_key_env", "Stream key", channel.stream_key_env || "", "text", "")}
           ${channelInput("youtube_studio_url", "YouTube Studio URL", channel.youtube_studio_url || "")}
         </div>
         <div class="nested-card">
@@ -1010,11 +1071,6 @@ function liveSelect(name, label, value, options, hint = "", onchange = "") {
       ${hint ? `<span class="setting-note">${escapeHtml(hint)}</span>` : ""}
     </label>
   `;
-}
-
-function maskedKeyHint(value) {
-  const masked = maskSecret(value);
-  return masked ? `Saved inline key: ${masked}` : "";
 }
 
 function checkboxInput(name, label, checked) {
@@ -1209,6 +1265,38 @@ function coerceValue(value, type) {
   return value;
 }
 
+function looksLikeRtmpUrl(value) {
+  const text = String(value || "").trim().toLowerCase();
+  return text.startsWith("rtmp://") || text.startsWith("rtmps://");
+}
+
+function validateConfigData(data) {
+  const channels = Array.isArray(data?.channels) ? data.channels : [];
+  for (const channel of channels) {
+    const channelName = String(channel?.name || "Unnamed channel").trim() || "Unnamed channel";
+    const fieldValue = String(channel?.stream_key_env || "").trim();
+    if (fieldValue && looksLikeRtmpUrl(fieldValue)) {
+      throw new Error(
+        `Channel "${channelName}": do not paste full RTMP URL in "Stream key". `
+        + "Paste only the stream key."
+      );
+    }
+  }
+}
+
+function trimStreamKeyFields(data) {
+  const channels = Array.isArray(data?.channels) ? data.channels : [];
+  for (const channel of channels) {
+    if (!channel || typeof channel !== "object") continue;
+    if (typeof channel.stream_key_env === "string") {
+      channel.stream_key_env = channel.stream_key_env.trim();
+    }
+    if (typeof channel.stream_key === "string") {
+      channel.stream_key = channel.stream_key.trim();
+    }
+  }
+}
+
 async function createConfig() {
   await api("/api/config/create", {
     method: "POST",
@@ -1233,6 +1321,8 @@ async function saveConfig() {
 }
 
 async function saveConfigData(data) {
+  trimStreamKeyFields(data);
+  validateConfigData(data);
   await api("/api/config/save", {
     method: "POST",
     body: JSON.stringify({ config: state.config, text: JSON.stringify(data, null, 2) }),
@@ -1383,6 +1473,18 @@ if ($("previewChannelSelect")) {
     renderPreview(state.status?.streams || {});
   });
 }
+if ($("restartToUpdate")) {
+  $("restartToUpdate").addEventListener("click", async () => {
+    const bridge = desktopBridge();
+    if (!bridge || typeof bridge.requestQuit !== "function") return;
+    try {
+      await bridge.requestQuit();
+    } catch (error) {
+      toast(error.message);
+    }
+  });
+}
 
+initDesktopIntegration().catch(() => {});
 refresh().then(loadConfigText).catch((error) => toast(error.message));
 setInterval(() => refresh().catch((error) => toast(error.message)), 2500);

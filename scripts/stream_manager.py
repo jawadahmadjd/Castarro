@@ -147,32 +147,42 @@ def write_concat_playlist(
 
 
 def output_url(channel: dict[str, Any], defaults: dict[str, Any]) -> str:
-    if channel.get("rtmp_url"):
-        return str(channel["rtmp_url"])
-
-    stream_key = channel.get("stream_key")
-    key_env = channel.get("stream_key_env")
+    # Primary flow: user fills "stream_key_env" with either an env var name
+    # or a direct stream key; app builds final RTMP URL automatically.
+    stream_key = str(channel.get("stream_key") or "").strip()
+    key_env = str(channel.get("stream_key_env") or "").strip()
     if key_env:
-        env_stream_key = os.environ.get(str(key_env))
+        env_stream_key = str(os.environ.get(key_env) or "").strip()
         if env_stream_key:
             stream_key = env_stream_key
         elif not stream_key:
-            inferred_key = infer_inline_key_from_env_field(str(key_env))
+            inferred_key = infer_inline_key_from_env_field(key_env)
             if inferred_key:
                 stream_key = inferred_key
             else:
                 raise SystemExit(
-                    f"Environment variable {key_env} is not set for channel '{channel.get('name')}', "
-                    "and no inline stream key is configured."
+                    f"Environment variable {key_env} is not set for channel '{channel.get('name')}'. "
+                    "Set that variable or paste the direct key in 'stream_key_env'."
                 )
 
-    if not stream_key:
-        raise SystemExit(
-            f"Channel '{channel.get('name')}' needs rtmp_url, stream_key, or stream_key_env."
-        )
+    if stream_key:
+        base = str(channel.get("rtmp_base") or defaults.get("rtmp_base")).strip().rstrip("/")
+        return f"{base}/{stream_key}"
 
-    base = str(channel.get("rtmp_base") or defaults.get("rtmp_base")).rstrip("/")
-    return f"{base}/{stream_key}"
+    # Legacy fallback for old configs that only had rtmp_url.
+    legacy_url = str(channel.get("rtmp_url") or "").strip()
+    if legacy_url:
+        if not url_has_key_segment(legacy_url):
+            raise SystemExit(
+                f"Channel '{channel.get('name')}' has an incomplete rtmp_url. "
+                "Use 'stream_key_env' (env var name or direct key) so the app can build the full URL."
+            )
+        return legacy_url
+
+    raise SystemExit(
+        f"Channel '{channel.get('name')}' needs a stream key in 'stream_key_env' "
+        "(env var name or direct key)."
+    )
 
 
 def mask_url(url: str) -> str:
@@ -190,6 +200,14 @@ def infer_inline_key_from_env_field(value: str | None) -> str | None:
     if re.fullmatch(r"[A-Za-z0-9_-]{6,}", text) and "-" in text:
         return text
     return None
+
+
+def url_has_key_segment(url: str) -> bool:
+    text = str(url or "").strip().rstrip("/")
+    if "/" not in text:
+        return False
+    segment = text.rsplit("/", 1)[1]
+    return bool(re.fullmatch(r"[A-Za-z0-9_-]{6,}", segment))
 
 
 def preview_manifest_path(config_dir: Path, config: dict[str, Any], channel: dict[str, Any]) -> Path:

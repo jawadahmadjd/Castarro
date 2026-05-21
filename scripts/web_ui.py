@@ -291,10 +291,40 @@ def load_config_or_none(config_name: str) -> tuple[dict[str, Any] | None, str | 
 
 
 def save_config(config_name: str, config: dict[str, Any]) -> None:
+    trim_stream_key_fields(config)
+    validate_stream_key_fields(config)
     target = ROOT / config_name
     target.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
     ensure_media_folders(config)
     app_db.sync_config(config_name, config, "save")
+
+
+def looks_like_rtmp_url(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    return text.startswith("rtmp://") or text.startswith("rtmps://")
+
+
+def trim_stream_key_fields(config: dict[str, Any]) -> None:
+    for channel in config.get("channels", []):
+        if not isinstance(channel, dict):
+            continue
+        stream_key_env = channel.get("stream_key_env")
+        if isinstance(stream_key_env, str):
+            channel["stream_key_env"] = stream_key_env.strip()
+        stream_key = channel.get("stream_key")
+        if isinstance(stream_key, str):
+            channel["stream_key"] = stream_key.strip()
+
+
+def validate_stream_key_fields(config: dict[str, Any]) -> None:
+    for channel in config.get("channels", []):
+        channel_name = str(channel.get("name") or "Unnamed channel").strip() or "Unnamed channel"
+        stream_key_env = str(channel.get("stream_key_env") or "").strip()
+        if stream_key_env and looks_like_rtmp_url(stream_key_env):
+            raise ValueError(
+                f"Channel '{channel_name}': do not paste full RTMP URL in 'Stream key'. "
+                "Paste only the stream key."
+            )
 
 
 def resolve_project_path(value: str) -> Path:
