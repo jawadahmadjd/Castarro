@@ -353,6 +353,37 @@ textarea {
   display: block;
 }
 
+.folder-fields {
+  display: grid;
+  gap: 14px;
+}
+
+.folder-field {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.45);
+}
+
+.folder-field-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+
+.folder-field-head h3 {
+  margin: 0;
+}
+
+.folder-field-head code {
+  color: var(--accent);
+  font-weight: 800;
+  font-size: 0.82rem;
+}
+
 .form-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -758,6 +789,21 @@ pre {
   color: var(--ink);
   font-size: 0.84rem;
   font-weight: 700;
+}
+
+.task-headsup {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.task-headsup-text {
+  color: var(--danger);
+  font-size: 0.8rem;
+  font-weight: 700;
+  border-left: 3px solid rgba(179, 66, 56, 0.4);
+  padding-left: 8px;
+  overflow-wrap: anywhere;
 }
 
 .task-videos {

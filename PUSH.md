@@ -11,7 +11,9 @@ This repo now has a root-level script named `push` that automates release prepar
 After push to `main`, GitHub Actions (`.github/workflows/release-windows.yml`) takes over:
 
 - checks if tag `v<version>` already exists
+- detects whether Windows signing secrets are configured
 - builds installer + `latest.yml`
+- verifies installer Authenticode signature (when signing is enabled)
 - publishes GitHub release assets
 - users receive app update via auto-updater
 

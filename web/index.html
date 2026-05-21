@@ -81,14 +81,27 @@
         <section class="panel">
           <div class="settings-menu">
             <div class="tabs">
-              <button class="tab active" id="settingsNormalizeTab" type="button">Video Normalization</button>
+              <button class="tab active" id="settingsFoldersTab" type="button">Folders</button>
+              <button class="tab" id="settingsNormalizeTab" type="button">Video Normalization</button>
               <button class="tab" id="settingsLiveTab" type="button">Live</button>
             </div>
             <button class="pill primary" id="saveSettings">Save settings</button>
           </div>
         </section>
 
-        <section id="settingsNormalizeView" class="settings-section active">
+        <section id="settingsFoldersView" class="settings-section active">
+          <section class="panel">
+            <div class="section-head">
+              <div>
+                <h2>Folder Paths</h2>
+                <p class="helper">Set where raw uploads are read from, where go-live files are written, and where logs are saved.</p>
+              </div>
+            </div>
+            <div class="folder-fields" id="folderSettingsFields"></div>
+          </section>
+        </section>
+
+        <section id="settingsNormalizeView" class="settings-section">
           <section class="panel">
             <div class="section-head">
               <div>

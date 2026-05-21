@@ -3,7 +3,7 @@ const state = {
   status: null,
   configData: null,
   activeTab: "control",
-  settingsTab: "normalize",
+  settingsTab: "folders",
   rawFilesByChannel: {},
   normalizedFilesByChannel: {},
   activeSettingsChannelIndex: 0,
@@ -321,6 +321,7 @@ function renderTasks(tasks) {
     const logId = `task-${task.id}`;
     const expanded = task.running || !!state.expandedTaskLogs[task.id];
     const videoLines = extractVideoLines(task.lines || []);
+    const headsUpLines = extractHeadsUpLines(task.lines || []);
     const started = formatTimestamp(task.started_at);
     const globalRun = runOrder.global[task.id] || "?";
     const channelRun = runOrder.channelAction[task.id] || "?";
@@ -343,6 +344,12 @@ function renderTasks(tasks) {
           <span>${escapeHtml(channel)} run #${escapeHtml(String(channelRun))}</span>
           <span>${escapeHtml(started)}</span>
         </div>
+        ${headsUpLines.length ? `
+          <div class="task-headsup">
+            <span class="badge warn">Name conflict handled</span>
+            <div class="task-headsup-text">${escapeHtml(headsUpLines[headsUpLines.length - 1])}</div>
+          </div>
+        ` : ""}
         <div class="task-summary">${escapeHtml(summary)}</div>
         ${videoLines.length ? `<div class="task-videos">${videoLines.slice(0, 2).map((line) => `<div class="task-video-line">${escapeHtml(line)}</div>`).join("")}</div>` : ""}
         <pre class="${expanded ? "" : "collapsed"}" data-log-id="${escapeAttr(logId)}">${escapeHtml(lines)}</pre>
@@ -384,6 +391,10 @@ function extractVideoLines(lines) {
       const path = match[1];
       return line.replace(path, shortPath(path));
     });
+}
+
+function extractHeadsUpLines(lines) {
+  return (lines || []).filter((line) => line.startsWith("HEADS-UP "));
 }
 
 function shortPath(pathText) {
@@ -664,6 +675,7 @@ function renderSettingsForms() {
   config.defaults = config.defaults || {};
   config.normalize_profile = config.normalize_profile || {};
   config.channels = Array.isArray(config.channels) ? config.channels : [];
+  $("folderSettingsFields").innerHTML = folderSettingsMarkup(config.defaults);
 
   $("normalizationChannels").innerHTML = config.channels.length
     ? config.channels.map((channel, index) => normalizationCard(channel, index)).join("")
@@ -699,6 +711,69 @@ function defaultNumberInput(name, label, value) {
       <input type="number" data-default-field="${escapeHtml(name)}" value="${escapeAttr(value)}">
     </label>
   `;
+}
+
+function folderSettingsMarkup(defaults) {
+  return [
+    folderSettingCard(
+      "raw_dir",
+      "Raw Videos Folder",
+      defaults.raw_dir || "Raw Videos",
+      "Source videos are read from here before normalization."
+    ),
+    folderSettingCard(
+      "normalized_dir",
+      "Go Live Videos Folder",
+      defaults.normalized_dir || "Go Live",
+      "Normalized files are written here and used for streaming playlists."
+    ),
+    folderSettingCard(
+      "log_dir",
+      "Logs Folder",
+      defaults.log_dir || "logs",
+      "FFmpeg and app logs are stored here for troubleshooting."
+    ),
+  ].join("");
+}
+
+function folderSettingCard(fieldName, title, value, helper) {
+  const canBrowse = supportsDesktopFolderPicker();
+  return `
+    <article class="folder-field">
+      <div class="folder-field-head">
+        <h3>${escapeHtml(title)}</h3>
+        <code>defaults.${escapeHtml(fieldName)}</code>
+      </div>
+      <div class="row wrap">
+        <label>
+          Path
+          <input type="text" data-default-field="${escapeHtml(fieldName)}" value="${escapeAttr(value)}">
+          <span class="setting-note">${escapeHtml(helper)}</span>
+        </label>
+        <button class="pill ghost" type="button" onclick="browseDefaultFolder('${escapeJs(fieldName)}').catch((error) => toast(error.message))" ${canBrowse ? "" : "disabled"}>Browse</button>
+      </div>
+      <div class="meta">${canBrowse ? "Pick any local folder. Save settings to apply." : "Desktop folder picker is unavailable in this browser. Enter the path manually and save settings."}</div>
+    </article>
+  `;
+}
+
+function supportsDesktopFolderPicker() {
+  return typeof desktopBridge()?.selectFolder === "function";
+}
+
+async function browseDefaultFolder(fieldName) {
+  const bridge = desktopBridge();
+  if (!bridge || typeof bridge.selectFolder !== "function") {
+    toast("Folder picker is unavailable in this browser.");
+    return;
+  }
+  const input = Array.from(document.querySelectorAll("[data-default-field]"))
+    .find((node) => node.dataset.defaultField === fieldName);
+  if (!input) return;
+  const picked = await bridge.selectFolder({ defaultPath: input.value || undefined });
+  if (!picked || picked.canceled || !picked.path) return;
+  input.value = picked.path;
+  toast("Folder selected. Save settings to apply.");
 }
 
 function normalizationCard(channel, index) {
@@ -742,6 +817,7 @@ function normalizationCard(channel, index) {
         ${task ? taskProgressMarkup(task) : ""}
         <div class="file-picker">
           <div class="file-list">${fileOptions}</div>
+          <div class="meta">If a normalized file name already exists, a new version like <code>-v2</code> is created and a heads-up appears in Activity.</div>
         </div>
         <div>
           <h3>Normalization Profile</h3>
@@ -1414,8 +1490,10 @@ function showTab(tab) {
 
 function showSettingsTab(tab) {
   state.settingsTab = tab;
+  $("settingsFoldersTab").classList.toggle("active", tab === "folders");
   $("settingsNormalizeTab").classList.toggle("active", tab === "normalize");
   $("settingsLiveTab").classList.toggle("active", tab === "live");
+  $("settingsFoldersView").classList.toggle("active", tab === "folders");
   $("settingsNormalizeView").classList.toggle("active", tab === "normalize");
   $("settingsLiveView").classList.toggle("active", tab === "live");
 }
@@ -1443,6 +1521,7 @@ function escapeJs(value) {
 
 $("tabControl").addEventListener("click", () => showTab("control"));
 $("tabSettings").addEventListener("click", () => showTab("settings"));
+$("settingsFoldersTab").addEventListener("click", () => showSettingsTab("folders"));
 $("settingsNormalizeTab").addEventListener("click", () => showSettingsTab("normalize"));
 $("settingsLiveTab").addEventListener("click", () => showSettingsTab("live"));
 
@@ -1485,6 +1564,7 @@ if ($("restartToUpdate")) {
   });
 }
 
+showSettingsTab(state.settingsTab);
 initDesktopIntegration().catch(() => {});
 refresh().then(loadConfigText).catch((error) => toast(error.message));
 setInterval(() => refresh().catch((error) => toast(error.message)), 2500);

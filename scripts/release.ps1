@@ -33,8 +33,17 @@ $Manifest = [ordered]@{
     product = $Package.build.productName
     version = $Package.version
     created_at = (Get-Date).ToUniversalTime().ToString("s") + "Z"
-    signed = [bool]($env:CSC_LINK -or $env:WIN_CSC_LINK)
+    signed = $false
+    signature_status = ""
+    signature_signer = ""
     artifacts = @()
+}
+
+$InstallerSignature = Get-AuthenticodeSignature -LiteralPath $Installer
+$Manifest.signed = [bool]($InstallerSignature.Status -eq "Valid")
+$Manifest.signature_status = [string]$InstallerSignature.Status
+if ($InstallerSignature.SignerCertificate) {
+    $Manifest.signature_signer = [string]$InstallerSignature.SignerCertificate.Subject
 }
 
 foreach ($Artifact in $Artifacts) {

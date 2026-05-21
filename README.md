@@ -348,6 +348,34 @@ Release verification:
 npm run release:check
 ```
 
+This builds the Windows installer, smoke-tests the packaged app, then silently installs the generated setup file into a temporary local folder to verify the installed EXE, Start Menu shortcut, Desktop shortcut, and first launch before publishing.
+
+## Windows Code Signing (Anti-Virus Trust)
+
+Unsigned installers are much more likely to be flagged by SmartScreen and antivirus engines.
+
+Local signed build:
+
+```powershell
+npm run dist:signed
+```
+
+This command fails if signing credentials are missing. If you prefer unsigned releases, use:
+
+```powershell
+npm run dist
+```
+
+Required environment variables (either pair works):
+
+```text
+WIN_CSC_LINK + WIN_CSC_KEY_PASSWORD
+or
+CSC_LINK + CSC_KEY_PASSWORD
+```
+
+GitHub Actions now signs automatically only when those secrets are present. If secrets are missing, the workflow still publishes an unsigned installer and prints a warning.
+
 ## Automatic Updates
 
 Castarro checks GitHub Releases for updates when the packaged app starts and then periodically while it is open. Updates are downloaded in the background and installed when the app quits, so users do not need to download a new installer manually.
@@ -375,4 +403,4 @@ To bump the app version and rebuild:
 powershell -ExecutionPolicy Bypass -File scripts/release.ps1 -Version 1.0.1
 ```
 
-If `CSC_LINK`/`CSC_KEY_PASSWORD` or `WIN_CSC_LINK`/`WIN_CSC_KEY_PASSWORD` are present in the environment, `electron-builder` can use them for Windows signing during the release build.
+If signing variables are missing, the release workflow publishes an unsigned installer (and users may still see browser/SmartScreen warnings).

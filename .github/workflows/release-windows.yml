@@ -21,6 +21,10 @@ jobs:
       CSC_IDENTITY_AUTO_DISCOVERY: false
       GH_TOKEN: ${{ github.token }}
       GITHUB_TOKEN: ${{ github.token }}
+      WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+      WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+      CSC_LINK: ${{ secrets.CSC_LINK }}
+      CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
 
     steps:
       - name: Check out source
@@ -65,15 +69,52 @@ jobs:
         shell: pwsh
         run: npm run bundle:runtime
 
-      - name: Build installer and update metadata
+      - name: Detect signing configuration
         if: steps.version.outputs.exists != 'true'
+        id: signing
         shell: pwsh
-        run: npx electron-builder --win nsis --publish never
+        run: |
+          $HasLink = -not [string]::IsNullOrWhiteSpace($env:WIN_CSC_LINK) -or -not [string]::IsNullOrWhiteSpace($env:CSC_LINK)
+          $HasPassword = -not [string]::IsNullOrWhiteSpace($env:WIN_CSC_KEY_PASSWORD) -or -not [string]::IsNullOrWhiteSpace($env:CSC_KEY_PASSWORD)
+          $Enabled = $HasLink -and $HasPassword
+          "enabled=$($Enabled.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+          if ($Enabled) {
+            Write-Host "::notice::Windows signing is enabled for this release."
+          } else {
+            Write-Host "::warning::Windows signing is not configured. Building unsigned installer (download warnings expected)."
+          }
+
+      - name: Validate signing configuration
+        if: steps.version.outputs.exists != 'true' && steps.signing.outputs.enabled == 'true'
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File scripts/assert_windows_signing.ps1
+
+      - name: Build signed installer and update metadata
+        if: steps.version.outputs.exists != 'true' && steps.signing.outputs.enabled == 'true'
+        shell: pwsh
+        run: npm run dist:signed
+
+      - name: Build unsigned installer and update metadata
+        if: steps.version.outputs.exists != 'true' && steps.signing.outputs.enabled != 'true'
+        shell: pwsh
+        run: npm run dist
+
+      - name: Verify installer signature
+        if: steps.version.outputs.exists != 'true' && steps.signing.outputs.enabled == 'true'
+        shell: pwsh
+        run: |
+          powershell -ExecutionPolicy Bypass -File scripts/verify_windows_signature.ps1 `
+            -Path "dist/Castarro-Setup-${{ steps.version.outputs.version }}.exe"
 
       - name: Smoke-test packaged app
         if: steps.version.outputs.exists != 'true'
         shell: pwsh
         run: npm run smoke:packaged
+
+      - name: Smoke-test Windows installer
+        if: steps.version.outputs.exists != 'true'
+        shell: pwsh
+        run: npm run smoke:installer
 
       - name: Create version tag
         if: steps.version.outputs.exists != 'true'

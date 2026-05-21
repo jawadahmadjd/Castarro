@@ -241,6 +241,20 @@ async function requestQuit(source = "unknown") {
 }
 
 ipcMain.handle("desktop:get-update-status", () => ({ ...updateState }));
+ipcMain.handle("desktop:select-folder", async (_event, payload) => {
+  const defaultPath = typeof payload?.defaultPath === "string" && payload.defaultPath.trim()
+    ? payload.defaultPath.trim()
+    : undefined;
+  const result = await dialog.showOpenDialog(mainWindow || undefined, {
+    title: "Select folder",
+    defaultPath,
+    properties: ["openDirectory", "createDirectory"],
+  });
+  if (result.canceled || !result.filePaths?.length) {
+    return { canceled: true, path: null };
+  }
+  return { canceled: false, path: result.filePaths[0] };
+});
 ipcMain.handle("desktop:request-quit", async () => {
   const ok = await requestQuit("renderer");
   return { ok };

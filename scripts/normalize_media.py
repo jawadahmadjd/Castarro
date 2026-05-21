@@ -239,6 +239,17 @@ def normalize_rate_control_mode(value: Any) -> str:
     return "cbr" if mode == "cbr" else "vbr"
 
 
+def next_versioned_output(path: Path) -> Path:
+    if not path.exists():
+        return path
+    counter = 2
+    while True:
+        candidate = path.with_name(f"{path.stem}-v{counter}{path.suffix}")
+        if not candidate.exists():
+            return candidate
+        counter += 1
+
+
 def relative_or_absolute(config_dir: Path, path: Path) -> str:
     try:
         return path.resolve().relative_to(config_dir).as_posix()
@@ -272,16 +283,19 @@ def normalize_channel(
         if not source.exists():
             raise SystemExit(f"Source file does not exist: {source}")
 
-        output = channel_dir / f"{index:04d}-{source.stem}.mp4"
+        default_output = channel_dir / f"{index:04d}-{source.stem}.mp4"
+        output = default_output
+        if default_output.exists() and not force:
+            output = next_versioned_output(default_output)
+            print(
+                f"HEADS-UP existing normalized video: {default_output.name}; creating {output.name}",
+                flush=True,
+            )
         normalized_files.append(output)
 
-        if output.exists() and not force:
-            print(f"FILE {index}/{len(sources)} skip {source.name}", flush=True)
-            print(f"PROGRESS file={index} total={len(sources)} percent=100", flush=True)
-            continue
-
         command = build_ffmpeg_command(ffmpeg_path, source, output, selected_profile)
-        print(f"FILE {index}/{len(sources)} encode {source.name} -> {output.name}", flush=True)
+        action = "replace" if default_output.exists() and force and output == default_output else "encode"
+        print(f"FILE {index}/{len(sources)} {action} {source.name} -> {output.name}", flush=True)
         if dry_run:
             print("  " + subprocess.list2cmdline(command), flush=True)
             print(f"PROGRESS file={index} total={len(sources)} percent=100", flush=True)
@@ -333,7 +347,11 @@ def main() -> int:
     parser.add_argument("--config", default="config.json", help="Source config JSON.")
     parser.add_argument("--output-config", default="config.ready.json", help="Ready-to-stream config JSON.")
     parser.add_argument("--channel", help="Normalize one channel by name.")
-    parser.add_argument("--force", action="store_true", help="Re-encode even if output files already exist.")
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite matching output names instead of creating versioned copies.",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Print FFmpeg commands without encoding.")
     parser.add_argument(
         "--include-disabled",

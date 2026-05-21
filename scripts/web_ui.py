@@ -57,6 +57,10 @@ def task_progress(
     }
 
     for line in lines:
+        if line.startswith("HEADS-UP "):
+            progress["message"] = line
+            continue
+
         task_match = re.search(r"^TASK channel=(.+) total=(\d+)", line)
         if task_match:
             progress["channel"] = task_match.group(1)

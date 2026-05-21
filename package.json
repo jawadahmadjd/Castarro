@@ -1,6 +1,6 @@
 {
   "name": "castarro-desktop",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Windows desktop package for Castarro, a local multi-channel live streaming dashboard.",
   "main": "desktop/main.js",
   "author": "Jawad Ahmad",
@@ -10,12 +10,15 @@
     "electron": "electron .",
     "pack": "electron-builder --dir",
     "dist": "electron-builder --win nsis --publish never",
+    "dist:signed": "powershell -ExecutionPolicy Bypass -File scripts/dist_signed.ps1",
     "bundle:runtime": "powershell -ExecutionPolicy Bypass -File scripts/package_runtime.ps1",
     "icon": "node scripts/create_icon.js",
     "smoke:backend": "python scripts/web_ui.py",
     "smoke:packaged": "powershell -ExecutionPolicy Bypass -File scripts/smoke_packaged.ps1",
+    "smoke:installer": "powershell -ExecutionPolicy Bypass -File scripts/smoke_installer.ps1",
+    "verify:signature": "powershell -ExecutionPolicy Bypass -File scripts/verify_windows_signature.ps1",
     "release": "powershell -ExecutionPolicy Bypass -File scripts/release.ps1",
-    "release:check": "npm run icon && npm run bundle:runtime && npm run dist && npm run smoke:packaged"
+    "release:check": "npm run icon && npm run bundle:runtime && npm run dist && npm run smoke:packaged && npm run smoke:installer"
   },
   "devDependencies": {
     "electron": "^31.7.7",
@@ -81,7 +84,9 @@
       "perMachine": false,
       "deleteAppDataOnUninstall": false,
       "createDesktopShortcut": true,
-      "createStartMenuShortcut": true
+      "createStartMenuShortcut": true,
+      "shortcutName": "Castarro",
+      "runAfterFinish": true
     }
   },
   "dependencies": {
