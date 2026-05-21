@@ -44,7 +44,16 @@ function Remove-SmokeTree {
 function Test-WritableDirectory {
     param([string]$Path)
 
-    if (-not $Path -or -not (Test-Path -LiteralPath $Path)) {
+    if (-not $Path) {
+        return $false
+    }
+    try {
+        New-Item -ItemType Directory -Force -Path $Path | Out-Null
+    }
+    catch {
+        return $false
+    }
+    if (-not (Test-Path -LiteralPath $Path)) {
         return $false
     }
     $Probe = Join-Path $Path ".castarro-write-probe"
@@ -58,16 +67,44 @@ function Test-WritableDirectory {
     }
 }
 
+function Test-PathContainsWhitespace {
+    param([string]$Path)
+    return [bool]($Path -match "\s")
+}
+
+function Assert-NoRunningCastarro {
+    $Running = @(Get-Process -Name "Castarro" -ErrorAction SilentlyContinue)
+    if ($Running.Count -gt 0) {
+        $Ids = ($Running | ForEach-Object { $_.Id }) -join ", "
+        throw "Castarro is currently running (PID: $Ids). Stop active streams and close Castarro before running installer smoke."
+    }
+}
+
 $SmokeRootName = "castarro-installer-smoke"
-$SmokeBaseCandidates = @(
-    $env:CASTARRO_INSTALLER_SMOKE_ROOT,
-    $env:RUNNER_TEMP,
-    "C:\tmp",
-    $Root
-) | Where-Object { $_ }
-$SmokeBase = $SmokeBaseCandidates | Where-Object { Test-WritableDirectory -Path $_ } | Select-Object -First 1
-if (-not $SmokeBase) {
-    throw "No writable directory found for installer smoke test."
+$SmokeBase = $null
+if ($env:CASTARRO_INSTALLER_SMOKE_ROOT) {
+    $SmokeBase = $env:CASTARRO_INSTALLER_SMOKE_ROOT
+    if (Test-PathContainsWhitespace -Path $SmokeBase) {
+        throw "Installer smoke base path cannot contain spaces for NSIS /D reliability. Current value: $SmokeBase"
+    }
+    if (-not (Test-WritableDirectory -Path $SmokeBase)) {
+        throw "Installer smoke base path is not writable: $SmokeBase"
+    }
+}
+else {
+    $Candidates = @(
+        "C:\tmp",
+        $env:RUNNER_TEMP
+    ) | Where-Object { $_ -and -not (Test-PathContainsWhitespace -Path $_) }
+    foreach ($Candidate in $Candidates) {
+        if (Test-WritableDirectory -Path $Candidate) {
+            $SmokeBase = $Candidate
+            break
+        }
+    }
+    if (-not $SmokeBase) {
+        throw "No writable no-space base path found for installer smoke. Set CASTARRO_INSTALLER_SMOKE_ROOT to a path like C:\tmp."
+    }
 }
 
 $SmokeRoot = Join-Path $SmokeBase $SmokeRootName
@@ -136,13 +173,44 @@ function Find-ProductShortcut {
     return $null
 }
 
+function Invoke-InstallerWithRetry {
+    param(
+        [string]$InstallerPath,
+        [string]$InstallDir,
+        [int]$MaxAttempts = 3
+    )
+
+    for ($Attempt = 1; $Attempt -le $MaxAttempts; $Attempt++) {
+        try {
+            if ($Attempt -gt 1) {
+                Write-Host "Retrying installer smoke ($Attempt/$MaxAttempts)"
+            }
+            # NSIS requirement: /D must be the final argument and must not be quoted.
+            Invoke-ProcessChecked -FilePath $InstallerPath -Arguments "/S /D=$InstallDir" -TimeoutSeconds 180
+            return
+        }
+        catch {
+            $Message = $_.Exception.Message
+            if ($Attempt -eq $MaxAttempts) {
+                throw
+            }
+            Write-Warning "Installer attempt $Attempt failed. $Message"
+            Write-Host "Cleaning smoke directory before retry"
+            Remove-SmokeTree -Path $SmokeRoot
+            New-Item -ItemType Directory -Force -Path $SmokeRoot | Out-Null
+            Start-Sleep -Seconds (2 * $Attempt)
+        }
+    }
+}
+
 Remove-SmokeTree -Path $SmokeRoot
 New-Item -ItemType Directory -Force -Path $SmokeRoot | Out-Null
 
 $Uninstaller = Join-Path $InstallDir "Uninstall $ProductName.exe"
 try {
+    Assert-NoRunningCastarro
     Write-Host "Installing $ProductName silently to $InstallDir"
-    Invoke-ProcessChecked -FilePath $InstallerPath -Arguments "/S `"/D=$InstallDir`"" -TimeoutSeconds 180
+    Invoke-InstallerWithRetry -InstallerPath $InstallerPath -InstallDir $InstallDir -MaxAttempts 3
 
     if (-not (Test-Path -LiteralPath $InstalledExe)) {
         throw "Installed executable was not created: $InstalledExe"

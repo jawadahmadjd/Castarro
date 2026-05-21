@@ -10,6 +10,7 @@ const HEALTHCHECK_INTERVAL_MS = 500;
 const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const PRODUCT_NAME = "Castarro";
 const LEGACY_PRODUCT_NAME = ["FFmpeg", "Live", "Streaming"].join(" ");
+const BACKEND_INFO_FILE = "backend-info.json";
 
 let mainWindow = null;
 let tray = null;
@@ -18,6 +19,9 @@ let backendPort = null;
 let backendUrl = null;
 let isQuitting = false;
 let quitRequestInFlight = false;
+let quitMode = "none";
+let appBootstrapped = false;
+let installUpdateOnQuit = false;
 let legacyDataRoot = null;
 let updateCheckTimer = null;
 const updateState = {
@@ -125,6 +129,61 @@ function logRoot() {
   return path.join(userDataRoot(), "logs");
 }
 
+function backendInfoPath() {
+  return path.join(dataRoot(), BACKEND_INFO_FILE);
+}
+
+function readBackendInfo() {
+  try {
+    const raw = fs.readFileSync(backendInfoPath(), "utf8");
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return null;
+    const port = Number(parsed.port);
+    const pid = Number(parsed.pid);
+    if (!Number.isFinite(port) || port <= 0) return null;
+    if (!Number.isFinite(pid) || pid <= 0) return null;
+    return {
+      port,
+      pid,
+      url: `http://127.0.0.1:${port}`,
+      startedAt: Number(parsed.startedAt) || null,
+    };
+  } catch (_error) {
+    return null;
+  }
+}
+
+function writeBackendInfo({ pid, port }) {
+  mkdirp(dataRoot());
+  fs.writeFileSync(
+    backendInfoPath(),
+    JSON.stringify(
+      {
+        pid,
+        port,
+        startedAt: Date.now(),
+      },
+      null,
+      2,
+    ) + "\n",
+    "utf8",
+  );
+}
+
+function removeBackendInfo() {
+  fs.rmSync(backendInfoPath(), { force: true });
+}
+
+function isProcessAlive(pid) {
+  if (!Number.isFinite(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (_error) {
+    return false;
+  }
+}
+
 function executableName(name) {
   return process.platform === "win32" ? `${name}.exe` : name;
 }
@@ -193,6 +252,47 @@ function requestBackendStatus(url) {
   });
 }
 
+function requestBackendPost(url, apiPath, payload = {}) {
+  return new Promise((resolve, reject) => {
+    const body = JSON.stringify(payload);
+    const request = http.request(
+      `${url}${apiPath}`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Content-Length": Buffer.byteLength(body),
+        },
+      },
+      (response) => {
+        let text = "";
+        response.setEncoding("utf8");
+        response.on("data", (chunk) => {
+          text += chunk;
+        });
+        response.on("error", reject);
+        response.on("end", () => {
+          if (!response.statusCode || response.statusCode < 200 || response.statusCode >= 300) {
+            reject(new Error(`Backend returned HTTP ${response.statusCode} for ${apiPath}`));
+            return;
+          }
+          try {
+            resolve(text ? JSON.parse(text) : {});
+          } catch (error) {
+            reject(new Error(`Backend returned invalid JSON for ${apiPath}: ${error.message}`));
+          }
+        });
+      },
+    );
+    request.on("error", reject);
+    request.setTimeout(8000, () => {
+      request.destroy(new Error(`Backend request timed out for ${apiPath}`));
+    });
+    request.write(body);
+    request.end();
+  });
+}
+
 async function requestStatus(url) {
   await requestBackendStatus(url);
 }
@@ -211,30 +311,60 @@ async function liveStreamCount() {
   }
 }
 
-async function requestQuit(source = "unknown") {
+async function requestQuit(source = "unknown", mode = "ui-only", options = {}) {
   if (isQuitting || quitRequestInFlight) return false;
   quitRequestInFlight = true;
-  diagnosticLog(`quit requested source=${source}`);
+  diagnosticLog(`quit requested source=${source} mode=${mode}`);
   try {
-    const running = await liveStreamCount();
-    if (running > 0) {
-      const countLabel = running === 1 ? "1 live stream is" : `${running} live streams are`;
-      const streamLabel = running === 1 ? "stream" : "streams";
-      await dialog.showMessageBox(mainWindow || undefined, {
-        type: "warning",
-        buttons: ["OK"],
-        defaultId: 0,
-        noLink: true,
-        title: "Stop streams before closing",
-        message: `${countLabel} still running.`,
-        detail: `To protect your live broadcast, Castarro cannot close right now.\n\nPlease stop all running ${streamLabel}, then close or restart the app.`
-      });
-      return false;
+    if (mode === "stop-streams-and-exit") {
+      if (backendUrl) {
+        await requestBackendPost(backendUrl, "/api/stream/stop", { channel: null });
+        await requestBackendPost(backendUrl, "/api/system/shutdown", {
+          stop_streams: true,
+          stop_tasks: true,
+        });
+      } else {
+        diagnosticLog("full-stop requested without backend URL; continuing with app quit");
+      }
+      quitMode = "full-stop";
+      installUpdateOnQuit = Boolean(options.installUpdate) && updateState.status === "downloaded";
+    } else {
+      const running = await liveStreamCount();
+      if (running > 0 && source === "window-close") {
+        const countLabel = running === 1 ? "1 live stream is still running." : `${running} live streams are still running.`;
+        await dialog.showMessageBox(mainWindow || undefined, {
+          type: "info",
+          buttons: ["OK"],
+          defaultId: 0,
+          noLink: true,
+          title: "UI closed, stream continues",
+          message: countLabel,
+          detail: "Castarro UI will close now, but your backend and live stream keep running in the background.",
+        });
+      }
+      quitMode = "ui-only";
+      installUpdateOnQuit = false;
     }
 
     isQuitting = true;
-    app.quit();
+    if (installUpdateOnQuit && autoUpdater && typeof autoUpdater.quitAndInstall === "function") {
+      autoUpdater.quitAndInstall(false, true);
+    } else {
+      app.quit();
+    }
     return true;
+  } catch (error) {
+    diagnosticLog("quit request failed", error);
+    await dialog.showMessageBox(mainWindow || undefined, {
+      type: "error",
+      buttons: ["OK"],
+      defaultId: 0,
+      noLink: true,
+      title: mode === "stop-streams-and-exit" ? "Stop streams and exit failed" : "Close failed",
+      message: "Castarro could not complete the requested exit action.",
+      detail: error?.message || String(error),
+    });
+    return false;
   } finally {
     quitRequestInFlight = false;
   }
@@ -256,7 +386,15 @@ ipcMain.handle("desktop:select-folder", async (_event, payload) => {
   return { canceled: false, path: result.filePaths[0] };
 });
 ipcMain.handle("desktop:request-quit", async () => {
-  const ok = await requestQuit("renderer");
+  const ok = await requestQuit("renderer", "ui-only");
+  return { ok };
+});
+ipcMain.handle("desktop:request-stop-streams-and-exit", async () => {
+  const ok = await requestQuit("renderer", "stop-streams-and-exit");
+  return { ok };
+});
+ipcMain.handle("desktop:request-restart-to-update", async () => {
+  const ok = await requestQuit("renderer-update", "stop-streams-and-exit", { installUpdate: true });
   return { ok };
 });
 
@@ -273,6 +411,34 @@ async function waitForBackend(url) {
     }
   }
   throw lastError || new Error("Backend did not become ready.");
+}
+
+async function connectOrStartBackend() {
+  const existing = readBackendInfo();
+  if (existing?.url) {
+    if (isProcessAlive(existing.pid)) {
+      try {
+        await waitForBackend(existing.url);
+        backendPort = existing.port;
+        backendUrl = existing.url;
+        diagnosticLog(`connected to existing backend pid=${existing.pid} port=${existing.port}`);
+        return;
+      } catch (error) {
+        diagnosticLog("existing backend did not respond; starting new backend", error);
+      }
+    } else {
+      diagnosticLog(`stale backend info found for dead pid ${existing.pid}; removing`);
+    }
+    removeBackendInfo();
+    removePidFile();
+  }
+
+  backendPort = await findOpenPort();
+  backendUrl = `http://127.0.0.1:${backendPort}`;
+  diagnosticLog(`backend url ${backendUrl}`);
+  startBackend(backendPort, { persistent: true });
+  await waitForBackend(backendUrl);
+  diagnosticLog("backend healthy");
 }
 
 function htmlEscape(value) {
@@ -345,7 +511,7 @@ function createMainWindow() {
   mainWindow.on("close", (event) => {
     if (isQuitting) return;
     event.preventDefault();
-    requestQuit("window-close").catch((error) => diagnosticLog("window close guard failed", error));
+    requestQuit("window-close", "ui-only").catch((error) => diagnosticLog("window close guard failed", error));
   });
   mainWindow.on("closed", () => {
     diagnosticLog("main window closed");
@@ -362,7 +528,8 @@ function createMenu() {
         { label: "Open Data Folder", click: () => shell.openPath(dataRoot()) },
         { label: "Open Logs Folder", click: () => shell.openPath(logRoot()) },
         { type: "separator" },
-        { label: "Quit", click: () => requestQuit("menu").catch((error) => diagnosticLog("menu quit failed", error)) }
+        { label: "Close UI (Keep Stream Running)", click: () => requestQuit("menu", "ui-only").catch((error) => diagnosticLog("menu close ui failed", error)) },
+        { label: "Stop Streams and Exit", click: () => requestQuit("menu", "stop-streams-and-exit").catch((error) => diagnosticLog("menu full stop failed", error)) }
       ]
     },
     {
@@ -393,7 +560,8 @@ function createTray() {
     { label: "Open Data Folder", click: () => shell.openPath(dataRoot()) },
     { label: "Open Logs Folder", click: () => shell.openPath(logRoot()) },
     { type: "separator" },
-    { label: "Quit", click: () => requestQuit("tray").catch((error) => diagnosticLog("tray quit failed", error)) }
+    { label: "Close UI (Keep Stream Running)", click: () => requestQuit("tray", "ui-only").catch((error) => diagnosticLog("tray close ui failed", error)) },
+    { label: "Stop Streams and Exit", click: () => requestQuit("tray", "stop-streams-and-exit").catch((error) => diagnosticLog("tray full stop failed", error)) }
   ]));
 }
 
@@ -424,7 +592,7 @@ function configureAutoUpdates() {
   }
 
   autoUpdater.autoDownload = true;
-  autoUpdater.autoInstallOnAppQuit = true;
+  autoUpdater.autoInstallOnAppQuit = false;
   autoUpdater.on("checking-for-update", () => {
     diagnosticLog("checking for update");
     setUpdateState({
@@ -488,12 +656,14 @@ function configureAutoUpdates() {
   updateCheckTimer.unref();
 }
 
-function writePidFile(pid) {
+function writePidFile(pid, port) {
   fs.writeFileSync(path.join(dataRoot(), "backend.pid"), `${pid}\n`, "utf8");
+  writeBackendInfo({ pid, port });
 }
 
 function removePidFile() {
   fs.rmSync(path.join(dataRoot(), "backend.pid"), { force: true });
+  removeBackendInfo();
 }
 
 function killProcessTree(pid) {
@@ -509,7 +679,7 @@ function killProcessTree(pid) {
   }
 }
 
-function startBackend(port) {
+function startBackend(port, { persistent = true } = {}) {
   diagnosticLog(`starting backend on ${port}`);
   const python = bundledPythonPath();
   if (!python) {
@@ -547,34 +717,54 @@ function startBackend(port) {
   diagnosticLog(`backend script ${scriptPath}`);
   diagnosticLog(`backend cwd ${dataRoot()}`);
   diagnosticLog(`backend code root ${codeRoot()}`);
-  backend = spawn(python, [scriptPath], {
+  const child = spawn(python, [scriptPath], {
     cwd: dataRoot(),
     env,
     stdio: ["ignore", outLog, errLog],
-    windowsHide: true
+    windowsHide: true,
+    detached: persistent,
   });
+  fs.closeSync(outLog);
+  fs.closeSync(errLog);
 
-  diagnosticLog(`backend pid ${backend.pid}`);
-  backend.on("error", (error) => {
+  diagnosticLog(`backend pid ${child.pid}`);
+  child.on("error", (error) => {
     diagnosticLog("backend spawn error", error);
   });
-  writePidFile(backend.pid);
-  backend.on("exit", (code, signal) => {
+  writePidFile(child.pid, port);
+  child.on("exit", (code, signal) => {
     diagnosticLog(`backend exit code=${code} signal=${signal}`);
     removePidFile();
-    backend = null;
+    if (backend && backend.pid === child.pid) {
+      backend = null;
+    }
     if (!isQuitting) {
       showError(new Error(`Backend exited unexpectedly (${code ?? signal}).`));
     }
   });
+  if (persistent) {
+    child.unref();
+  }
+  backend = child;
+  return child;
 }
 
 function stopBackend() {
-  if (!backend) return;
-  const pid = backend.pid;
-  backend.kill();
+  const pid = backend?.pid || readBackendInfo()?.pid;
+  if (!pid) return;
+  try {
+    if (backend) {
+      backend.kill();
+    } else {
+      killProcessTree(pid);
+    }
+  } catch (_error) {
+    killProcessTree(pid);
+  }
   setTimeout(() => {
-    if (backend) killProcessTree(pid);
+    if (isProcessAlive(pid)) {
+      killProcessTree(pid);
+    }
   }, 2500).unref();
 }
 
@@ -584,7 +774,7 @@ async function boot() {
     backendPort = await findOpenPort();
     backendUrl = `http://127.0.0.1:${backendPort}`;
     diagnosticLog(`backend url ${backendUrl}`);
-    startBackend(backendPort);
+    startBackend(backendPort, { persistent: false });
     await waitForBackend(backendUrl);
     diagnosticLog("backend healthy");
     fs.writeFileSync(
@@ -597,17 +787,16 @@ async function boot() {
     return;
   }
 
-  createMainWindow();
-  createMenu();
-  createTray();
+  if (!appBootstrapped) {
+    createMenu();
+    createTray();
+    appBootstrapped = true;
+  }
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    createMainWindow();
+  }
   showLoading("Preparing Castarro...");
-
-  backendPort = await findOpenPort();
-  backendUrl = `http://127.0.0.1:${backendPort}`;
-  diagnosticLog(`backend url ${backendUrl}`);
-  startBackend(backendPort);
-  await waitForBackend(backendUrl);
-  diagnosticLog("backend healthy");
+  await connectOrStartBackend();
   await mainWindow.loadURL(backendUrl);
 }
 
@@ -624,22 +813,31 @@ app.whenReady().then(() => {
 
 app.on("activate", () => {
   if (BrowserWindow.getAllWindows().length === 0) {
-    boot().catch((error) => showError(error));
+    if (!backendUrl) {
+      boot().catch((error) => showError(error));
+      return;
+    }
+    createMainWindow();
+    mainWindow.loadURL(backendUrl).catch((error) => showError(error));
   }
 });
 
 app.on("before-quit", (event) => {
   if (!isQuitting) {
     event.preventDefault();
-    requestQuit("before-quit").catch((error) => diagnosticLog("before-quit guard failed", error));
+    requestQuit("before-quit", "ui-only").catch((error) => diagnosticLog("before-quit guard failed", error));
     return;
   }
-  diagnosticLog("before quit");
+  diagnosticLog(`before quit mode=${quitMode}`);
   if (updateCheckTimer) clearInterval(updateCheckTimer);
-  stopBackend();
+  if (quitMode === "full-stop") {
+    stopBackend();
+  }
 });
 
 app.on("window-all-closed", () => {
   diagnosticLog("window all closed");
-  if (process.platform !== "darwin") app.quit();
+  if (!isQuitting && process.platform !== "darwin") {
+    requestQuit("window-all-closed", "ui-only").catch((error) => diagnosticLog("window-all-closed close failed", error));
+  }
 });

@@ -53,6 +53,13 @@ body {
   justify-items: end;
 }
 
+.desktop-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: end;
+}
+
 .tabs {
   display: inline-flex;
   gap: 6px;
@@ -843,6 +850,14 @@ pre {
 
   .hero-side {
     justify-items: stretch;
+  }
+
+  .desktop-actions {
+    justify-content: stretch;
+  }
+
+  .desktop-actions .pill {
+    flex: 1;
   }
 
   .tabs {

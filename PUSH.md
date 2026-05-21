@@ -22,6 +22,9 @@ After push to `main`, GitHub Actions (`.github/workflows/release-windows.yml`) t
 Unlike the Animal Channel repo flow, this script does **not** create/push tags locally.
 Your workflow creates and pushes release tags itself after a successful build.
 
+On Windows, `python push` now sets `CASTARRO_INSTALLER_SMOKE_ROOT=C:\tmp` automatically for `release:check` when that variable is not already set. This keeps NSIS installer smoke tests on a no-space path.
+It also performs a writable-path preflight check and fails early with a clear message if that path cannot be written.
+
 ## Common commands
 
 Patch release (default digit-cycle):

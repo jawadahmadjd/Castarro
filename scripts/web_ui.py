@@ -842,6 +842,24 @@ class Handler(BaseHTTPRequestHandler):
                 json_response(self, {"ok": True, "stopped": stopped})
                 return
 
+            if parsed.path == "/api/system/shutdown":
+                stop_streams = bool(body.get("stop_streams", True))
+                stop_tasks_requested = bool(body.get("stop_tasks", True))
+                stopped_streams = stop_stream(None) if stop_streams else []
+                if stop_tasks_requested:
+                    shutdown_tasks()
+                threading.Thread(target=self.server.shutdown, daemon=True).start()
+                json_response(
+                    self,
+                    {
+                        "ok": True,
+                        "stopped_streams": stopped_streams,
+                        "stopped_tasks": stop_tasks_requested,
+                        "shutting_down": True,
+                    },
+                )
+                return
+
             json_response(self, {"error": "Not found"}, 404)
         except Exception as exc:
             if is_client_disconnect_error(exc):

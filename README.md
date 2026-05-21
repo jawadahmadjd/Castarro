@@ -67,13 +67,19 @@ The UI lets you:
 The UI has two tabs:
 
 - `Control`: start/stop streams, normalize, validate, and watch activity.
-- `Settings`: config file selection plus separate `Video Normalization` and `Live` menus.
+- `Settings`: config file selection plus separate `Folders`, `Video Normalization`, and `Live` menus.
 
 Inside `Settings`:
 
+- `Folders`: choose exact paths for Raw Videos, Go Live videos, and Logs.
 - `Video Normalization`: per-channel Add Videos, selected source files, and normalization profile.
 - `Live`: Go Live folder, FFmpeg settings, stream keys, YouTube Auto Start/Stop flags, and Add Channel.
   - Includes an `FFmpeg Output Controls` card per channel where you can keep `copy` mode or switch to `transcode` and set bitrate/FPS/resolution/GOP/audio.
+
+Desktop runtime behavior:
+
+- `Close UI Only` keeps backend + active streams running in the background.
+- `Stop Streams and Exit` stops streams, shuts down backend, and exits.
 
 It is intentionally lightweight: plain HTML, CSS, JavaScript, and Python standard library only.
 

@@ -18,5 +18,11 @@ contextBridge.exposeInMainWorld("desktopShell", {
   },
   requestQuit() {
     return ipcRenderer.invoke("desktop:request-quit");
+  },
+  requestStopStreamsAndExit() {
+    return ipcRenderer.invoke("desktop:request-stop-streams-and-exit");
+  },
+  requestRestartToUpdate() {
+    return ipcRenderer.invoke("desktop:request-restart-to-update");
   }
 });

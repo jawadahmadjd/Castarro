@@ -140,6 +140,12 @@ async function refresh() {
 
 async function initDesktopIntegration() {
   const bridge = desktopBridge();
+  const closeUiButton = $("closeUiOnly");
+  const stopAndExitButton = $("stopAndExit");
+  const canCloseUi = typeof bridge?.requestQuit === "function";
+  const canStopAndExit = typeof bridge?.requestStopStreamsAndExit === "function";
+  if (closeUiButton) closeUiButton.hidden = !canCloseUi;
+  if (stopAndExitButton) stopAndExitButton.hidden = !canStopAndExit;
   if (!bridge) return;
 
   if (typeof bridge.getUpdateStatus === "function") {
@@ -156,6 +162,27 @@ async function initDesktopIntegration() {
       state.updateStatus = payload || null;
       renderUpdateBanner();
     });
+  }
+}
+
+async function closeUiOnly() {
+  const bridge = desktopBridge();
+  if (!bridge || typeof bridge.requestQuit !== "function") {
+    toast("Desktop close action is unavailable.");
+    return;
+  }
+  await bridge.requestQuit();
+}
+
+async function stopStreamsAndExit() {
+  const bridge = desktopBridge();
+  if (!bridge || typeof bridge.requestStopStreamsAndExit !== "function") {
+    toast("Stop and exit action is unavailable.");
+    return;
+  }
+  const response = await bridge.requestStopStreamsAndExit();
+  if (!response?.ok) {
+    toast("Could not stop streams and exit.");
   }
 }
 
@@ -1555,13 +1582,19 @@ if ($("previewChannelSelect")) {
 if ($("restartToUpdate")) {
   $("restartToUpdate").addEventListener("click", async () => {
     const bridge = desktopBridge();
-    if (!bridge || typeof bridge.requestQuit !== "function") return;
+    if (!bridge || typeof bridge.requestRestartToUpdate !== "function") return;
     try {
-      await bridge.requestQuit();
+      await bridge.requestRestartToUpdate();
     } catch (error) {
       toast(error.message);
     }
   });
+}
+if ($("closeUiOnly")) {
+  $("closeUiOnly").addEventListener("click", () => closeUiOnly().catch((error) => toast(error.message)));
+}
+if ($("stopAndExit")) {
+  $("stopAndExit").addEventListener("click", () => stopStreamsAndExit().catch((error) => toast(error.message)));
 }
 
 showSettingsTab(state.settingsTab);
