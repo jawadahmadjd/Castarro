@@ -459,3 +459,51 @@ def stats() -> dict[str, Any]:
             "path": str(DB_PATH),
             **{table: db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in tables},
         }
+
+
+def recent_app_events(config_name: str | None = None, limit: int = 40) -> list[dict[str, Any]]:
+    init_db()
+    safe_limit = max(1, min(int(limit), 200))
+    with connect() as db:
+        if config_name:
+            rows = db.execute(
+                """
+                SELECT id, event_type, config_name, channel_name, details_json, created_at
+                FROM app_events
+                WHERE config_name = ? OR config_name IS NULL
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (config_name, safe_limit),
+            ).fetchall()
+        else:
+            rows = db.execute(
+                """
+                SELECT id, event_type, config_name, channel_name, details_json, created_at
+                FROM app_events
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (safe_limit,),
+            ).fetchall()
+
+    events: list[dict[str, Any]] = []
+    for row in rows:
+        raw_details = row["details_json"] or "{}"
+        try:
+            details = json.loads(raw_details)
+            if not isinstance(details, dict):
+                details = {"raw": raw_details}
+        except Exception:
+            details = {"raw": raw_details}
+        events.append(
+            {
+                "id": int(row["id"]),
+                "event_type": str(row["event_type"] or ""),
+                "config_name": row["config_name"],
+                "channel_name": row["channel_name"],
+                "created_at": str(row["created_at"] or ""),
+                "details": details,
+            }
+        )
+    return events

@@ -1,5 +1,6 @@
 param(
-    [string]$InstallerPath = ""
+    [string]$InstallerPath = "",
+    [switch]$ElevatedRelaunch
 )
 
 $ErrorActionPreference = "Stop"
@@ -13,6 +14,44 @@ if (-not $InstallerPath) {
 }
 if (-not (Test-Path -LiteralPath $InstallerPath)) {
     throw "Installer not found: $InstallerPath"
+}
+
+function Test-IsAdministrator {
+    try {
+        $Identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+        $Principal = [System.Security.Principal.WindowsPrincipal]::new($Identity)
+        return $Principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
+    }
+    catch {
+        return $false
+    }
+}
+
+if (-not (Test-IsAdministrator)) {
+    if ($ElevatedRelaunch) {
+        throw "Installer smoke requires administrator privileges. Elevation was requested but was not granted."
+    }
+    Write-Host "Installer smoke requires administrator privileges. Requesting UAC elevation..."
+    $ArgumentString = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" -ElevatedRelaunch"
+    if ($InstallerPath) {
+        $ArgumentString += " -InstallerPath `"$InstallerPath`""
+    }
+    try {
+        $ElevatedProcess = Start-Process `
+            -FilePath "powershell.exe" `
+            -ArgumentList $ArgumentString `
+            -Verb RunAs `
+            -WorkingDirectory $Root `
+            -PassThru `
+            -Wait
+    }
+    catch {
+        throw "Installer smoke requires elevation and could not start elevated. Run PowerShell as Administrator and retry. Original error: $($_.Exception.Message)"
+    }
+    if ($ElevatedProcess.ExitCode -ne 0) {
+        throw "Elevated installer smoke failed with exit code $($ElevatedProcess.ExitCode)."
+    }
+    exit 0
 }
 
 function Remove-SmokeTree {

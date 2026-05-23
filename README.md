@@ -67,7 +67,7 @@ The UI lets you:
 The UI has two tabs:
 
 - `Control`: start/stop streams, normalize, validate, and watch activity.
-- `Settings`: config file selection plus separate `Folders`, `Video Normalization`, and `Live` menus.
+- `Settings`: config file selection plus separate `Folders`, `Video Normalization`, `Live`, and `YouTube` menus.
 
 Inside `Settings`:
 
@@ -75,6 +75,7 @@ Inside `Settings`:
 - `Video Normalization`: per-channel Add Videos, selected source files, and normalization profile.
 - `Live`: Go Live folder, FFmpeg settings, stream keys, YouTube Auto Start/Stop flags, and Add Channel.
   - Includes an `FFmpeg Output Controls` card per channel where you can keep `copy` mode or switch to `transcode` and set bitrate/FPS/resolution/GOP/audio.
+- `YouTube`: user-facing connect/schedule controls only. OAuth technical fields are hidden from normal users.
 
 Desktop runtime behavior:
 
@@ -113,7 +114,10 @@ After upload, their paths are automatically added to that channel's normalizatio
 
 Castarro uses YouTube's built-in Auto Start and Auto Stop behavior.
 
-Important: without the YouTube API, this app cannot turn those switches on inside YouTube Studio. You enable them once in YouTube Studio, then this app starts and stops the FFmpeg signal.
+You can use this in two ways:
+
+1. Manual: configure stream keys yourself and enable Auto Start/Stop in YouTube Studio.
+2. API-driven: connect your Google account in `Settings -> YouTube`, schedule a broadcast, and let Castarro create/bind the YouTube stream and fill the stream key into the selected channel.
 
 For every YouTube broadcast/channel:
 
@@ -124,6 +128,28 @@ For every YouTube broadcast/channel:
 5. Turn `Auto-stop` on.
 6. Use the correct stream key in this app.
 7. In the dashboard, click `Mark Auto ON` for that channel.
+
+### API Connection Quick Setup
+
+1. Open Google Cloud Console and create OAuth credentials (`Desktop app`) for Castarro.
+2. Open Castarro in owner mode (`http://127.0.0.1:8765/?owner=1`), then in `Settings -> YouTube` set OAuth Client Type as `Desktop app` and set redirect URI:
+
+```text
+http://127.0.0.1:8765/oauth2redirect
+```
+
+3. Enable `YouTube Data API v3` in that Google project.
+4. Paste OAuth Client ID (and Client Secret if provided) in Castarro.
+5. Keep `Use PKCE` enabled.
+6. Click `Save settings`.
+7. Click `Connect to YouTube` and approve access.
+8. Use `Create Schedule + Stream Key` to create a broadcast and assign its stream key to your selected Castarro channel.
+
+Important:
+
+- `127.0.0.1` is each user's own local machine, so your app does not depend on your PC being online for other users.
+- OAuth callback happens only while that user's Castarro app is running locally.
+- In normal mode (without `?owner=1`), users only see `Connect to YouTube` and scheduling controls.
 
 After that, the operating flow is:
 

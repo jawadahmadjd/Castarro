@@ -46,6 +46,15 @@ DEFAULT_LIVE_PROFILE = {
 }
 
 
+def windows_creation_flags(*, new_process_group: bool = False) -> int:
+    if os.name != "nt":
+        return 0
+    flags = subprocess.CREATE_NO_WINDOW
+    if new_process_group:
+        flags |= subprocess.CREATE_NEW_PROCESS_GROUP
+    return flags
+
+
 @dataclass
 class RunningStream:
     channel: dict[str, Any]
@@ -527,7 +536,7 @@ def start_stream(
         cwd=str(config_dir),
         stdout=log_handle,
         stderr=subprocess.STDOUT,
-        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
+        creationflags=windows_creation_flags(new_process_group=True),
     )
     print(f"[{channel['name']}] pid: {process.pid}")
     return RunningStream(

@@ -36,68 +36,107 @@ if (Test-Path -LiteralPath $UserData) {
 }
 New-Item -ItemType Directory -Force -Path $DataRoot, $LogRoot | Out-Null
 
-$Listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Parse("127.0.0.1"), 0)
-$Listener.Start()
-$Port = $Listener.LocalEndpoint.Port
-$Listener.Stop()
-
 $PreviousElectronRunAsNode = $env:ELECTRON_RUN_AS_NODE
 Remove-Item Env:ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue
 
-$StartInfo = [System.Diagnostics.ProcessStartInfo]::new()
-$StartInfo.FileName = $Python
-$StartInfo.Arguments = '"' + $Script.Replace('"', '\"') + '"'
-$StartInfo.WorkingDirectory = $DataRoot
-$StartInfo.UseShellExecute = $false
-$StartInfo.CreateNoWindow = $true
-$StartInfo.RedirectStandardOutput = $true
-$StartInfo.RedirectStandardError = $true
-$StartInfo.Environment["STREAM_UI_PORT"] = [string]$Port
-$StartInfo.Environment["STREAM_APP_CODE_DIR"] = $AppRoot
-$StartInfo.Environment["STREAM_APP_DATA_DIR"] = $DataRoot
-$StartInfo.Environment["STREAM_WEB_ROOT"] = $WebRoot
-$StartInfo.Environment["STREAM_LEGACY_ROOT"] = Join-Path $Resources "seed-data"
-$StartInfo.Environment["STREAM_FFMPEG_PATH"] = $FFmpeg
-$StartInfo.Environment["STREAM_FFPROBE_PATH"] = $FFprobe
-
-$Process = [System.Diagnostics.Process]::new()
-$Process.StartInfo = $StartInfo
-$Process.Start() | Out-Null
-
-$OutTask = $Process.StandardOutput.ReadToEndAsync()
-$ErrTask = $Process.StandardError.ReadToEndAsync()
-
+$MaxAttempts = 3
+$ProbeIterations = 120
+$Success = $false
+$LastError = $null
 try {
-    $Ready = $false
-    $Url = "http://127.0.0.1:$Port"
-    for ($i = 0; $i -lt 40; $i++) {
-        if ($Process.HasExited) {
+    for ($Attempt = 1; $Attempt -le $MaxAttempts; $Attempt++) {
+        $Process = $null
+        $OutTask = $null
+        $ErrTask = $null
+        try {
+            $Listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Parse("127.0.0.1"), 0)
+            $Listener.Start()
+            $Port = $Listener.LocalEndpoint.Port
+            $Listener.Stop()
+
+            $StartInfo = [System.Diagnostics.ProcessStartInfo]::new()
+            $StartInfo.FileName = $Python
+            $StartInfo.Arguments = '"' + $Script.Replace('"', '\"') + '"'
+            $StartInfo.WorkingDirectory = $DataRoot
+            $StartInfo.UseShellExecute = $false
+            $StartInfo.CreateNoWindow = $true
+            $StartInfo.RedirectStandardOutput = $true
+            $StartInfo.RedirectStandardError = $true
+            $StartInfo.Environment["STREAM_UI_PORT"] = [string]$Port
+            $StartInfo.Environment["STREAM_APP_CODE_DIR"] = $AppRoot
+            $StartInfo.Environment["STREAM_APP_DATA_DIR"] = $DataRoot
+            $StartInfo.Environment["STREAM_WEB_ROOT"] = $WebRoot
+            $StartInfo.Environment["STREAM_LEGACY_ROOT"] = Join-Path $Resources "seed-data"
+            $StartInfo.Environment["STREAM_FFMPEG_PATH"] = $FFmpeg
+            $StartInfo.Environment["STREAM_FFPROBE_PATH"] = $FFprobe
+
+            $Process = [System.Diagnostics.Process]::new()
+            $Process.StartInfo = $StartInfo
+            $Process.Start() | Out-Null
+
+            $OutTask = $Process.StandardOutput.ReadToEndAsync()
+            $ErrTask = $Process.StandardError.ReadToEndAsync()
+
+            $Ready = $false
+            $Url = "http://127.0.0.1:$Port"
+            for ($i = 0; $i -lt $ProbeIterations; $i++) {
+                if ($Process.HasExited) {
+                    break
+                }
+                try {
+                    $Status = Invoke-RestMethod -Uri "$Url/api/status" -TimeoutSec 1
+                    if ($Status.root -and $Status.code_root -and $Status.binaries.ffmpeg.exists -and $Status.binaries.ffprobe.exists) {
+                        $Ready = $true
+                        $Status | ConvertTo-Json -Depth 4
+                        break
+                    }
+                }
+                catch {
+                    Start-Sleep -Milliseconds 500
+                }
+            }
+
+            if (-not $Ready) {
+                $ExitSummary = ""
+                if ($Process.HasExited) {
+                    $ExitSummary = " Process exited with code $($Process.ExitCode)."
+                }
+                $ErrOutput = if ($ErrTask) { ($ErrTask.Result | Out-String).Trim() } else { "" }
+                if ($ErrOutput) {
+                    $ExitSummary += " stderr: $ErrOutput"
+                }
+                throw "Packaged backend did not expose a healthy API within timeout.$ExitSummary"
+            }
+
+            $Success = $true
             break
         }
-        try {
-            $Status = Invoke-RestMethod -Uri "$Url/api/status" -TimeoutSec 1
-            if ($Status.root -and $Status.code_root -and $Status.binaries.ffmpeg.exists -and $Status.binaries.ffprobe.exists) {
-                $Ready = $true
-                $Status | ConvertTo-Json -Depth 4
-                break
+        catch {
+            $LastError = $_
+            if ($Attempt -lt $MaxAttempts) {
+                Write-Warning "Packaged backend smoke attempt $Attempt failed. Retrying..."
+                Start-Sleep -Seconds $Attempt
             }
         }
-        catch {
-            Start-Sleep -Milliseconds 500
+        finally {
+            if ($Process -and -not $Process.HasExited) {
+                $Process.Kill()
+                $Process.WaitForExit()
+            }
+            if ($OutTask) {
+                Set-Content -LiteralPath $OutLog -Value $OutTask.Result -Encoding UTF8
+            }
+            if ($ErrTask) {
+                Set-Content -LiteralPath $ErrLog -Value $ErrTask.Result -Encoding UTF8
+            }
         }
     }
 
-    if (-not $Ready) {
-        throw "Packaged backend did not expose a healthy API within timeout."
+    if (-not $Success) {
+        throw $LastError
     }
 }
 finally {
-    if ($Process -and -not $Process.HasExited) {
-        $Process.Kill()
-        $Process.WaitForExit()
-    }
-    Set-Content -LiteralPath $OutLog -Value $OutTask.Result -Encoding UTF8
-    Set-Content -LiteralPath $ErrLog -Value $ErrTask.Result -Encoding UTF8
     if ($PreviousElectronRunAsNode) {
         $env:ELECTRON_RUN_AS_NODE = $PreviousElectronRunAsNode
     }

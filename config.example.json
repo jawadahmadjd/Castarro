@@ -44,6 +44,23 @@
     "audio_sample_rate": 44100,
     "audio_channels": 2
   },
+  "youtube": {
+    "client_id": "",
+    "client_secret": "",
+    "oauth_client_type": "desktop",
+    "use_pkce": true,
+    "redirect_uri": "http://127.0.0.1:8765/oauth2redirect",
+    "tokens_file": ".runtime/youtube_tokens.json",
+    "accounts": [],
+    "default_account_id": "",
+    "scopes": [
+      "https://www.googleapis.com/auth/youtube",
+      "https://www.googleapis.com/auth/youtube.force-ssl"
+    ],
+    "default_privacy_status": "unlisted",
+    "default_auto_start": true,
+    "default_auto_stop": true
+  },
   "channels": [
     {
       "name": "channel_1",
@@ -89,7 +106,10 @@
       },
       "youtube_auto_start": true,
       "youtube_auto_stop": true,
+      "youtube_account_id": "",
       "youtube_studio_url": "",
+      "youtube_broadcast_id": "",
+      "youtube_stream_id": "",
       "loop": true,
       "restart_on_exit": true
     }

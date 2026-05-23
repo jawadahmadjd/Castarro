@@ -89,6 +89,7 @@
               <button class="tab active" id="settingsFoldersTab" type="button">Folders</button>
               <button class="tab" id="settingsNormalizeTab" type="button">Video Normalization</button>
               <button class="tab" id="settingsLiveTab" type="button">Live</button>
+              <button class="tab" id="settingsYoutubeTab" type="button">YouTube</button>
             </div>
             <button class="pill primary" id="saveSettings">Save settings</button>
           </div>
@@ -135,19 +136,47 @@
           </section>
         </section>
 
-        <section class="grid">
-          <div class="panel">
+        <section id="settingsYoutubeView" class="settings-section">
+          <section class="panel">
+            <div class="section-head">
+              <div>
+                <h2>YouTube Integration</h2>
+                <p class="helper">Connect once with your Google account, then schedule broadcasts and auto-fill stream keys.</p>
+              </div>
+            </div>
+            <div id="youtubeSettingsPanel"></div>
+          </section>
+        </section>
+
+        <section class="grid" id="activityStreamGrid">
+          <div class="panel" id="activityPanel">
             <div class="section-head">
               <h2>Activity</h2>
               <div class="row wrap">
                 <span id="taskState">Idle</span>
-                <span class="helper">Latest first</span>
+                <span class="helper">Newest first</span>
+                <div class="activity-filters">
+                  <button class="pill ghost small active" id="activityFilterAll" type="button">All</button>
+                  <button class="pill ghost small" id="activityFilterTasks" type="button">Tasks</button>
+                  <button class="pill ghost small" id="activityFilterApi" type="button">API</button>
+                  <button class="pill ghost small" id="activityFilterErrors" type="button">Errors</button>
+                </div>
+                <button class="pill ghost small" type="button" onclick="copyActivityLogs()">Copy Activity Logs</button>
               </div>
             </div>
             <div id="tasks" class="tasks"></div>
           </div>
 
-          <section class="panel logs">
+          <div
+            class="splitter"
+            id="activityStreamSplitter"
+            role="separator"
+            aria-label="Resize activity and stream logs panels"
+            aria-orientation="vertical"
+            tabindex="0"
+          ></div>
+
+          <section class="panel logs" id="streamLogsPanel">
             <div class="section-head">
               <h2>Stream Logs</h2>
               <div class="row wrap">
