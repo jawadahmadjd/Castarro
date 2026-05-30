@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import secrets
@@ -14,7 +15,9 @@ import sys
 import threading
 import time
 import traceback
+import unicodedata
 from collections import deque
+from difflib import SequenceMatcher
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -31,6 +34,9 @@ CODE_ROOT = runtime_paths.CODE_ROOT
 WEB_ROOT = runtime_paths.WEB_ROOT
 DEFAULT_CONFIG = runtime_paths.default_config_name()
 VIDEO_EXTENSIONS = {".mp4", ".m4v", ".mov", ".flv", ".mkv"}
+THUMBNAIL_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".bmp"}
+THUMBNAIL_MAX_BYTES = 2 * 1024 * 1024
+YOUTUBE_CHANNEL_NAME_MATCH_THRESHOLD = 0.80
 
 
 def windows_creation_flags(*, new_process_group: bool = False) -> int:
@@ -284,6 +290,12 @@ def record_request_trace(handler: BaseHTTPRequestHandler, status_code: int, outc
 
     path = str(trace.get("path") or "")
     client_action = str(trace.get("client_action") or "")
+    if path.startswith("/api/video-thumbnail"):
+        trace["logged"] = True
+        return
+    if path == "/api/activity/clear":
+        trace["logged"] = True
+        return
     if status_code < 400:
         if not path.startswith("/api/"):
             trace["logged"] = True
@@ -404,12 +416,16 @@ def load_config_or_none(config_name: str) -> tuple[dict[str, Any] | None, str | 
         return None, f"{config_name} does not exist yet."
     try:
         with path.open("r", encoding="utf-8-sig") as fh:
-            return runtime_paths.apply_runtime_defaults(json.load(fh)), None
+            config = runtime_paths.apply_runtime_defaults(json.load(fh))
+            normalize_ui_settings(config)
+            normalize_youtube_accounts(config)
+            return config, None
     except Exception as exc:
         return None, str(exc)
 
 
 def save_config(config_name: str, config: dict[str, Any]) -> None:
+    normalize_ui_settings(config)
     normalize_youtube_accounts(config)
     for channel in config.get("channels", []):
         if not isinstance(channel, dict):
@@ -421,6 +437,15 @@ def save_config(config_name: str, config: dict[str, Any]) -> None:
     target.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
     ensure_media_folders(config)
     app_db.sync_config(config_name, config, "save")
+
+
+def normalize_ui_settings(config: dict[str, Any]) -> dict[str, Any]:
+    raw = config.get("ui")
+    ui = dict(raw) if isinstance(raw, dict) else {}
+    ui["channel_workspace_enabled"] = bool(ui.get("channel_workspace_enabled", True))
+    ui["legacy_tabs_enabled"] = ui.get("legacy_tabs_enabled", True) is not False
+    config["ui"] = ui
+    return ui
 
 
 def looks_like_rtmp_url(value: Any) -> bool:
@@ -499,6 +524,7 @@ def normalize_youtube_accounts(config: dict[str, Any]) -> list[dict[str, Any]]:
                     "channel_id": str(item.get("channel_id") or "").strip(),
                     "channel_title": str(item.get("channel_title") or "").strip(),
                     "channel_handle": str(item.get("channel_handle") or "").strip(),
+                    "expected_channel_name": str(item.get("expected_channel_name") or "").strip(),
                     "last_connected_at": str(item.get("last_connected_at") or "").strip(),
                 }
             )
@@ -512,6 +538,7 @@ def normalize_youtube_accounts(config: dict[str, Any]) -> list[dict[str, Any]]:
                 "channel_id": "",
                 "channel_title": "",
                 "channel_handle": "",
+                "expected_channel_name": "",
                 "last_connected_at": "",
             }
         )
@@ -556,12 +583,162 @@ def ensure_youtube_account(config: dict[str, Any], account_id: str, label: str =
         "channel_id": "",
         "channel_title": "",
         "channel_handle": "",
+        "expected_channel_name": "",
         "last_connected_at": "",
     }
     accounts.append(created)
     youtube["accounts"] = accounts
     youtube["default_account_id"] = youtube.get("default_account_id") or normalized_id
     return created
+
+
+def find_reusable_youtube_account_for_channel(config: dict[str, Any], channel_name: str) -> dict[str, Any] | None:
+    expected = str(channel_name or "").strip()
+    if not expected:
+        return None
+    for channel in config.get("channels", []):
+        if not isinstance(channel, dict):
+            continue
+        if str(channel.get("name") or "").strip() != expected:
+            continue
+        account = find_youtube_account(config, channel.get("youtube_account_id") or "")
+        if account:
+            return account
+    for account in normalize_youtube_accounts(config):
+        if str(account.get("expected_channel_name") or "").strip() == expected:
+            return account
+    for account in normalize_youtube_accounts(config):
+        if str(account.get("label") or "").strip() == expected:
+            return account
+    return None
+
+
+def comparable_youtube_name(value: Any, *, letters_only: bool = True) -> str:
+    text = unicodedata.normalize("NFKD", str(value or "")).casefold()
+    if letters_only:
+        return "".join(ch for ch in text if ch.isalpha())
+    return "".join(ch for ch in text if ch.isalnum())
+
+
+YOUTUBE_NAME_BOILERPLATE_PHRASES = [
+    "account channel",
+    "official channel",
+    "official account",
+    "official youtube channel",
+    "youtube channel",
+    "original channel",
+    "original account",
+    "verified channel",
+    "verified account",
+]
+
+
+def youtube_name_display_variants(value: Any) -> list[str]:
+    text = unicodedata.normalize("NFKD", str(value or "")).casefold()
+    text = re.sub(r"[\(\[\{][^\)\]\}]{0,80}[\)\]\}]", " ", text)
+    raw_variants = [text]
+    raw_variants.extend(part for part in re.split(r"\s+[-–—|:/\\]\s+", text) if part.strip())
+
+    variants: list[str] = []
+    for item in raw_variants:
+        cleaned = f" {item} "
+        for phrase in YOUTUBE_NAME_BOILERPLATE_PHRASES:
+            cleaned = cleaned.replace(f" {phrase} ", " ")
+        cleaned = re.sub(r"\b(official|original|verified)\b", " ", cleaned)
+        cleaned = re.sub(r"\b(channel|account)\b", " ", cleaned)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        variants.extend([item.strip(), cleaned])
+    return [item for item in dict.fromkeys(variants) if item]
+
+
+def comparable_youtube_name_variants(value: Any) -> list[str]:
+    variants: list[str] = []
+    for display_value in youtube_name_display_variants(value):
+        variants.append(comparable_youtube_name(display_value, letters_only=True))
+        variants.append(comparable_youtube_name(display_value, letters_only=False))
+    return [item for item in dict.fromkeys(variants) if item]
+
+
+def youtube_channel_name_match(expected_name: str, profile: dict[str, Any]) -> dict[str, Any]:
+    expected_variants = comparable_youtube_name_variants(expected_name)
+    if not expected_variants:
+        return {
+            "ok": True,
+            "score": 1.0,
+            "matched_field": "",
+            "matched_value": "",
+            "threshold": YOUTUBE_CHANNEL_NAME_MATCH_THRESHOLD,
+        }
+
+    candidates = {
+        "title": str(profile.get("channel_title") or ""),
+        "handle": str(profile.get("channel_handle") or "").lstrip("@"),
+    }
+    best_score = 0.0
+    best_field = ""
+    best_value = ""
+    for field, value in candidates.items():
+        candidate_variants = comparable_youtube_name_variants(value)
+        for expected in expected_variants:
+            for candidate in candidate_variants:
+                score = SequenceMatcher(None, expected, candidate).ratio()
+                if score > best_score:
+                    best_score = score
+                    best_field = field
+                    best_value = value
+    return {
+        "ok": best_score >= YOUTUBE_CHANNEL_NAME_MATCH_THRESHOLD,
+        "score": best_score,
+        "matched_field": best_field,
+        "matched_value": best_value,
+        "threshold": YOUTUBE_CHANNEL_NAME_MATCH_THRESHOLD,
+    }
+
+
+def find_channel_by_name(config: dict[str, Any], channel_name: str) -> dict[str, Any] | None:
+    expected = str(channel_name or "").strip()
+    if not expected:
+        return None
+    for channel in config.get("channels", []):
+        if isinstance(channel, dict) and str(channel.get("name") or "").strip() == expected:
+            return channel
+    return None
+
+
+def youtube_account_expected_channel_name(config: dict[str, Any], account: dict[str, Any]) -> str:
+    explicit = str(account.get("expected_channel_name") or "").strip()
+    if explicit:
+        return explicit
+
+    account_id = normalize_account_id(account.get("id") or "")
+    if account_id:
+        for channel in config.get("channels", []):
+            if not isinstance(channel, dict):
+                continue
+            if normalize_account_id(channel.get("youtube_account_id") or "") == account_id:
+                return str(channel.get("name") or "").strip()
+
+    label = str(account.get("label") or "").strip()
+    if label and find_channel_by_name(config, label):
+        return label
+    return ""
+
+
+def youtube_profile_mismatch_message(expected_channel_name: str, profile: dict[str, Any]) -> str:
+    expected = str(expected_channel_name or "").strip()
+    if not expected:
+        return ""
+    match = youtube_channel_name_match(expected, profile)
+    if match.get("ok"):
+        return ""
+    connected_name = str(profile.get("channel_title") or profile.get("channel_handle") or "unknown channel")
+    score = round(float(match.get("score") or 0) * 100)
+    threshold = round(float(match.get("threshold") or YOUTUBE_CHANNEL_NAME_MATCH_THRESHOLD) * 100)
+    return (
+        f"Connected YouTube channel '{connected_name}' does not look like Castarro channel "
+        f"'{expected}' ({score}% match; need at least {threshold}%). "
+        "Please select the matching Castarro channel or sign in with the correct YouTube account."
+    )
 
 
 def account_config_view(config: dict[str, Any], account: dict[str, Any]) -> dict[str, Any]:
@@ -587,6 +764,9 @@ def connected_account_slots(config: dict[str, Any]) -> list[dict[str, Any]]:
             profile = youtube_service.connected_account_profile(access_token)
         except Exception:
             continue
+        expected_channel_name = youtube_account_expected_channel_name(config, account)
+        if youtube_profile_mismatch_message(expected_channel_name, profile):
+            continue
         connected.append(
             {
                 "id": str(account.get("id") or ""),
@@ -600,19 +780,21 @@ def connected_account_slots(config: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def channel_account_id(config: dict[str, Any], channel: dict[str, Any]) -> str:
-    channel_id = normalize_account_id(channel.get("youtube_account_id") or "")
-    if channel_id:
-        return channel_id
+    return normalize_account_id(channel.get("youtube_account_id") or "")
 
-    youtube = config.get("youtube", {})
-    default_id = normalize_account_id(youtube.get("default_account_id") or "") if isinstance(youtube, dict) else ""
-    if default_id:
-        return default_id
+
+def resolve_channel_account_for_action(config: dict[str, Any], channel: dict[str, Any]) -> tuple[str, str]:
+    explicit = normalize_account_id(channel.get("youtube_account_id") or "")
+    if explicit:
+        return explicit, ""
 
     connected = connected_account_slots(config)
-    if len(connected) == 1:
-        return str(connected[0].get("id") or "")
-    return ""
+    if len(connected) > 1:
+        return "", "missing_linked_account_multiple_connected"
+    accounts = normalize_youtube_accounts(config)
+    if len(accounts) > 1:
+        return "", "missing_linked_account_multiple_slots"
+    return "", "missing_linked_account"
 
 
 def youtube_status(config_name: str) -> dict[str, Any]:
@@ -642,6 +824,7 @@ def youtube_status(config_name: str) -> dict[str, Any]:
             "channel_id": str(account.get("channel_id") or ""),
             "channel_title": str(account.get("channel_title") or ""),
             "channel_handle": str(account.get("channel_handle") or ""),
+            "expected_channel_name": youtube_account_expected_channel_name(config, account),
             "message": "Not connected.",
         }
         try:
@@ -654,21 +837,28 @@ def youtube_status(config_name: str) -> dict[str, Any]:
             account_statuses.append(item)
             continue
 
+        item["has_token"] = True
         item["expires_at"] = tokens.get("expires_at")
         try:
             access_token, valid_tokens = youtube_service.valid_access_token(ROOT, scoped_config)
             profile = youtube_service.connected_account_profile(access_token)
+            mismatch_message = youtube_profile_mismatch_message(item["expected_channel_name"], profile)
             item.update(
                 {
-                    "connected": True,
                     "channel_id": profile.get("channel_id") or item["channel_id"],
                     "channel_title": profile.get("channel_title") or item["channel_title"],
                     "channel_handle": profile.get("channel_handle") or item["channel_handle"],
                     "scopes": valid_tokens.get("scope"),
                     "expires_at": valid_tokens.get("expires_at"),
-                    "message": "Connected.",
                 }
             )
+            if mismatch_message:
+                item["wrong_account"] = True
+                item["message"] = mismatch_message
+                account_statuses.append(item)
+                continue
+            item["connected"] = True
+            item["message"] = "Connected."
             connected_count += 1
         except Exception as exc:
             item["message"] = str(exc)
@@ -712,15 +902,21 @@ def cleanup_expired_oauth_states() -> None:
             STATE.youtube_oauth_states.pop(key, None)
 
 
-def create_youtube_auth_start(config_name: str, account_id: str, label: str = "") -> dict[str, Any]:
+def create_youtube_auth_start(config_name: str, account_id: str, label: str = "", channel_name: str = "") -> dict[str, Any]:
     config, error = load_config_or_none(config_name)
     if not config:
         raise ValueError(error or "Config not found.")
     youtube_service.ensure_shape(config)
     if not youtube_service.credentials_ready(config):
         raise ValueError("YouTube OAuth client ID/secret are missing in Settings > YouTube.")
-    resolved_account_id = normalize_account_id(account_id or "") or next_account_id(config)
+    expected_channel_name = str(channel_name or "").strip()
+    if expected_channel_name and not find_channel_by_name(config, expected_channel_name):
+        raise ValueError(f"Unknown Castarro channel: {expected_channel_name}")
+    reusable_account = None if account_id else find_reusable_youtube_account_for_channel(config, expected_channel_name)
+    resolved_account_id = normalize_account_id(account_id or "") or normalize_account_id(reusable_account.get("id") if reusable_account else "") or next_account_id(config)
     account = ensure_youtube_account(config, resolved_account_id, label)
+    if expected_channel_name:
+        account["expected_channel_name"] = expected_channel_name
     save_config(config_name, config)
 
     settings = youtube_service.merge_settings(config)
@@ -737,6 +933,7 @@ def create_youtube_auth_start(config_name: str, account_id: str, label: str = ""
             "created_at": time.time(),
             "config_name": config_name,
             "account_id": str(account.get("id") or ""),
+            "channel_name": expected_channel_name,
             "code_verifier": code_verifier,
         }
     return {
@@ -747,8 +944,11 @@ def create_youtube_auth_start(config_name: str, account_id: str, label: str = ""
     }
 
 
-def youtube_oauth_popup_html(status: str, message: str) -> str:
-    payload = json.dumps({"type": "youtube-auth", "status": status, "message": message}).replace("</", "<\\/")
+def youtube_oauth_popup_html(status: str, message: str, details: dict[str, Any] | None = None) -> str:
+    payload_data = {"type": "youtube-auth", "status": status, "message": message}
+    if isinstance(details, dict):
+        payload_data.update(details)
+    payload = json.dumps(payload_data).replace("</", "<\\/")
     safe_message = message.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     return f"""<!doctype html>
 <html lang="en">
@@ -773,7 +973,7 @@ def youtube_oauth_popup_html(status: str, message: str) -> str:
       (() => {{
         const payload = {payload};
         if (window.opener) {{
-          window.opener.postMessage(payload, window.location.origin);
+          window.opener.postMessage(payload, "*");
         }}
         setTimeout(() => window.close(), 300);
       }})();
@@ -796,6 +996,7 @@ def handle_youtube_oauth_callback(query: dict[str, list[str]]) -> str:
 
     config_name = str(state_payload.get("config_name") or DEFAULT_CONFIG)
     account_id = normalize_account_id(state_payload.get("account_id") or "")
+    expected_channel_name = str(state_payload.get("channel_name") or "").strip()
     config, error = load_config_or_none(config_name)
     if not config:
         return youtube_oauth_popup_html("error", error or "Config not found.")
@@ -813,16 +1014,44 @@ def handle_youtube_oauth_callback(query: dict[str, list[str]]) -> str:
         youtube_service.exchange_code_for_tokens(ROOT, scoped_config, auth_code, code_verifier=code_verifier)
         access_token, _tokens = youtube_service.valid_access_token(ROOT, scoped_config)
         profile = youtube_service.connected_account_profile(access_token)
+        mismatch_message = youtube_profile_mismatch_message(expected_channel_name, profile) if expected_channel_name else ""
         account["channel_id"] = str(profile.get("channel_id") or "")
         account["channel_title"] = str(profile.get("channel_title") or "")
         account["channel_handle"] = str(profile.get("channel_handle") or "")
+        account["expected_channel_name"] = expected_channel_name
         account["last_connected_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        if expected_channel_name:
+            channel = find_channel_by_name(config, expected_channel_name)
+            if not channel:
+                raise ValueError(f"Unknown Castarro channel: {expected_channel_name}")
+            channel["youtube_account_id"] = account_id
         save_config(config_name, config)
+        if mismatch_message:
+            return youtube_oauth_popup_html(
+                "error",
+                mismatch_message,
+                {
+                    "account_id": account_id,
+                    "channel_title": str(profile.get("channel_title") or ""),
+                    "channel_handle": str(profile.get("channel_handle") or ""),
+                    "expected_channel_name": expected_channel_name,
+                    "wrong_account": True,
+                },
+            )
     except Exception as exc:
         return youtube_oauth_popup_html("error", str(exc))
 
     title = str(profile.get("channel_title") or "your channel")
-    return youtube_oauth_popup_html("ok", f"Connected to {title}.")
+    return youtube_oauth_popup_html(
+        "ok",
+        f"Connected to {title}.",
+        {
+            "account_id": account_id,
+            "channel_title": title,
+            "channel_handle": str(profile.get("channel_handle") or ""),
+            "expected_channel_name": expected_channel_name,
+        },
+    )
 
 
 def youtube_broadcasts(config_name: str, account_id: str | None = None) -> dict[str, Any]:
@@ -847,6 +1076,10 @@ def youtube_broadcasts(config_name: str, account_id: str | None = None) -> dict[
 
     scoped_config = account_config_view(config, target)
     access_token, _tokens = youtube_service.valid_access_token(ROOT, scoped_config)
+    profile = youtube_service.connected_account_profile(access_token)
+    mismatch_message = youtube_profile_mismatch_message(youtube_account_expected_channel_name(config, target), profile)
+    if mismatch_message:
+        raise ValueError(mismatch_message)
     return {
         "ok": True,
         "account_id": str(target.get("id") or ""),
@@ -1002,6 +1235,7 @@ def verify_youtube_channel_keys(
                     "channel": channel_name_text,
                     "ok": False,
                     "status": "missing_account",
+                    "guard_reason": "missing_linked_account",
                     "message": "No YouTube account slot is linked to this Castarro channel.",
                     "account_id": "",
                     "account_label": "",
@@ -1022,6 +1256,7 @@ def verify_youtube_channel_keys(
                     "channel": channel_name_text,
                     "ok": False,
                     "status": "unknown_account",
+                    "guard_reason": "unknown_linked_account",
                     "message": f"Linked YouTube account slot '{mapped_account_id}' was not found.",
                     "account_id": mapped_account_id,
                     "account_label": mapped_account_id,
@@ -1062,6 +1297,7 @@ def verify_youtube_channel_keys(
                         "channel": channel_name_text,
                         "ok": False,
                         "status": "account_not_connected",
+                        "guard_reason": "account_not_connected",
                         "message": f"YouTube account slot '{mapped_account_id}' is not connected: {exc}",
                         "account_id": mapped_account_id,
                         "account_label": str(account.get("label") or mapped_account_id),
@@ -1086,6 +1322,7 @@ def verify_youtube_channel_keys(
         )
         result["account_id"] = mapped_account_id
         result["account_label"] = str(account.get("label") or mapped_account_id)
+        result["guard_reason"] = "" if result.get("ok") else str(result.get("status") or "verification_failed")
         checks.append(result)
 
     matched = sum(1 for item in checks if item.get("ok"))
@@ -1099,13 +1336,16 @@ def verify_youtube_channel_keys(
         }
         for account_id, profile in connected_profiles.items()
     ]
-    return {
+    payload: dict[str, Any] = {
         "ok": True,
         "connected_accounts": connected_accounts_summary,
         "checked_count": len(checks),
         "matched_count": matched,
         "checks": checks,
     }
+    if channel_name:
+        payload["channel"] = channel_name
+    return payload
 
 
 def assert_youtube_channel_keys_match(config_name: str, channel_name: str | None = None) -> None:
@@ -1165,16 +1405,29 @@ def schedule_youtube(config_name: str, body: dict[str, Any]) -> dict[str, Any]:
             raise ValueError(f"Unknown channel: {channel_name}")
 
     requested_account_id = normalize_account_id(body.get("account_id") or "")
-    linked_account_id = channel_account_id(config, selected_channel or {}) if selected_channel else ""
-    account_id = requested_account_id or linked_account_id
+    account_id, guard_reason = resolve_channel_account_for_action(config, selected_channel or {})
     if not account_id:
-        raise ValueError("No linked YouTube account slot found for this Castarro channel.")
+        reason_text = (
+            "No linked YouTube account slot found for this Castarro channel."
+            if not guard_reason
+            else f"No linked YouTube account slot found for this Castarro channel ({guard_reason})."
+        )
+        raise ValueError(reason_text)
+    if requested_account_id and requested_account_id != account_id:
+        raise ValueError(
+            "Requested account does not match this channel's linked account mapping "
+            f"(requested={requested_account_id}, resolved={account_id})."
+        )
     account = find_youtube_account(config, account_id)
     if not account:
         raise ValueError(f"Linked YouTube account slot '{account_id}' was not found.")
 
     scoped_config = account_config_view(config, account)
     access_token, _tokens = youtube_service.valid_access_token(ROOT, scoped_config)
+    profile = youtube_service.connected_account_profile(access_token)
+    mismatch_message = youtube_profile_mismatch_message(channel_name or youtube_account_expected_channel_name(config, account), profile)
+    if mismatch_message:
+        raise ValueError(mismatch_message)
     created = youtube_service.schedule_broadcast(
         access_token,
         title=title,
@@ -1204,6 +1457,7 @@ def schedule_youtube(config_name: str, body: dict[str, Any]) -> dict[str, Any]:
         "channel": channel_name,
         "account_id": account_id,
         "account_label": str(account.get("label") or account_id),
+        "guard_reason": guard_reason,
     }
 
 
@@ -1317,6 +1571,75 @@ def normalized_video_files(config_name: str, channel_name: str | None) -> list[d
     ]
 
 
+def thumbnail_source_for_request(config_name: str, channel_name: str | None, requested_path: str) -> tuple[dict[str, Any], Path]:
+    config, error = load_config_or_none(config_name)
+    if not config:
+        raise ValueError(error or "Config not found.")
+    requested = resolve_project_path(requested_path).resolve()
+    if not requested.exists() or not requested.is_file() or requested.suffix.lower() not in VIDEO_EXTENSIONS:
+        raise ValueError("Video was not found.")
+
+    for item in normalized_video_files(config_name, channel_name):
+        candidate = resolve_project_path(str(item.get("path") or "")).resolve()
+        if candidate == requested:
+            return config, requested
+
+    raise ValueError("Video is not part of this channel's live videos.")
+
+
+def video_thumbnail(config_name: str, channel_name: str | None, requested_path: str) -> Path:
+    if not requested_path:
+        raise ValueError("Video path is required.")
+
+    config, source = thumbnail_source_for_request(config_name, channel_name, requested_path)
+    stat = source.stat()
+    cache_key = hashlib.sha256(
+        f"{source}|{stat.st_mtime_ns}|{stat.st_size}".encode("utf-8")
+    ).hexdigest()
+    cache_dir = ROOT / ".runtime" / "thumbnails"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    target = cache_dir / f"{cache_key}.jpg"
+    if target.exists():
+        return target
+
+    tmp = cache_dir / f"{cache_key}.tmp.jpg"
+    tmp.unlink(missing_ok=True)
+    ffmpeg_path = str(config.get("defaults", {}).get("ffmpeg_path") or "ffmpeg")
+    command = [
+        ffmpeg_path,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-ss",
+        "00:00:01",
+        "-i",
+        str(source),
+        "-frames:v",
+        "1",
+        "-vf",
+        "scale=160:-1",
+        str(tmp),
+    ]
+    completed = subprocess.run(
+        command,
+        cwd=str(ROOT),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=20,
+        creationflags=windows_creation_flags(),
+        check=False,
+    )
+    if completed.returncode != 0 or not tmp.exists():
+        tmp.unlink(missing_ok=True)
+        message = (completed.stderr or completed.stdout or "Could not create thumbnail.").strip()
+        raise ValueError(message)
+
+    tmp.replace(target)
+    return target
+
+
 def normalized_video_count(config: dict[str, Any], channel_name: str) -> int:
     defaults = config.get("defaults", {})
     go_live_dir = resolve_project_path(defaults.get("normalized_dir", "Go Live"))
@@ -1389,6 +1712,56 @@ def upload_raw_video(handler: BaseHTTPRequestHandler, query: dict[str, list[str]
     return {"ok": True, "saved": saved, "files": raw_video_files(config_name, channel_name)}
 
 
+def upload_youtube_thumbnail(handler: BaseHTTPRequestHandler, query: dict[str, list[str]]) -> dict[str, Any]:
+    config_name = safe_config_name(query.get("config", [None])[0])
+    account_id = normalize_account_id(query.get("account", [""])[0])
+    broadcast_id = str(query.get("broadcast", [""])[0]).strip()
+    filename = sanitize_filename(query.get("filename", ["thumbnail.jpg"])[0])
+    if not account_id:
+        raise ValueError("YouTube account slot is required.")
+    if not broadcast_id:
+        raise ValueError("Broadcast ID is required.")
+    if Path(filename).suffix.lower() not in THUMBNAIL_EXTENSIONS:
+        raise ValueError("Unsupported thumbnail file type.")
+
+    remaining = int(handler.headers.get("Content-Length", "0"))
+    if remaining <= 0:
+        raise ValueError("Thumbnail upload is empty.")
+    if remaining > THUMBNAIL_MAX_BYTES:
+        raise ValueError("Thumbnail must be 2 MB or smaller.")
+
+    image_data = handler.rfile.read(remaining)
+    if len(image_data) != remaining:
+        raise ValueError("Upload ended before the full thumbnail was received.")
+
+    config, error = load_config_or_none(config_name)
+    if not config:
+        raise ValueError(error or "Config not found.")
+    account = find_youtube_account(config, account_id)
+    if not account:
+        raise ValueError(f"Unknown YouTube account slot: {account_id}")
+
+    scoped_config = account_config_view(config, account)
+    access_token, _tokens = youtube_service.valid_access_token(ROOT, scoped_config)
+    content_type_header = str(handler.headers.get("Content-Type") or "").split(";", 1)[0].strip()
+    content_type_map = {
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+        ".gif": "image/gif",
+        ".bmp": "image/bmp",
+    }
+    content_type_value = content_type_header or content_type_map.get(Path(filename).suffix.lower(), "application/octet-stream")
+    result = youtube_service.upload_thumbnail(
+        access_token,
+        video_id=broadcast_id,
+        image_data=image_data,
+        content_type=content_type_value,
+    )
+    app_db.record_event("youtube_thumbnail_uploaded", config_name, None, {"broadcast_id": broadcast_id, "account_id": account_id})
+    return {"ok": True, "broadcast_id": broadcast_id, "account_id": account_id, "thumbnail": result}
+
+
 def available_configs() -> list[str]:
     return sorted(path.name for path in ROOT.glob("*.json") if path.is_file())
 
@@ -1436,6 +1809,24 @@ def stop_task(task_id: str | None = None, channel_name: str | None = None, actio
             app_db.record_event("task_stop_requested", task.config_name, task.channel_name, {"task_id": task.id, "action": task.name})
             stopped.append(task.id)
     return stopped
+
+
+def clear_activity_logs(config_name: str, preserve_running_tasks: bool = True) -> dict[str, int]:
+    removed_task_count = 0
+    with STATE.lock:
+        retained: deque[Task] = deque(maxlen=STATE.tasks.maxlen)
+        for task in list(STATE.tasks):
+            if task.config_name != config_name:
+                retained.append(task)
+                continue
+            if preserve_running_tasks and task.process.poll() is None:
+                retained.append(task)
+                continue
+            removed_task_count += 1
+        STATE.tasks = retained
+
+    removed_event_count = app_db.clear_app_events(config_name, include_global=True)
+    return {"tasks": removed_task_count, "events": removed_event_count}
 
 
 def start_stream(config_name: str, channel_name: str | None) -> list[str]:
@@ -1635,8 +2026,9 @@ class Handler(BaseHTTPRequestHandler):
                 config_name = safe_config_name(query.get("config", [DEFAULT_CONFIG])[0])
                 account_id = str(query.get("account", [""])[0] or "").strip()
                 label = str(query.get("label", [""])[0] or "").strip()
+                channel_name = str(query.get("channel", [""])[0] or "").strip()
                 update_request_trace(self, config_name=config_name)
-                json_response(self, create_youtube_auth_start(config_name, account_id, label))
+                json_response(self, create_youtube_auth_start(config_name, account_id, label, channel_name))
                 return
 
             if parsed.path == "/api/youtube/oauth/callback":
@@ -1687,6 +2079,21 @@ class Handler(BaseHTTPRequestHandler):
                 json_response(self, {"files": normalized_video_files(config_name, channel)})
                 return
 
+            if parsed.path == "/api/video-thumbnail":
+                config_name = safe_config_name(query.get("config", [DEFAULT_CONFIG])[0])
+                channel = query.get("channel", [""])[0] or None
+                requested_path = query.get("path", [""])[0] or ""
+                update_request_trace(self, config_name=config_name, channel_name=channel)
+                thumbnail = video_thumbnail(config_name, channel, requested_path)
+                write_response(
+                    self,
+                    200,
+                    thumbnail.read_bytes(),
+                    "image/jpeg",
+                    {"Cache-Control": "public, max-age=86400"},
+                )
+                return
+
             path = WEB_ROOT / ("index.html" if parsed.path == "/" else parsed.path.lstrip("/"))
             path = path.resolve()
             if not str(path).startswith(str(WEB_ROOT.resolve())) or not path.exists():
@@ -1699,7 +2106,8 @@ class Handler(BaseHTTPRequestHandler):
             if is_client_disconnect_error(exc):
                 return
             try:
-                json_response(self, {"error": str(exc)}, 500)
+                status_code = 400 if isinstance(exc, ValueError) else 500
+                json_response(self, {"error": str(exc)}, status_code)
             except Exception as write_exc:
                 if not is_client_disconnect_error(write_exc):
                     print(f"[ui] error response failed: {write_exc}")
@@ -1717,6 +2125,10 @@ class Handler(BaseHTTPRequestHandler):
             )
             if parsed.path == "/api/raw-files/upload":
                 json_response(self, upload_raw_video(self, query))
+                return
+
+            if parsed.path == "/api/youtube/thumbnail":
+                json_response(self, upload_youtube_thumbnail(self, query))
                 return
 
             body = read_body(self)
@@ -1822,6 +2234,20 @@ class Handler(BaseHTTPRequestHandler):
                 json_response(self, {"ok": True, "stopped": stopped})
                 return
 
+            if parsed.path == "/api/activity/clear":
+                preserve_running_tasks = bool(body.get("preserve_running_tasks", True))
+                cleared = clear_activity_logs(config_name, preserve_running_tasks)
+                json_response(
+                    self,
+                    {
+                        "ok": True,
+                        "cleared_tasks": cleared["tasks"],
+                        "cleared_events": cleared["events"],
+                        "preserve_running_tasks": preserve_running_tasks,
+                    },
+                )
+                return
+
             if parsed.path == "/api/system/shutdown":
                 stop_streams = bool(body.get("stop_streams", True))
                 stop_tasks_requested = bool(body.get("stop_tasks", True))
@@ -1846,7 +2272,8 @@ class Handler(BaseHTTPRequestHandler):
             if is_client_disconnect_error(exc):
                 return
             try:
-                json_response(self, {"error": str(exc)}, 500)
+                status_code = 400 if isinstance(exc, ValueError) else 500
+                json_response(self, {"error": str(exc)}, status_code)
             except Exception as write_exc:
                 if not is_client_disconnect_error(write_exc):
                     print(f"[ui] error response failed: {write_exc}")

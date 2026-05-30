@@ -2,33 +2,33 @@
 
 ## TODO Tracker
 - [ ] Phase 0: Baseline and safety net
-  - [ ] Capture current screenshots for Control, Normalize, Live, YouTube tabs
-  - [ ] Add smoke test checklist for: schedule, start stream, stop stream, verify keys
-  - [ ] Add feature flag: `ui.channel_workspace_enabled` (default `false`)
+  - [x] Capture current screenshots for Control, Normalize, Live, YouTube tabs
+  - [x] Add smoke test checklist for: schedule, start stream, stop stream, verify keys
+  - [x] Add feature flag: `ui.channel_workspace_enabled` (default `false`)
 - [ ] Phase 1: Information architecture and navigation
-  - [ ] Add persistent channel switcher (left rail or top selector)
-  - [ ] Add global overview strip (all channels status)
-  - [ ] Add active channel header with linked YouTube account badge
+  - [x] Add persistent channel switcher (left rail or top selector)
+  - [x] Add global overview strip (all channels status)
+  - [x] Add active channel header with linked YouTube account badge
 - [ ] Phase 2: State architecture refactor (frontend)
-  - [ ] Introduce `workspace.selectedChannelName`
-  - [ ] Introduce normalized selectors: selected channel, linked account, channel-scoped tasks/logs
-  - [ ] Ensure channel switch triggers fresh loads and UI rebind
+  - [x] Introduce `workspace.selectedChannelName`
+  - [x] Introduce normalized selectors: selected channel, linked account, channel-scoped tasks/logs
+  - [x] Ensure channel switch triggers fresh loads and UI rebind
 - [ ] Phase 3: Channel workspace UI composition
-  - [ ] Build channel-scoped sections: Normalize, Live Output, YouTube Mapping, Schedule, Logs
-  - [ ] Keep global actions outside workspace: Start All, Stop All, global verify summary
-  - [ ] Add channel context guard banner before destructive/critical actions
+  - [x] Build channel-scoped sections: Normalize, Live Output, YouTube Mapping, Schedule, Logs
+  - [x] Keep global actions outside workspace: Start All, Stop All, global verify summary
+  - [x] Add channel context guard banner before destructive/critical actions
 - [ ] Phase 4: Backend/API contract hardening
-  - [ ] Standardize channel-scoped endpoints to require explicit `channel`
-  - [ ] Standardize schedule response with `channel`, `account_id`, `account_label`
-  - [ ] Add server-side guardrails for missing/unlinked channel-account mapping
+  - [x] Standardize channel-scoped endpoints to require explicit `channel`
+  - [x] Standardize schedule response with `channel`, `account_id`, `account_label`
+  - [x] Add server-side guardrails for missing/unlinked channel-account mapping
 - [ ] Phase 5: Migration and backward compatibility
-  - [ ] Auto-migrate old config shape to new shape on load
-  - [ ] Fallback behavior when only one account exists and channel link is empty
-  - [ ] Keep legacy tabs accessible behind fallback toggle during transition
+  - [x] Auto-migrate old config shape to new shape on load
+  - [x] Fallback behavior when only one account exists and channel link is empty
+  - [x] Keep legacy tabs accessible behind fallback toggle during transition
 - [ ] Phase 6: Test and release hardening
-  - [ ] Add UI regression checklist per channel switch scenario
-  - [ ] Add end-to-end schedule tests for channels A/B/C mapped to different accounts
-  - [ ] Add rollback path to old UI with feature flag
+  - [x] Add UI regression checklist per channel switch scenario
+  - [x] Add end-to-end schedule tests for channels A/B/C mapped to different accounts
+  - [x] Add rollback path to old UI with feature flag
   - [ ] Perform staged rollout: internal -> pilot -> full
 
 ---
@@ -142,7 +142,7 @@ For scheduling and verification include:
 
 ### 5.4 Server guardrails
 - Reject scheduling if channel has no linked account and more than one connected account exists.
-- Permit auto-fallback only when exactly one connected account exists.
+- Require an explicit channel-account mapping; do not auto-fallback to a connected account.
 - Keep verification non-fatal for `missing_account` status; fatal only for true mismatches when streaming/scheduling.
 
 ## 6) Data and Config Schema
@@ -223,7 +223,7 @@ Out of scope (for this initiative):
 
 ## 11) Definition of Done
 1. User can select channel once and complete all channel tasks in one workspace.
-2. Schedule always executes on selected channel’s linked YouTube account (or safe single-account fallback).
+2. Schedule always executes on selected channel’s linked YouTube account.
 3. Global overview + bulk controls remain available and accurate.
 4. All smoke tests pass, and feature flag rollback is verified.
 

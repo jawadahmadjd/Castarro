@@ -67,15 +67,13 @@ The UI lets you:
 The UI has two tabs:
 
 - `Control`: start/stop streams, normalize, validate, and watch activity.
-- `Settings`: config file selection plus separate `Folders`, `Video Normalization`, `Live`, and `YouTube` menus.
+- `Settings`: config file selection plus `Folders`, `Video Normalization`, `YouTube`, and `Troubleshooting` menus.
 
 Inside `Settings`:
 
 - `Folders`: choose exact paths for Raw Videos, Go Live videos, and Logs.
 - `Video Normalization`: per-channel Add Videos, selected source files, and normalization profile.
-- `Live`: Go Live folder, FFmpeg settings, stream keys, YouTube Auto Start/Stop flags, and Add Channel.
-  - Includes an `FFmpeg Output Controls` card per channel where you can keep `copy` mode or switch to `transcode` and set bitrate/FPS/resolution/GOP/audio.
-- `YouTube`: user-facing connect/schedule controls only. OAuth technical fields are hidden from normal users.
+- `YouTube`: live playlist settings, stream keys, account mapping, connect/schedule controls, and Add Channel. OAuth technical fields are hidden from normal users.
 
 Desktop runtime behavior:
 

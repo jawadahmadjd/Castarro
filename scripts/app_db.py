@@ -20,9 +20,11 @@ def now() -> str:
 
 
 def connect() -> sqlite3.Connection:
-    connection = sqlite3.connect(DB_PATH)
+    connection = sqlite3.connect(DB_PATH, timeout=30)
     connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA busy_timeout = 30000")
     connection.execute("PRAGMA foreign_keys = ON")
+    connection.execute("PRAGMA journal_mode = WAL")
     return connection
 
 
@@ -507,3 +509,19 @@ def recent_app_events(config_name: str | None = None, limit: int = 40) -> list[d
             }
         )
     return events
+
+
+def clear_app_events(config_name: str | None = None, include_global: bool = True) -> int:
+    init_db()
+    with connect() as db:
+        if config_name:
+            if include_global:
+                cursor = db.execute(
+                    "DELETE FROM app_events WHERE config_name = ? OR config_name IS NULL",
+                    (config_name,),
+                )
+            else:
+                cursor = db.execute("DELETE FROM app_events WHERE config_name = ?", (config_name,))
+        else:
+            cursor = db.execute("DELETE FROM app_events")
+    return int(cursor.rowcount or 0)

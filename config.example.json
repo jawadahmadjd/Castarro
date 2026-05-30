@@ -61,6 +61,10 @@
     "default_auto_start": true,
     "default_auto_stop": true
   },
+  "ui": {
+    "channel_workspace_enabled": false,
+    "legacy_tabs_enabled": true
+  },
   "channels": [
     {
       "name": "channel_1",

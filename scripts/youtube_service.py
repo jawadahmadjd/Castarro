@@ -255,10 +255,10 @@ def exchange_code_for_tokens(
     if "access_token" not in payload:
         raise ValueError("Google token response did not include an access token.")
     if "refresh_token" not in payload:
-        raise ValueError(
-            "Google did not return a refresh token. Reconnect and accept consent again, "
-            "or revoke this app in your Google account and retry."
-        )
+        existing = load_tokens(config_dir, config, redirect_uri) or {}
+        refresh_token = str(existing.get("refresh_token") or "").strip()
+        if refresh_token:
+            payload["refresh_token"] = refresh_token
     payload["obtained_at"] = int(time.time())
     return save_tokens(config_dir, config, payload, redirect_uri)
 
@@ -327,6 +327,38 @@ def youtube_post(access_token: str, url: str, body: dict[str, Any] | None = None
     )
 
 
+def youtube_upload(access_token: str, url: str, data: bytes, content_type: str) -> dict[str, Any]:
+    request = urllib.request.Request(
+        url,
+        data=data,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Accept": "application/json",
+            "Content-Type": content_type or "application/octet-stream",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=45.0) as response:
+            raw = response.read()
+    except urllib.error.HTTPError as exc:
+        raw = exc.read() if hasattr(exc, "read") else b""
+        message = parse_api_error(raw, f"HTTP {exc.code} from {url}")
+        raise ValueError(message) from exc
+    except urllib.error.URLError as exc:
+        raise ValueError(f"Network error while reaching YouTube/Google APIs: {exc.reason}") from exc
+
+    if not raw:
+        return {}
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError("Received non-JSON response from YouTube/Google APIs.") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("Unexpected response shape from YouTube/Google APIs.")
+    return payload
+
+
 def connected_account_profile(access_token: str) -> dict[str, Any]:
     payload = youtube_get(
         access_token,
@@ -348,7 +380,7 @@ def list_upcoming_broadcasts(access_token: str, limit: int = 25) -> list[dict[st
     payload = youtube_get(
         access_token,
         "https://www.googleapis.com/youtube/v3/liveBroadcasts"
-        f"?part=id,snippet,status,contentDetails&broadcastStatus=upcoming&broadcastType=all&mine=true&maxResults={max(1, min(limit, 50))}",
+        f"?part=id,snippet,status,contentDetails&broadcastStatus=upcoming&broadcastType=all&maxResults={max(1, min(limit, 50))}",
     )
     items = payload.get("items")
     if not isinstance(items, list):
@@ -516,3 +548,17 @@ def schedule_broadcast(
         },
         "bind": bound,
     }
+
+
+def upload_thumbnail(access_token: str, *, video_id: str, image_data: bytes, content_type: str) -> dict[str, Any]:
+    if not video_id:
+        raise ValueError("Broadcast ID is required for thumbnail upload.")
+    if not image_data:
+        raise ValueError("Thumbnail upload is empty.")
+    return youtube_upload(
+        access_token,
+        "https://www.googleapis.com/upload/youtube/v3/thumbnails/set"
+        f"?videoId={urllib.parse.quote(video_id)}",
+        image_data,
+        content_type,
+    )

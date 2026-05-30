@@ -6,7 +6,7 @@
     <title>Castarro</title>
     <link rel="stylesheet" href="/styles.css">
   </head>
-  <body>
+  <body class="boot-loading">
     <main class="shell">
       <section class="hero">
         <div>
@@ -17,7 +17,7 @@
         <div class="hero-side">
           <div class="status-pill" id="serverState">Checking...</div>
           <nav class="tabs" aria-label="Main sections">
-            <button class="tab active" id="tabControl" type="button">Control</button>
+            <button class="tab active" id="tabControl" type="button">Dashboard</button>
             <button class="tab" id="tabSettings" type="button">Settings</button>
           </nav>
           <div class="desktop-actions">
@@ -32,6 +32,27 @@
         <button class="pill primary small" id="restartToUpdate" type="button" hidden>Restart to update</button>
       </section>
 
+      <section class="app-layout">
+        <aside class="panel channel-rail hidden" id="channelWorkspaceRail">
+          <div class="workspace-sidebar-head">
+            <h3>Channels</h3>
+            <span class="badge" id="workspaceChannelCountBadge">0 channels</span>
+          </div>
+          <p class="helper">Pick a channel once, then jump into that channel's dashboard or settings.</p>
+          <div class="workspace-channel-list" id="workspaceChannelList">
+            <div class="workspace-channel-skeleton skeleton-block"></div>
+            <div class="workspace-channel-skeleton skeleton-block"></div>
+            <div class="workspace-channel-skeleton skeleton-block"></div>
+          </div>
+          <div class="channel-rail-actions">
+            <button class="pill small" id="railOpenDashboard" type="button">Dashboard</button>
+            <button class="pill ghost small" id="railOpenNormalize" type="button">Normalize</button>
+            <button class="pill ghost small" id="railOpenLive" type="button">Live Settings</button>
+            <button class="pill ghost small" id="railOpenYoutube" type="button">YouTube</button>
+          </div>
+        </aside>
+
+        <section class="app-layout-main">
       <section id="viewControl" class="tab-view active">
         <section class="panel controls">
           <div class="section-head">
@@ -39,14 +60,53 @@
               <h2>Live Controls</h2>
               <p class="helper">Use these after your channel videos are normalized and ready.</p>
             </div>
-            <span id="activeConfigLabel">No config</span>
+            <span id="activeConfigLabel">Loading config</span>
           </div>
           <div class="row wrap">
             <button class="pill success" id="startAll">Start streams</button>
             <button class="pill danger" id="stopAll">Stop streams</button>
+            <button class="pill ghost" id="workspaceVerifyAll" type="button">Verify All Channels</button>
+            <span class="badge" id="workspaceGlobalVerifySummary">Global verify summary: not run yet.</span>
           </div>
           <div class="notice" id="autoNotice">
-            YouTube Auto Start/Stop readiness will appear after a config is loaded.
+            Loading dashboard...
+          </div>
+        </section>
+
+        <section class="panel workspace-panel hidden" id="channelWorkspacePanel">
+          <div class="section-head">
+            <div>
+              <h2>Channel Workspace</h2>
+              <p class="helper">Select one channel and complete its flow from normalize to schedule without losing context.</p>
+            </div>
+          </div>
+          <div class="workspace-layout">
+            <section class="workspace-main">
+              <div class="workspace-overview-strip" id="workspaceOverviewStrip">
+                <div class="workspace-overview-stat skeleton-stat skeleton-block"></div>
+                <div class="workspace-overview-stat skeleton-stat skeleton-block"></div>
+                <div class="workspace-overview-stat skeleton-stat skeleton-block"></div>
+                <div class="workspace-overview-stat skeleton-stat skeleton-block"></div>
+              </div>
+              <section class="nested-card workspace-focus-card">
+                <div class="section-head compact">
+                  <div>
+                    <h3 id="workspaceChannelName">No channel selected</h3>
+                    <p class="helper">Linked account shown here is used for scoped schedule and verification actions.</p>
+                  </div>
+                  <span class="badge warn" id="workspaceLinkedAccountBadge">No linked account</span>
+                </div>
+                <div class="row wrap">
+                  <a class="studio-link hidden" id="workspaceOpenStudio" href="#" target="_blank">Open Studio</a>
+                </div>
+                <div class="notice warn" id="workspaceContextGuard">Select a channel to continue.</div>
+              </section>
+              <section class="workspace-modules" id="workspaceModules">
+                <article class="nested-card workspace-module-card skeleton-module skeleton-block"></article>
+                <article class="nested-card workspace-module-card skeleton-module skeleton-block"></article>
+                <article class="nested-card workspace-module-card skeleton-module skeleton-block"></article>
+              </section>
+            </section>
           </div>
         </section>
 
@@ -71,7 +131,7 @@
           <div class="notice warn hidden" id="previewWarning"></div>
         </section>
 
-        <section>
+        <section id="legacyChannelsPanel">
           <div class="panel">
             <div class="section-head">
               <h2>Channels</h2>
@@ -88,8 +148,8 @@
             <div class="tabs">
               <button class="tab active" id="settingsFoldersTab" type="button">Folders</button>
               <button class="tab" id="settingsNormalizeTab" type="button">Video Normalization</button>
-              <button class="tab" id="settingsLiveTab" type="button">Live</button>
               <button class="tab" id="settingsYoutubeTab" type="button">YouTube</button>
+              <button class="tab" id="settingsTroubleshootingTab" type="button">Troubleshooting</button>
             </div>
             <button class="pill primary" id="saveSettings">Save settings</button>
           </div>
@@ -123,80 +183,64 @@
           </section>
         </section>
 
-        <section id="settingsLiveView" class="settings-section">
-          <section class="panel">
-            <div class="section-head">
-              <div>
-                <h2>Channel Settings</h2>
-                <p class="helper">Add as many channels as you need. Open a channel to edit it.</p>
-              </div>
-              <button class="pill primary" id="addChannel">Add Channel</button>
-            </div>
-            <div class="channel-settings-list" id="channelSettings"></div>
-          </section>
-        </section>
-
         <section id="settingsYoutubeView" class="settings-section">
           <section class="panel">
             <div class="section-head">
               <div>
                 <h2>YouTube Integration</h2>
-                <p class="helper">Connect once with your Google account, then schedule broadcasts and auto-fill stream keys.</p>
+                <p class="helper">Connect YouTube, choose live files, schedule broadcasts, and auto-fill stream keys.</p>
               </div>
+              <button class="pill primary" id="addChannel">Add Channel</button>
             </div>
             <div id="youtubeSettingsPanel"></div>
           </section>
         </section>
 
-        <section class="grid" id="activityStreamGrid">
-          <div class="panel" id="activityPanel">
-            <div class="section-head">
-              <h2>Activity</h2>
-              <div class="row wrap">
-                <span id="taskState">Idle</span>
-                <span class="helper">Newest first</span>
-                <div class="activity-filters">
-                  <button class="pill ghost small active" id="activityFilterAll" type="button">All</button>
-                  <button class="pill ghost small" id="activityFilterTasks" type="button">Tasks</button>
-                  <button class="pill ghost small" id="activityFilterApi" type="button">API</button>
-                  <button class="pill ghost small" id="activityFilterErrors" type="button">Errors</button>
+        <section id="settingsTroubleshootingView" class="settings-section">
+          <section class="grid" id="activityStreamGrid">
+            <div class="panel" id="activityPanel">
+              <div class="section-head">
+                <h2>Activity</h2>
+                <div class="row wrap">
+                  <span id="taskState">Idle</span>
+                  <span class="helper">Newest first</span>
+                  <div class="activity-filters">
+                    <button class="pill ghost small active" id="activityFilterAll" type="button">All</button>
+                    <button class="pill ghost small" id="activityFilterTasks" type="button">Tasks</button>
+                    <button class="pill ghost small" id="activityFilterApi" type="button">API</button>
+                    <button class="pill ghost small" id="activityFilterErrors" type="button">Errors</button>
+                  </div>
+                  <button class="pill danger small" type="button" onclick="clearActivityLogs()">Clear Activity Logs</button>
+                  <button class="pill ghost small" type="button" onclick="copyActivityLogs()">Copy Activity Logs</button>
                 </div>
-                <button class="pill ghost small" type="button" onclick="copyActivityLogs()">Copy Activity Logs</button>
               </div>
+              <div id="tasks" class="tasks"></div>
             </div>
-            <div id="tasks" class="tasks"></div>
-          </div>
 
-          <div
-            class="splitter"
-            id="activityStreamSplitter"
-            role="separator"
-            aria-label="Resize activity and stream logs panels"
-            aria-orientation="vertical"
-            tabindex="0"
-          ></div>
+            <div
+              class="splitter"
+              id="activityStreamSplitter"
+              role="separator"
+              aria-label="Resize activity and stream logs panels"
+              aria-orientation="vertical"
+              tabindex="0"
+            ></div>
 
-          <section class="panel logs" id="streamLogsPanel">
-            <div class="section-head">
-              <h2>Stream Logs</h2>
-              <div class="row wrap">
-                <button class="pill ghost small" type="button" onclick="copyStreamLogs()">Copy</button>
-                <span>Latest tails</span>
+            <section class="panel logs" id="streamLogsPanel">
+              <div class="section-head">
+                <h2>Stream Logs</h2>
+                <div class="row wrap">
+                  <button class="pill ghost small" type="button" onclick="copyStreamLogs()">Copy</button>
+                  <span>Latest tails</span>
+                </div>
               </div>
-            </div>
-            <pre id="streamLogs">No stream logs yet.</pre>
+              <pre id="streamLogs">No stream logs yet.</pre>
+            </section>
           </section>
         </section>
 
-        <section class="panel editor">
-          <div class="section-head">
-            <div>
-              <h2>Advanced JSON</h2>
-              <p class="helper">Optional fallback for exact manual edits.</p>
-            </div>
-            <button class="pill" id="saveConfig">Save JSON</button>
-          </div>
-          <textarea id="configEditor" spellcheck="false" placeholder="Create or load config.json to edit it here."></textarea>
+        <textarea id="configEditor" class="hidden" hidden spellcheck="false"></textarea>
+      </section>
         </section>
       </section>
     </main>

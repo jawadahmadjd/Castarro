@@ -1,6 +1,6 @@
 # YouTube Integration Upgrade TODO
 
-- [x] Add a dedicated `YouTube` tab inside `Settings` (separate from `Live`).
+- [x] Add a dedicated `YouTube` tab inside `Settings` and merge Live channel settings into it.
 - [x] Add YouTube OAuth settings fields (Client ID, Client Secret, Redirect URI, token file path).
 - [x] Add `Connect to YouTube`, `Refresh`, and `Disconnect` actions in UI.
 - [x] Implement backend OAuth flow (start URL, callback, token persistence, token refresh).

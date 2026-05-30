@@ -107,7 +107,7 @@ async function shot(scene) {
   }, scene.status);
 
   const page = await context.newPage();
-  await page.goto(URL, { waitUntil: "networkidle" });
+  await page.goto(URL, { waitUntil: "domcontentloaded" });
   await page.waitForSelector("#updateBanner:not(.hidden)", { timeout: 10000 });
   await page.screenshot({ path: path.join(OUT_DIR, `${scene.name}.png`), fullPage: true });
   await browser.close();
@@ -124,6 +124,7 @@ async function shot(scene) {
   } finally {
     await stopServer(server);
   }
+  process.exit(0);
 })().catch((error) => {
   console.error(error);
   process.exit(1);

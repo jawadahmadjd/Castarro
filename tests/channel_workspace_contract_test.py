@@ -1,0 +1,435 @@
+#!/usr/bin/env python3
+"""Contract tests for channel-scoped workspace scheduling and guardrails."""
+
+from __future__ import annotations
+
+import copy
+from pathlib import Path
+import sys
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "scripts"))
+
+import web_ui  # noqa: E402
+
+
+def make_config() -> dict:
+    return {
+        "defaults": {
+            "ffmpeg_path": "ffmpeg",
+            "ffprobe_path": "ffprobe",
+            "rtmp_base": "rtmp://example.invalid/live2",
+            "log_dir": "logs",
+            "runtime_dir": ".runtime",
+            "raw_dir": "Raw Videos",
+            "normalized_dir": "Go Live",
+            "normalized_playlist_dir": "playlists",
+            "restart_delay_seconds": 10,
+        },
+        "youtube": {
+            "client_id": "client",
+            "client_secret": "secret",
+            "oauth_client_type": "desktop",
+            "use_pkce": True,
+            "redirect_uri": "http://127.0.0.1:8765/oauth2redirect",
+            "accounts": [
+                {"id": "acct-a", "label": "Account A", "tokens_file": ".runtime/a.json"},
+                {"id": "acct-b", "label": "Account B", "tokens_file": ".runtime/b.json"},
+                {"id": "acct-c", "label": "Account C", "tokens_file": ".runtime/c.json"},
+            ],
+            "default_account_id": "",
+            "default_privacy_status": "unlisted",
+            "default_auto_start": True,
+            "default_auto_stop": True,
+        },
+        "channels": [
+            {"name": "A", "enabled": True, "youtube_account_id": "acct-a", "stream_key_env": "a-key"},
+            {"name": "B", "enabled": True, "youtube_account_id": "acct-b", "stream_key_env": "b-key"},
+            {"name": "C", "enabled": True, "youtube_account_id": "acct-c", "stream_key_env": "c-key"},
+        ],
+    }
+
+
+def stub_created(stream_name: str) -> dict:
+    return {
+        "broadcast": {"id": f"broadcast-{stream_name}", "studio_url": "https://studio.youtube.com/test"},
+        "stream": {"id": f"stream-{stream_name}", "stream_name": stream_name},
+    }
+
+
+def run_schedule(config: dict, body: dict, connected_slots: list[dict]) -> tuple[dict, dict]:
+    working = copy.deepcopy(config)
+    captured_save: dict = {}
+    created_calls: list[dict] = []
+
+    original_load = web_ui.load_config_or_none
+    original_save = web_ui.save_config
+    original_connected = web_ui.connected_account_slots
+    original_valid_token = web_ui.youtube_service.valid_access_token
+    original_profile = web_ui.youtube_service.connected_account_profile
+    original_schedule = web_ui.youtube_service.schedule_broadcast
+
+    def fake_load(_config_name: str):
+        return working, None
+
+    def fake_save(_config_name: str, updated: dict):
+        captured_save["config"] = copy.deepcopy(updated)
+
+    def fake_connected(_config: dict):
+        return copy.deepcopy(connected_slots)
+
+    def fake_valid_access_token(_root: Path, _config: dict):
+        return "token", {"expires_at": "2099-01-01T00:00:00Z"}
+
+    def fake_connected_account_profile(_token: str):
+        return {
+            "channel_id": f"yt-{body.get('channel')}",
+            "channel_title": str(body.get("channel") or ""),
+            "channel_handle": f"@{str(body.get('channel') or '').lower()}",
+        }
+
+    def fake_schedule_broadcast(_token: str, **kwargs):
+        created_calls.append(kwargs)
+        title = str(kwargs.get("title") or "untitled")
+        return stub_created(f"{title.lower().replace(' ', '-')}-key")
+
+    web_ui.load_config_or_none = fake_load
+    web_ui.save_config = fake_save
+    web_ui.connected_account_slots = fake_connected
+    web_ui.youtube_service.valid_access_token = fake_valid_access_token
+    web_ui.youtube_service.connected_account_profile = fake_connected_account_profile
+    web_ui.youtube_service.schedule_broadcast = fake_schedule_broadcast
+    try:
+        response = web_ui.schedule_youtube("config.ready.json", body)
+    finally:
+        web_ui.load_config_or_none = original_load
+        web_ui.save_config = original_save
+        web_ui.connected_account_slots = original_connected
+        web_ui.youtube_service.valid_access_token = original_valid_token
+        web_ui.youtube_service.connected_account_profile = original_profile
+        web_ui.youtube_service.schedule_broadcast = original_schedule
+
+    assert created_calls, "schedule_broadcast should be called once"
+    return response, captured_save.get("config", {})
+
+
+def assert_channel_scoped_schedule_routes_to_linked_accounts() -> None:
+    config = make_config()
+    for channel_name, expected_account_id in (("A", "acct-a"), ("B", "acct-b"), ("C", "acct-c")):
+        response, saved = run_schedule(
+            config,
+            {
+                "channel": channel_name,
+                "title": f"Show {channel_name}",
+                "description": "",
+                "privacy_status": "unlisted",
+                "scheduled_start_time": "2030-01-01T00:00:00Z",
+                "scheduled_end_time": "2030-01-01T01:00:00Z",
+                "auto_start": True,
+                "auto_stop": True,
+            },
+            connected_slots=[
+                {"id": "acct-a", "label": "Account A"},
+                {"id": "acct-b", "label": "Account B"},
+                {"id": "acct-c", "label": "Account C"},
+            ],
+        )
+        assert response["channel"] == channel_name
+        assert response["account_id"] == expected_account_id
+        assert response["account_label"], "account_label should be returned"
+        assert "guard_reason" in response
+        saved_channel = next(ch for ch in saved.get("channels", []) if ch.get("name") == channel_name)
+        assert saved_channel.get("youtube_account_id") == expected_account_id
+        assert saved_channel.get("youtube_stream_id"), "youtube_stream_id should be persisted"
+
+
+def assert_unlinked_channel_blocked_with_multiple_connected_accounts() -> None:
+    config = make_config()
+    for channel in config["channels"]:
+        channel["youtube_account_id"] = ""
+
+    original_load = web_ui.load_config_or_none
+    original_connected = web_ui.connected_account_slots
+    original_valid_token = web_ui.youtube_service.valid_access_token
+
+    web_ui.load_config_or_none = lambda _name: (copy.deepcopy(config), None)
+    web_ui.connected_account_slots = lambda _cfg: [
+        {"id": "acct-a", "label": "Account A"},
+        {"id": "acct-b", "label": "Account B"},
+    ]
+    web_ui.youtube_service.valid_access_token = lambda _root, _cfg: ("token", {})
+    try:
+        try:
+            web_ui.schedule_youtube(
+                "config.ready.json",
+                {
+                    "channel": "A",
+                    "title": "Guard Check",
+                    "description": "",
+                    "privacy_status": "unlisted",
+                    "scheduled_start_time": "2030-01-01T00:00:00Z",
+                    "scheduled_end_time": "2030-01-01T01:00:00Z",
+                    "auto_start": True,
+                    "auto_stop": True,
+                },
+            )
+        except ValueError as exc:
+            text = str(exc)
+            assert "missing_linked_account_multiple_connected" in text
+        else:
+            raise AssertionError("Expected ValueError for missing linked account with multiple connected accounts.")
+    finally:
+        web_ui.load_config_or_none = original_load
+        web_ui.connected_account_slots = original_connected
+        web_ui.youtube_service.valid_access_token = original_valid_token
+
+
+def assert_unlinked_channel_blocked_with_single_connected_account() -> None:
+    config = make_config()
+    config["channels"][2]["youtube_account_id"] = ""
+
+    original_load = web_ui.load_config_or_none
+    original_connected = web_ui.connected_account_slots
+    web_ui.load_config_or_none = lambda _name: (copy.deepcopy(config), None)
+    web_ui.connected_account_slots = lambda _cfg: [{"id": "acct-c", "label": "Account C"}]
+    try:
+        try:
+            web_ui.schedule_youtube(
+                "config.ready.json",
+                {
+                    "channel": "C",
+                    "title": "No Fallback C",
+                    "description": "",
+                    "privacy_status": "public",
+                    "scheduled_start_time": "2030-01-01T00:00:00Z",
+                    "scheduled_end_time": "2030-01-01T01:00:00Z",
+                    "auto_start": True,
+                    "auto_stop": True,
+                },
+            )
+        except ValueError as exc:
+            assert "missing_linked_account" in str(exc)
+        else:
+            raise AssertionError("Expected ValueError for unlinked channel even with one connected account.")
+    finally:
+        web_ui.load_config_or_none = original_load
+        web_ui.connected_account_slots = original_connected
+
+
+def assert_verify_reports_missing_account_as_nonfatal_status() -> None:
+    config = make_config()
+    config["channels"][0]["youtube_account_id"] = ""
+    original_load = web_ui.load_config_or_none
+    original_connected = web_ui.connected_account_slots
+    web_ui.load_config_or_none = lambda _name: (copy.deepcopy(config), None)
+    web_ui.connected_account_slots = lambda _cfg: []
+    try:
+        report = web_ui.verify_youtube_channel_keys("config.ready.json")
+    finally:
+        web_ui.load_config_or_none = original_load
+        web_ui.connected_account_slots = original_connected
+    checks = {item["channel"]: item for item in report["checks"]}
+    assert checks["A"]["status"] == "missing_account"
+    assert checks["A"]["guard_reason"] == "missing_linked_account"
+
+
+def assert_requested_account_mismatch_is_rejected() -> None:
+    config = make_config()
+    original_load = web_ui.load_config_or_none
+    original_connected = web_ui.connected_account_slots
+    web_ui.load_config_or_none = lambda _name: (copy.deepcopy(config), None)
+    web_ui.connected_account_slots = lambda _cfg: [
+        {"id": "acct-a", "label": "Account A"},
+        {"id": "acct-b", "label": "Account B"},
+    ]
+    try:
+        try:
+            web_ui.schedule_youtube(
+                "config.ready.json",
+                {
+                    "channel": "A",
+                    "title": "Mismatch",
+                    "description": "",
+                    "privacy_status": "unlisted",
+                    "scheduled_start_time": "2030-01-01T00:00:00Z",
+                    "scheduled_end_time": "2030-01-01T01:00:00Z",
+                    "auto_start": True,
+                    "auto_stop": True,
+                    "account_id": "acct-b",
+                },
+            )
+        except ValueError as exc:
+            assert "does not match" in str(exc)
+        else:
+            raise AssertionError("Expected schedule rejection for channel/account mismatch.")
+    finally:
+        web_ui.load_config_or_none = original_load
+        web_ui.connected_account_slots = original_connected
+
+
+def assert_youtube_channel_name_matching_allows_clean_variations() -> None:
+    match = web_ui.youtube_channel_name_match(
+        "Inside Us 24/7!!!",
+        {"channel_title": "Inside Us", "channel_handle": "@insideus"},
+    )
+    assert match["ok"], f"Expected cosmetic name differences to pass: {match}"
+
+    account_channel = web_ui.youtube_channel_name_match(
+        "Inside Us",
+        {"channel_title": "Inside Us - Account channel", "channel_handle": "@insideus"},
+    )
+    assert account_channel["ok"], f"Expected account/channel suffix to pass: {account_channel}"
+
+    official = web_ui.youtube_channel_name_match(
+        "Inside Us",
+        {"channel_title": "Inside Us Official", "channel_handle": "@insideusofficial"},
+    )
+    assert official["ok"], f"Expected official suffix to pass: {official}"
+
+    mismatch = web_ui.youtube_channel_name_match(
+        "Inside Us",
+        {"channel_title": "Last Historical Moments", "channel_handle": "@lasthistoricalmoments"},
+    )
+    assert not mismatch["ok"], f"Expected unrelated channel names to fail: {mismatch}"
+
+
+def assert_oauth_callback_persists_wrong_youtube_channel_name() -> None:
+    config = make_config()
+    config["channels"][0]["name"] = "Inside Us"
+    captured: dict = {"cleared": False, "saved": None}
+    state_key = "test-state-name-mismatch"
+
+    original_load = web_ui.load_config_or_none
+    original_save = web_ui.save_config
+    original_exchange = web_ui.youtube_service.exchange_code_for_tokens
+    original_valid_token = web_ui.youtube_service.valid_access_token
+    original_profile = web_ui.youtube_service.connected_account_profile
+    original_clear = web_ui.youtube_service.clear_tokens
+
+    web_ui.load_config_or_none = lambda _name: (config, None)
+    web_ui.save_config = lambda _name, updated: captured.__setitem__("saved", copy.deepcopy(updated))
+    web_ui.youtube_service.exchange_code_for_tokens = lambda *_args, **_kwargs: None
+    web_ui.youtube_service.valid_access_token = lambda *_args, **_kwargs: ("token", {})
+    web_ui.youtube_service.connected_account_profile = lambda _token: {
+        "channel_id": "yt-wrong",
+        "channel_title": "Last Historical Moments",
+        "channel_handle": "@lasthistoricalmoments",
+    }
+    web_ui.youtube_service.clear_tokens = lambda *_args, **_kwargs: captured.__setitem__("cleared", True)
+
+    with web_ui.STATE.lock:
+        web_ui.STATE.youtube_oauth_states[state_key] = {
+            "created_at": web_ui.time.time(),
+            "config_name": "config.ready.json",
+            "account_id": "acct-a",
+            "channel_name": "Inside Us",
+            "code_verifier": "",
+        }
+    try:
+        html = web_ui.handle_youtube_oauth_callback({"state": [state_key], "code": ["auth-code"]})
+    finally:
+        web_ui.load_config_or_none = original_load
+        web_ui.save_config = original_save
+        web_ui.youtube_service.exchange_code_for_tokens = original_exchange
+        web_ui.youtube_service.valid_access_token = original_valid_token
+        web_ui.youtube_service.connected_account_profile = original_profile
+        web_ui.youtube_service.clear_tokens = original_clear
+        with web_ui.STATE.lock:
+            web_ui.STATE.youtube_oauth_states.pop(state_key, None)
+
+    assert "does not look like Castarro channel" in html
+    assert not captured["cleared"], "Wrong YouTube account tokens should remain available for Disconnect."
+    saved = captured["saved"]
+    assert saved, "Wrong YouTube channel profile should be saved so the UI can show Wrong."
+    account = next(item for item in saved["youtube"]["accounts"] if item.get("id") == "acct-a")
+    assert account.get("channel_title") == "Last Historical Moments"
+    linked = next(ch for ch in saved["channels"] if ch.get("name") == "Inside Us")
+    assert linked.get("youtube_account_id") == "acct-a"
+
+
+def assert_oauth_callback_links_selected_channel() -> None:
+    config = make_config()
+    config["channels"][1]["name"] = "Sports Desk"
+    config["channels"][1]["youtube_account_id"] = ""
+    captured: dict = {"saved": None}
+    state_key = "test-state-link-channel"
+
+    original_load = web_ui.load_config_or_none
+    original_save = web_ui.save_config
+    original_exchange = web_ui.youtube_service.exchange_code_for_tokens
+    original_valid_token = web_ui.youtube_service.valid_access_token
+    original_profile = web_ui.youtube_service.connected_account_profile
+
+    web_ui.load_config_or_none = lambda _name: (config, None)
+    web_ui.save_config = lambda _name, updated: captured.__setitem__("saved", copy.deepcopy(updated))
+    web_ui.youtube_service.exchange_code_for_tokens = lambda *_args, **_kwargs: None
+    web_ui.youtube_service.valid_access_token = lambda *_args, **_kwargs: ("token", {})
+    web_ui.youtube_service.connected_account_profile = lambda _token: {
+        "channel_id": "yt-sports",
+        "channel_title": "Sports Desk",
+        "channel_handle": "@sportsdesk",
+    }
+
+    with web_ui.STATE.lock:
+        web_ui.STATE.youtube_oauth_states[state_key] = {
+            "created_at": web_ui.time.time(),
+            "config_name": "config.ready.json",
+            "account_id": "acct-b",
+            "channel_name": "Sports Desk",
+            "code_verifier": "",
+        }
+    try:
+        html = web_ui.handle_youtube_oauth_callback({"state": [state_key], "code": ["auth-code"]})
+    finally:
+        web_ui.load_config_or_none = original_load
+        web_ui.save_config = original_save
+        web_ui.youtube_service.exchange_code_for_tokens = original_exchange
+        web_ui.youtube_service.valid_access_token = original_valid_token
+        web_ui.youtube_service.connected_account_profile = original_profile
+        with web_ui.STATE.lock:
+            web_ui.STATE.youtube_oauth_states.pop(state_key, None)
+
+    assert "Connected to Sports Desk" in html
+    saved = captured["saved"]
+    assert saved, "Matched YouTube channel should be saved to config."
+    linked = next(ch for ch in saved["channels"] if ch.get("name") == "Sports Desk")
+    assert linked.get("youtube_account_id") == "acct-b"
+
+
+def assert_auth_start_reuses_channel_account_slot() -> None:
+    config = make_config()
+    config["channels"][0]["name"] = "Inside Us"
+    config["channels"][0]["youtube_account_id"] = ""
+    config["youtube"]["accounts"][0]["label"] = "Inside Us"
+    config["youtube"]["accounts"][0]["expected_channel_name"] = "Inside Us"
+    original_load = web_ui.load_config_or_none
+    original_save = web_ui.save_config
+    web_ui.load_config_or_none = lambda _name: (config, None)
+    web_ui.save_config = lambda _name, _config: None
+    try:
+        payload = web_ui.create_youtube_auth_start("config.ready.json", "", "Inside Us", "Inside Us")
+    finally:
+        web_ui.load_config_or_none = original_load
+        web_ui.save_config = original_save
+        with web_ui.STATE.lock:
+            web_ui.STATE.youtube_oauth_states.pop(str(payload.get("state") or ""), None)
+
+    assert payload["account_id"] == "acct-a"
+
+
+def main() -> int:
+    assert_channel_scoped_schedule_routes_to_linked_accounts()
+    assert_unlinked_channel_blocked_with_multiple_connected_accounts()
+    assert_unlinked_channel_blocked_with_single_connected_account()
+    assert_verify_reports_missing_account_as_nonfatal_status()
+    assert_requested_account_mismatch_is_rejected()
+    assert_youtube_channel_name_matching_allows_clean_variations()
+    assert_oauth_callback_persists_wrong_youtube_channel_name()
+    assert_oauth_callback_links_selected_channel()
+    assert_auth_start_reuses_channel_account_slot()
+    print("channel_workspace_contract_test: PASS")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
