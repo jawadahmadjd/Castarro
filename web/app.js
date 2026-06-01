@@ -41,6 +41,7 @@ const desktopBridge = () => (window.desktopShell && typeof window.desktopShell =
 const ACTIVITY_STREAM_SPLIT_KEY = "castarro.activityStreamSplitRatio.v1";
 const WORKSPACE_SELECTED_CHANNEL_KEY = "castarro.workspace.selectedChannel.v1";
 const DASHBOARD_CACHE_KEY = "castarro.dashboard.frontPage.v1";
+const YOUTUBE_STATUS_CACHE_KEY = "castarro.youtube.status.v1";
 
 const defaultLiveProfile = () => ({
   mode: "copy",
@@ -199,6 +200,10 @@ function normalizedYoutubeAccounts(config) {
 
 function workspaceStorageKey() {
   return `${WORKSPACE_SELECTED_CHANNEL_KEY}:${state.config || "config.json"}`;
+}
+
+function youtubeStatusStorageKey() {
+  return `${YOUTUBE_STATUS_CACHE_KEY}:${state.config || "config.json"}`;
 }
 
 function isChannelWorkspaceEnabled() {
@@ -439,8 +444,14 @@ async function refresh() {
   const payload = await api(`/api/status?config=${encodeURIComponent(state.config)}`);
   state.status = payload;
 
+  const previousConfig = state.config;
   if (!payload.configs.includes(state.config)) {
     state.config = payload.configs.includes("config.json") ? "config.json" : payload.configs[0] || "config.json";
+  }
+  if (previousConfig !== state.config) {
+    hydrateYoutubeStatusFromCache(true);
+  } else if (!state.youtubeStatus) {
+    hydrateYoutubeStatusFromCache();
   }
 
   renderConfigSelect(payload.configs);
@@ -451,6 +462,7 @@ async function refresh() {
   renderChannels(payload);
   renderChannelWorkspace(payload);
   renderPreview(payload.streams);
+  renderLiveHistory(payload.stream_history || []);
   renderTasks(payload.tasks, payload.activity_events || []);
   renderLogs(payload.streams);
   const runningSettingsTask = payload.tasks.some((task) => ["normalize", "validate", "test-stream"].includes(task.name) && task.running);
@@ -496,6 +508,43 @@ function writeDashboardCache(payload) {
   }
 }
 
+function readYoutubeStatusCache() {
+  try {
+    const text = window.localStorage.getItem(youtubeStatusStorageKey());
+    if (!text) return null;
+    const cached = JSON.parse(text);
+    const payload = cached?.payload;
+    if (!payload || typeof payload !== "object" || !Array.isArray(payload.accounts)) return null;
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
+function writeYoutubeStatusCache(payload) {
+  if (!payload || typeof payload !== "object" || !Array.isArray(payload.accounts)) return;
+  try {
+    window.localStorage.setItem(youtubeStatusStorageKey(), JSON.stringify({
+      saved_at: new Date().toISOString(),
+      payload,
+    }));
+  } catch {
+    // Ignore cache quota/storage failures; this only improves first paint.
+  }
+}
+
+function hydrateYoutubeStatusFromCache(clearOnMiss = false) {
+  const payload = readYoutubeStatusCache();
+  if (!payload) {
+    if (clearOnMiss) {
+      state.youtubeStatus = null;
+    }
+    return false;
+  }
+  state.youtubeStatus = payload;
+  return true;
+}
+
 function renderCachedDashboard() {
   const payload = readDashboardCache();
   if (!payload) return false;
@@ -506,6 +555,7 @@ function renderCachedDashboard() {
   if (payload.config) {
     state.config = payload.config;
   }
+  hydrateYoutubeStatusFromCache();
   ensureWorkspaceChannelSelection(payload);
   renderConfigSelect(payload.configs || []);
   state.appVersion = payload.app_version || state.appVersion;
@@ -514,6 +564,7 @@ function renderCachedDashboard() {
   renderChannels(payload);
   renderChannelWorkspace(payload);
   renderPreview(payload.streams || {});
+  renderLiveHistory(payload.stream_history || []);
   renderTasks([], []);
   renderLogs(payload.streams || {});
   markBootReady();
@@ -651,15 +702,18 @@ function renderStatus(payload) {
   $("serverState").textContent = payload.config_exists ? `${running} live stream${running === 1 ? "" : "s"}` : "Config needed";
   $("taskState").textContent = taskRunning ? "Working" : "Idle";
   $("channelCount").textContent = `${payload.channels.length} channel${payload.channels.length === 1 ? "" : "s"}`;
-  $("activeConfigLabel").textContent = payload.config_exists ? payload.config : "Create a config in Settings";
+  const activeConfigLabel = $("activeConfigLabel");
+  if (activeConfigLabel) {
+    activeConfigLabel.textContent = payload.config_exists ? payload.config : "Create a config in Settings";
+  }
 
   const notice = $("autoNotice");
   if (!payload.config_exists) {
     notice.textContent = "Create a config in Settings, then prepare each channel from Normalize to YouTube before starting streams.";
-    notice.className = "notice warn";
+    notice.className = "command-notice warn";
   } else {
-    notice.textContent = "Start streams after videos are normalized and the selected channel has a YouTube account or manual stream key ready.";
-    notice.className = "notice";
+    notice.textContent = "Start all streams after videos are normalized and every enabled channel has a YouTube account or manual stream key ready.";
+    notice.className = "command-notice";
   }
 
   const verifyNode = $("workspaceGlobalVerifySummary");
@@ -690,7 +744,7 @@ function renderChannels(payload) {
   }
   if (workspaceRail) {
     const hasChannels = Array.isArray(payload?.channels) && payload.channels.length > 0;
-    const showRail = workspaceEnabled && Boolean(payload?.config_exists) && hasChannels;
+    const showRail = Boolean(payload?.config_exists) && hasChannels;
     workspaceRail.classList.toggle("hidden", !showRail);
   }
   if (!payload.config_exists) {
@@ -876,9 +930,9 @@ function workspaceModuleCard(title, helper, content) {
 }
 
 function renderChannelWorkspace(payload) {
+  renderWorkspaceChannelList(payload);
   const panel = $("channelWorkspacePanel");
   if (!panel || !isChannelWorkspaceEnabled()) return;
-  renderWorkspaceChannelList(payload);
   renderGlobalOverview(payload);
   const selected = getSelectedChannel({ channels: payload.channels || [] }, state.workspace.selectedChannelName);
   renderChannelHeader(payload, selected);
@@ -1401,6 +1455,130 @@ function formatIsoTimestamp(value) {
   const date = new Date(text);
   if (Number.isNaN(date.getTime())) return text;
   return `At ${date.toLocaleString()}`;
+}
+
+function parseIsoDate(value) {
+  const text = String(value || "").trim();
+  if (!text) return null;
+  const date = new Date(text);
+  if (Number.isNaN(date.getTime())) return null;
+  return date;
+}
+
+function formatSessionDateParts(value) {
+  const date = parseIsoDate(value);
+  if (!date) {
+    return { date: "Time unavailable", time: "" };
+  }
+  return {
+    date: date.toLocaleDateString("en-US", {
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+    }),
+    time: date.toLocaleTimeString("en-US", {
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    }),
+  };
+}
+
+function sessionDurationSeconds(session, nowMs = Date.now()) {
+  const start = parseIsoDate(session?.started_at);
+  if (!start) return 0;
+  const stopped = parseIsoDate(session?.stopped_at);
+  const isLive = Boolean(session?.is_active);
+  const endMs = stopped ? stopped.getTime() : isLive ? nowMs : start.getTime();
+  return Math.max(0, Math.floor((endMs - start.getTime()) / 1000));
+}
+
+function durationParts(totalSeconds) {
+  const safeSeconds = Math.max(0, Math.floor(Number(totalSeconds) || 0));
+  const hours = Math.floor(safeSeconds / 3600);
+  const minutes = Math.floor((safeSeconds % 3600) / 60);
+  const seconds = safeSeconds % 60;
+  return { hours, minutes, seconds };
+}
+
+function durationText(totalSeconds) {
+  const { hours, minutes, seconds } = durationParts(totalSeconds);
+  const parts = [];
+  if (hours) parts.push(`${hours}h`);
+  if (hours || minutes) parts.push(`${minutes}m`);
+  parts.push(`${seconds}s`);
+  return parts.join(" ");
+}
+
+function durationChip(totalSeconds, isLive = false) {
+  const { hours, minutes, seconds } = durationParts(totalSeconds);
+  const hourMarkup = hours ? `${hours}<span class="unit">h</span>` : "";
+  const minuteMarkup = hours || minutes ? `${minutes}<span class="unit">m</span>` : "";
+  return `
+    <div class="duration-chip ${isLive ? "live" : ""}">
+      ${hourMarkup} ${minuteMarkup} ${seconds}<span class="unit">s</span>
+    </div>
+  `;
+}
+
+function renderLiveHistory(sessions) {
+  const list = $("liveHistoryList");
+  const count = $("liveHistoryCount");
+  const total = $("liveHistoryTotal");
+  if (!list || !count || !total) return;
+
+  const items = Array.isArray(sessions) ? sessions : [];
+  count.textContent = `${items.length} session${items.length === 1 ? "" : "s"}`;
+
+  if (!items.length) {
+    total.textContent = "Total 0s";
+    list.innerHTML = `<div class="live-history-empty">No live sessions recorded yet.</div>`;
+    return;
+  }
+
+  const nowMs = Date.now();
+  const totalSeconds = items.reduce((sum, item) => sum + sessionDurationSeconds(item, nowMs), 0);
+  total.textContent = `Total ${durationText(totalSeconds)}`;
+
+  const rows = items.map((session) => {
+    const isLive = Boolean(session?.is_active);
+    const started = formatSessionDateParts(session?.started_at);
+    const stopped = isLive
+      ? { date: "In progress", time: "Recording now" }
+      : String(session?.stopped_at || "").trim()
+        ? formatSessionDateParts(session?.stopped_at)
+        : { date: "End unavailable", time: "" };
+    const durationSeconds = sessionDurationSeconds(session, nowMs);
+    const title = String(session?.live_title || session?.channel_name || "Untitled live");
+    const channelName = String(session?.channel_name || "Unknown channel");
+    return `
+      <div class="live-history-row ${isLive ? "current" : ""}">
+        <div class="live-history-title">
+          <strong>${escapeHtml(title)}</strong>
+          <span>${escapeHtml(channelName)}</span>
+        </div>
+        <div class="live-history-time">
+          <strong>${escapeHtml(started.date)}</strong>
+          ${started.time ? `<span>${escapeHtml(started.time)}</span>` : ""}
+        </div>
+        <div class="live-history-time">
+          <strong>${escapeHtml(stopped.date)}</strong>
+          ${stopped.time ? `<span>${escapeHtml(stopped.time)}</span>` : ""}
+        </div>
+        ${durationChip(durationSeconds, isLive)}
+      </div>
+    `;
+  }).join("");
+
+  list.innerHTML = `
+    <div class="live-history-head">
+      <span>Live title</span>
+      <span>Started</span>
+      <span>Ended</span>
+      <span>Duration</span>
+    </div>
+    ${rows}
+  `;
 }
 
 function toggleTaskLog(taskId) {
@@ -2481,6 +2659,7 @@ async function refreshYoutubeStatus() {
   try {
     const payload = await api(`/api/youtube/status?config=${encodeURIComponent(state.config)}`, { action: "youtube.status" });
     state.youtubeStatus = payload || null;
+    writeYoutubeStatusCache(state.youtubeStatus);
     const accounts = Array.isArray(payload?.accounts) ? payload.accounts : [];
     const linkedAccountId = syncYoutubeSelectedAccountFromChannel(state.configData || defaultConfigData());
     if (!linkedAccountId && !state.workspace.selectedChannelName && (!state.youtubeSelectedAccountId || !accounts.some((item) => normalizeAccountId(item.id || "") === state.youtubeSelectedAccountId))) {
@@ -3697,8 +3876,10 @@ if ($("settingsYoutubeTab")) {
 if ($("configSelect")) {
   $("configSelect").addEventListener("change", async (event) => {
     state.config = event.target.value;
+    hydrateYoutubeStatusFromCache(true);
     await refresh();
     await loadConfigText();
+    refreshYoutubeStatus().catch((error) => toast(error.message));
   });
 }
 
@@ -3811,6 +3992,13 @@ initDesktopIntegration().catch(() => {});
 renderCachedDashboard();
 refresh()
   .then(loadConfigText)
+  .then(() => {
+    hydrateYoutubeStatusFromCache(true);
+    if (state.status) {
+      renderChannelWorkspace(state.status);
+    }
+    return refreshYoutubeStatus();
+  })
   .catch((error) => {
     markBootReady();
     toast(error.message);

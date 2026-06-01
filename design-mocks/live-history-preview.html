@@ -1,0 +1,346 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Castarro - Live History Visual Mockup</title>
+    <link rel="stylesheet" href="../web/styles.css">
+    <style>
+      body {
+        min-height: 100vh;
+      }
+
+      .mock-live-surface {
+        display: grid;
+        gap: var(--space-3);
+      }
+
+      .mock-live-surface .panel,
+      .mock-live-surface .tab-view.active {
+        animation: none;
+        opacity: 1;
+      }
+
+      .mock-preview-bars {
+        position: absolute;
+        inset: auto 18px 18px;
+        display: grid;
+        gap: 10px;
+      }
+
+      .mock-preview-title {
+        color: #f5ebd9;
+        font-weight: 850;
+      }
+
+      .mock-preview-progress {
+        height: 8px;
+        overflow: hidden;
+        border-radius: 999px;
+        background: rgba(255, 250, 240, 0.2);
+      }
+
+      .mock-preview-progress span {
+        display: block;
+        width: 43%;
+        height: 100%;
+        border-radius: inherit;
+        background: var(--accent-2);
+      }
+
+      .live-history-panel {
+        display: grid;
+        gap: var(--space-2);
+      }
+
+      .live-history-toolbar {
+        display: flex;
+        gap: var(--space-1);
+        justify-content: end;
+        flex-wrap: wrap;
+      }
+
+      .live-history-list {
+        display: grid;
+        gap: 8px;
+      }
+
+      .live-history-row,
+      .live-history-head {
+        display: grid;
+        grid-template-columns: minmax(220px, 1.35fr) minmax(150px, 0.85fr) minmax(150px, 0.85fr) minmax(132px, auto);
+        gap: 12px;
+        align-items: center;
+      }
+
+      .live-history-head {
+        padding: 0 12px;
+        color: var(--muted);
+        font-size: 0.78rem;
+        font-weight: 850;
+        text-transform: uppercase;
+      }
+
+      .live-history-row {
+        min-height: 72px;
+        padding: 12px;
+        border: 1px solid var(--line);
+        border-radius: var(--radius-sm);
+        background: rgba(255, 255, 255, 0.58);
+      }
+
+      .live-history-row.current {
+        border-color: rgba(45, 123, 79, 0.38);
+        background: linear-gradient(135deg, rgba(45, 123, 79, 0.12), rgba(255, 255, 255, 0.64));
+      }
+
+      .live-history-title {
+        display: grid;
+        gap: 4px;
+        min-width: 0;
+      }
+
+      .live-history-title strong {
+        overflow-wrap: anywhere;
+        color: var(--ink);
+      }
+
+      .live-history-title span,
+      .live-history-time {
+        color: var(--muted);
+        font-size: 0.82rem;
+        font-weight: 700;
+      }
+
+      .live-history-time {
+        display: grid;
+        gap: 2px;
+      }
+
+      .live-history-time strong {
+        color: var(--ink);
+        font-size: 0.94rem;
+      }
+
+      .duration-chip {
+        justify-self: end;
+        display: inline-flex;
+        align-items: baseline;
+        gap: 5px;
+        min-height: 40px;
+        padding: 8px 12px;
+        border-radius: 999px;
+        border: 1px solid rgba(31, 111, 98, 0.28);
+        background: rgba(31, 111, 98, 0.12);
+        color: var(--accent);
+        font-weight: 900;
+        white-space: nowrap;
+      }
+
+      .duration-chip .unit {
+        color: var(--muted);
+        font-size: 0.78rem;
+        font-weight: 850;
+      }
+
+      .duration-chip.live {
+        border-color: rgba(216, 131, 49, 0.36);
+        background: rgba(216, 131, 49, 0.14);
+        color: #9b5a1d;
+      }
+
+      @media (max-width: 820px) {
+        .live-history-head {
+          display: none;
+        }
+
+        .live-history-row {
+          grid-template-columns: 1fr;
+          align-items: start;
+        }
+
+        .duration-chip {
+          justify-self: start;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="shell mock-live-surface">
+      <section class="hero command-header">
+        <div class="hero-top-row">
+          <div class="brand-block">
+            <p class="eyebrow">Local control room</p>
+            <h1>Castarro <span class="app-version">v1.0.9</span></h1>
+            <p class="subtitle">Normalize once, then run clean multi-channel YouTube live streams from your own desktop.</p>
+          </div>
+          <div class="hero-side">
+            <div class="status-pill">Server online</div>
+            <nav class="tabs" aria-label="Main sections">
+              <button class="tab active" type="button">Dashboard</button>
+              <button class="tab" type="button">Settings</button>
+            </nav>
+          </div>
+        </div>
+      </section>
+
+      <section class="app-layout">
+        <aside class="panel channel-rail">
+          <div class="workspace-sidebar-head">
+            <h3>Channels</h3>
+            <span class="badge">3 channels</span>
+          </div>
+          <div class="workspace-channel-list">
+            <button class="workspace-channel-item active" type="button">
+              <span class="workspace-channel-logo">CS</span>
+              <span class="workspace-channel-body">
+                <span class="workspace-channel-item-head">
+                  <span class="channel-name">Castarro Studio</span>
+                </span>
+                <span class="workspace-channel-item-meta">
+                  <span class="badge live">Live</span>
+                  <span class="badge">1080p</span>
+                </span>
+              </span>
+            </button>
+            <button class="workspace-channel-item" type="button">
+              <span class="workspace-channel-logo">YT</span>
+              <span class="workspace-channel-body">
+                <span class="workspace-channel-item-head">
+                  <span class="channel-name">YouTube Tests</span>
+                </span>
+                <span class="workspace-channel-item-meta">
+                  <span class="badge">Idle</span>
+                  <span class="badge">720p</span>
+                </span>
+              </span>
+            </button>
+          </div>
+        </aside>
+
+        <section class="app-layout-main">
+          <section class="panel preview-panel">
+            <div class="section-head">
+              <div>
+                <h2>Program Preview</h2>
+                <p class="helper">Live monitor feed generated from the same outgoing stream process.</p>
+              </div>
+              <div class="row wrap">
+                <label>
+                  <span class="field-hint">Channel</span>
+                  <select>
+                    <option>Castarro Studio</option>
+                  </select>
+                </label>
+                <span class="badge live">Live</span>
+              </div>
+            </div>
+            <div class="preview-frame">
+              <video playsinline controls autoplay muted></video>
+              <div class="preview-empty">
+                <div class="mock-preview-bars">
+                  <div class="mock-preview-title">Live feed preview</div>
+                  <div class="mock-preview-progress"><span></span></div>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel live-history-panel">
+            <div class="section-head">
+              <div>
+                <h2>Live History</h2>
+                <p class="helper">Completed and active sessions for the selected channel.</p>
+              </div>
+              <div class="live-history-toolbar">
+                <span class="badge">4 sessions</span>
+                <span class="badge live">Total 15h 17m 02s</span>
+              </div>
+            </div>
+
+            <div class="live-history-list">
+              <div class="live-history-head">
+                <span>Live title</span>
+                <span>Started</span>
+                <span>Ended</span>
+                <span>Duration</span>
+              </div>
+
+              <div class="live-history-row current">
+                <div class="live-history-title">
+                  <strong>Morning Worship Live - Sunday Service</strong>
+                  <span>Castarro Studio</span>
+                </div>
+                <div class="live-history-time">
+                  <strong>Jun 1, 2026</strong>
+                  <span>07:04:18 PM</span>
+                </div>
+                <div class="live-history-time">
+                  <strong>In progress</strong>
+                  <span>Recording now</span>
+                </div>
+                <div class="duration-chip live">
+                  1<span class="unit">h</span> 12<span class="unit">m</span> 09<span class="unit">s</span>
+                </div>
+              </div>
+
+              <div class="live-history-row">
+                <div class="live-history-title">
+                  <strong>Friday Night Teaching and Q&A</strong>
+                  <span>Castarro Studio</span>
+                </div>
+                <div class="live-history-time">
+                  <strong>May 29, 2026</strong>
+                  <span>08:00:02 PM</span>
+                </div>
+                <div class="live-history-time">
+                  <strong>May 30, 2026</strong>
+                  <span>02:23:36 AM</span>
+                </div>
+                <div class="duration-chip">
+                  6<span class="unit">h</span> 23<span class="unit">m</span> 34<span class="unit">s</span>
+                </div>
+              </div>
+
+              <div class="live-history-row">
+                <div class="live-history-title">
+                  <strong>Community Prayer Livestream</strong>
+                  <span>Castarro Studio</span>
+                </div>
+                <div class="live-history-time">
+                  <strong>May 25, 2026</strong>
+                  <span>09:15:11 PM</span>
+                </div>
+                <div class="live-history-time">
+                  <strong>May 25, 2026</strong>
+                  <span>11:48:02 PM</span>
+                </div>
+                <div class="duration-chip">
+                  2<span class="unit">h</span> 32<span class="unit">m</span> 51<span class="unit">s</span>
+                </div>
+              </div>
+
+              <div class="live-history-row">
+                <div class="live-history-title">
+                  <strong>Scripture Reading Continuous Stream</strong>
+                  <span>Castarro Studio</span>
+                </div>
+                <div class="live-history-time">
+                  <strong>May 18, 2026</strong>
+                  <span>05:30:00 PM</span>
+                </div>
+                <div class="live-history-time">
+                  <strong>May 19, 2026</strong>
+                  <span>10:18:37 AM</span>
+                </div>
+                <div class="duration-chip">
+                  16<span class="unit">h</span> 48<span class="unit">m</span> 37<span class="unit">s</span>
+                </div>
+              </div>
+            </div>
+          </section>
+        </section>
+      </section>
+    </main>
+  </body>
+</html>

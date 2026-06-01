@@ -8,21 +8,35 @@
   </head>
   <body class="boot-loading">
     <main class="shell">
-      <section class="hero">
-        <div>
-          <p class="eyebrow">Local control room</p>
-          <h1>Castarro <span id="appVersionLabel" class="app-version">v-</span></h1>
-          <p class="subtitle">Normalize once, then run clean multi-channel YouTube live streams from your own desktop.</p>
+      <section class="hero command-header">
+        <div class="hero-top-row">
+          <div class="brand-block">
+            <p class="eyebrow">Local control room</p>
+            <h1>Castarro <span id="appVersionLabel" class="app-version">v-</span></h1>
+            <p class="subtitle">Normalize once, then run clean multi-channel YouTube live streams from your own desktop.</p>
+          </div>
+          <div class="hero-side">
+            <div class="status-pill" id="serverState">Checking...</div>
+            <nav class="tabs" aria-label="Main sections">
+              <button class="tab active" id="tabControl" type="button">Dashboard</button>
+              <button class="tab" id="tabSettings" type="button">Settings</button>
+            </nav>
+          </div>
         </div>
-        <div class="hero-side">
-          <div class="status-pill" id="serverState">Checking...</div>
-          <nav class="tabs" aria-label="Main sections">
-            <button class="tab active" id="tabControl" type="button">Dashboard</button>
-            <button class="tab" id="tabSettings" type="button">Settings</button>
-          </nav>
-          <div class="desktop-actions">
-            <button class="pill ghost small" id="closeUiOnly" type="button">Close UI Only</button>
-            <button class="pill danger small" id="stopAndExit" type="button">Stop Streams and Exit</button>
+        <div class="header-command-row">
+          <div class="header-command-actions">
+            <button class="pill success" id="startAll">Start all streams</button>
+            <button class="pill danger" id="stopAll">Stop all streams</button>
+          </div>
+          <div class="header-command-meta">
+            <span class="badge" id="workspaceGlobalVerifySummary">Global verify summary: not run yet.</span>
+            <div class="desktop-actions">
+              <button class="pill ghost small" id="closeUiOnly" type="button">Close UI Only</button>
+              <button class="pill danger ghost small" id="stopAndExit" type="button">Stop Streams and Exit</button>
+            </div>
+          </div>
+          <div class="command-notice" id="autoNotice">
+            Loading dashboard...
           </div>
         </div>
       </section>
@@ -38,78 +52,16 @@
             <h3>Channels</h3>
             <span class="badge" id="workspaceChannelCountBadge">0 channels</span>
           </div>
-          <p class="helper">Pick a channel once, then jump into that channel's dashboard or settings.</p>
+          <p class="helper">Pick the active channel for preview, settings, and scoped channel actions.</p>
           <div class="workspace-channel-list" id="workspaceChannelList">
             <div class="workspace-channel-skeleton skeleton-block"></div>
             <div class="workspace-channel-skeleton skeleton-block"></div>
             <div class="workspace-channel-skeleton skeleton-block"></div>
           </div>
-          <div class="channel-rail-actions">
-            <button class="pill small" id="railOpenDashboard" type="button">Dashboard</button>
-            <button class="pill ghost small" id="railOpenNormalize" type="button">Normalize</button>
-            <button class="pill ghost small" id="railOpenLive" type="button">Live Settings</button>
-            <button class="pill ghost small" id="railOpenYoutube" type="button">YouTube</button>
-          </div>
         </aside>
 
         <section class="app-layout-main">
       <section id="viewControl" class="tab-view active">
-        <section class="panel controls">
-          <div class="section-head">
-            <div>
-              <h2>Live Controls</h2>
-              <p class="helper">Use these after your channel videos are normalized and ready.</p>
-            </div>
-            <span id="activeConfigLabel">Loading config</span>
-          </div>
-          <div class="row wrap">
-            <button class="pill success" id="startAll">Start streams</button>
-            <button class="pill danger" id="stopAll">Stop streams</button>
-            <button class="pill ghost" id="workspaceVerifyAll" type="button">Verify All Channels</button>
-            <span class="badge" id="workspaceGlobalVerifySummary">Global verify summary: not run yet.</span>
-          </div>
-          <div class="notice" id="autoNotice">
-            Loading dashboard...
-          </div>
-        </section>
-
-        <section class="panel workspace-panel hidden" id="channelWorkspacePanel">
-          <div class="section-head">
-            <div>
-              <h2>Channel Workspace</h2>
-              <p class="helper">Select one channel and complete its flow from normalize to schedule without losing context.</p>
-            </div>
-          </div>
-          <div class="workspace-layout">
-            <section class="workspace-main">
-              <div class="workspace-overview-strip" id="workspaceOverviewStrip">
-                <div class="workspace-overview-stat skeleton-stat skeleton-block"></div>
-                <div class="workspace-overview-stat skeleton-stat skeleton-block"></div>
-                <div class="workspace-overview-stat skeleton-stat skeleton-block"></div>
-                <div class="workspace-overview-stat skeleton-stat skeleton-block"></div>
-              </div>
-              <section class="nested-card workspace-focus-card">
-                <div class="section-head compact">
-                  <div>
-                    <h3 id="workspaceChannelName">No channel selected</h3>
-                    <p class="helper">Linked account shown here is used for scoped schedule and verification actions.</p>
-                  </div>
-                  <span class="badge warn" id="workspaceLinkedAccountBadge">No linked account</span>
-                </div>
-                <div class="row wrap">
-                  <a class="studio-link hidden" id="workspaceOpenStudio" href="#" target="_blank">Open Studio</a>
-                </div>
-                <div class="notice warn" id="workspaceContextGuard">Select a channel to continue.</div>
-              </section>
-              <section class="workspace-modules" id="workspaceModules">
-                <article class="nested-card workspace-module-card skeleton-module skeleton-block"></article>
-                <article class="nested-card workspace-module-card skeleton-module skeleton-block"></article>
-                <article class="nested-card workspace-module-card skeleton-module skeleton-block"></article>
-              </section>
-            </section>
-          </div>
-        </section>
-
         <section class="panel preview-panel">
           <div class="section-head">
             <div>
@@ -129,6 +81,22 @@
             <div class="preview-empty" id="previewEmpty">Start a stream to see live preview here.</div>
           </div>
           <div class="notice warn hidden" id="previewWarning"></div>
+        </section>
+
+        <section class="panel live-history-panel">
+          <div class="section-head">
+            <div>
+              <h2>Live History</h2>
+              <p class="helper">Recent live sessions across this dashboard.</p>
+            </div>
+            <div class="live-history-toolbar">
+              <span class="badge" id="liveHistoryCount">0 sessions</span>
+              <span class="badge live" id="liveHistoryTotal">Total 0s</span>
+            </div>
+          </div>
+          <div class="live-history-list" id="liveHistoryList">
+            <div class="live-history-empty">No live sessions recorded yet.</div>
+          </div>
         </section>
 
         <section id="legacyChannelsPanel">

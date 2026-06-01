@@ -99,6 +99,7 @@ def init_db() -> None:
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               config_name TEXT NOT NULL,
               channel_name TEXT NOT NULL,
+              live_title TEXT,
               pid INTEGER,
               command TEXT NOT NULL,
               log_path TEXT,
@@ -132,6 +133,12 @@ def init_db() -> None:
             INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('version', '1');
             """
         )
+        columns = {
+            str(row["name"])
+            for row in db.execute("PRAGMA table_info(stream_sessions)").fetchall()
+        }
+        if "live_title" not in columns:
+            db.execute("ALTER TABLE stream_sessions ADD COLUMN live_title TEXT")
 
 
 def relative_or_absolute(path: Path) -> str:
@@ -415,15 +422,16 @@ def record_stream_start(
     pid: int,
     command: str,
     log_path: str,
+    live_title: str | None = None,
 ) -> int:
     init_db()
     with connect() as db:
         cursor = db.execute(
             """
-            INSERT INTO stream_sessions(config_name, channel_name, pid, command, log_path, status, started_at)
-            VALUES (?, ?, ?, ?, ?, 'running', ?)
+            INSERT INTO stream_sessions(config_name, channel_name, live_title, pid, command, log_path, status, started_at)
+            VALUES (?, ?, ?, ?, ?, ?, 'running', ?)
             """,
-            (config_name, channel_name, pid, command, log_path, now()),
+            (config_name, channel_name, live_title, pid, command, log_path, now()),
         )
         db.execute(
             """
@@ -451,6 +459,49 @@ def record_stream_stop(config_name: str, channel_name: str, returncode: int | No
             """,
             (returncode, now(), config_name, channel_name),
         )
+
+
+def recent_stream_sessions(config_name: str | None = None, limit: int = 12) -> list[dict[str, Any]]:
+    init_db()
+    safe_limit = max(1, min(int(limit), 100))
+    with connect() as db:
+        if config_name:
+            rows = db.execute(
+                """
+                SELECT id, config_name, channel_name, live_title, status, returncode, started_at, stopped_at
+                FROM stream_sessions
+                WHERE config_name = ?
+                ORDER BY datetime(started_at) DESC, id DESC
+                LIMIT ?
+                """,
+                (config_name, safe_limit),
+            ).fetchall()
+        else:
+            rows = db.execute(
+                """
+                SELECT id, config_name, channel_name, live_title, status, returncode, started_at, stopped_at
+                FROM stream_sessions
+                ORDER BY datetime(started_at) DESC, id DESC
+                LIMIT ?
+                """,
+                (safe_limit,),
+            ).fetchall()
+
+    sessions: list[dict[str, Any]] = []
+    for row in rows:
+        sessions.append(
+            {
+                "id": int(row["id"]),
+                "config_name": row["config_name"],
+                "channel_name": row["channel_name"],
+                "live_title": str(row["live_title"] or row["channel_name"] or "Untitled live"),
+                "status": str(row["status"] or ""),
+                "returncode": row["returncode"],
+                "started_at": str(row["started_at"] or ""),
+                "stopped_at": str(row["stopped_at"] or ""),
+            }
+        )
+    return sessions
 
 
 def stats() -> dict[str, Any]:

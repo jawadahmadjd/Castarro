@@ -1416,6 +1416,14 @@ def assert_youtube_channel_keys_match(config_name: str, channel_name: str | None
     )
 
 
+def stream_live_title(channel: dict[str, Any]) -> str:
+    for field in ("youtube_broadcast_title", "live_title", "title", "name"):
+        value = str(channel.get(field) or "").strip()
+        if value:
+            return value
+    return "Untitled live"
+
+
 def schedule_youtube(config_name: str, body: dict[str, Any]) -> dict[str, Any]:
     config, error = load_config_or_none(config_name)
     if not config:
@@ -1495,6 +1503,7 @@ def schedule_youtube(config_name: str, body: dict[str, Any]) -> dict[str, Any]:
         selected_channel["youtube_studio_url"] = created.get("broadcast", {}).get("studio_url", "")
         selected_channel["youtube_broadcast_id"] = created.get("broadcast", {}).get("id", "")
         selected_channel["youtube_stream_id"] = created.get("stream", {}).get("id", "")
+        selected_channel["youtube_broadcast_title"] = title
         save_config(config_name, config)
 
     return {
@@ -1570,6 +1579,7 @@ def use_existing_youtube_broadcast(config_name: str, body: dict[str, Any]) -> di
     selected_channel["youtube_studio_url"] = str(broadcast.get("studio_url") or "")
     selected_channel["youtube_broadcast_id"] = broadcast_id
     selected_channel["youtube_stream_id"] = str(broadcast.get("bound_stream_id") or "")
+    selected_channel["youtube_broadcast_title"] = str(broadcast.get("title") or "").strip()
     save_config(config_name, config)
 
     return {
@@ -1976,6 +1986,7 @@ def start_stream(config_name: str, channel_name: str | None) -> list[str]:
                 running.process.pid,
                 subprocess.list2cmdline(running.command),
                 str(Path(running.log_handle.name)),
+                stream_live_title(channel),
             )
             app_db.record_event("stream_started", config_name, name, {"pid": running.process.pid})
             started.append(name)
@@ -2021,6 +2032,17 @@ def status_payload(config_name: str) -> dict[str, Any]:
     with STATE.lock:
         streams = {name: state.as_dict() for name, state in STATE.streams.items()}
         tasks = [task.as_dict() for task in list(STATE.tasks)]
+    active_stream_names = {
+        name
+        for name, stream in streams.items()
+        if stream.get("running")
+    }
+    stream_history = app_db.recent_stream_sessions(config_name, limit=12)
+    for session in stream_history:
+        session["is_active"] = (
+            str(session.get("status") or "").lower() == "running"
+            and str(session.get("channel_name") or "") in active_stream_names
+        )
 
     return {
         "root": str(ROOT),
@@ -2051,6 +2073,7 @@ def status_payload(config_name: str) -> dict[str, Any]:
         "database": app_db.stats(),
         "binaries": runtime_paths.runtime_binary_status(),
         "streams": streams,
+        "stream_history": stream_history,
         "tasks": tasks,
         "activity_events": app_db.recent_app_events(config_name, limit=60),
     }
