@@ -524,6 +524,8 @@ def normalize_youtube_accounts(config: dict[str, Any]) -> list[dict[str, Any]]:
                     "channel_id": str(item.get("channel_id") or "").strip(),
                     "channel_title": str(item.get("channel_title") or "").strip(),
                     "channel_handle": str(item.get("channel_handle") or "").strip(),
+                    "subscriber_count": str(item.get("subscriber_count") or "").strip(),
+                    "hidden_subscriber_count": bool(item.get("hidden_subscriber_count")),
                     "expected_channel_name": str(item.get("expected_channel_name") or "").strip(),
                     "last_connected_at": str(item.get("last_connected_at") or "").strip(),
                 }
@@ -538,6 +540,8 @@ def normalize_youtube_accounts(config: dict[str, Any]) -> list[dict[str, Any]]:
                 "channel_id": "",
                 "channel_title": "",
                 "channel_handle": "",
+                "subscriber_count": "",
+                "hidden_subscriber_count": False,
                 "expected_channel_name": "",
                 "last_connected_at": "",
             }
@@ -583,6 +587,8 @@ def ensure_youtube_account(config: dict[str, Any], account_id: str, label: str =
         "channel_id": "",
         "channel_title": "",
         "channel_handle": "",
+        "subscriber_count": "",
+        "hidden_subscriber_count": False,
         "expected_channel_name": "",
         "last_connected_at": "",
     }
@@ -774,6 +780,8 @@ def connected_account_slots(config: dict[str, Any]) -> list[dict[str, Any]]:
                 "channel_id": str(profile.get("channel_id") or account.get("channel_id") or ""),
                 "channel_title": str(profile.get("channel_title") or account.get("channel_title") or ""),
                 "channel_handle": str(profile.get("channel_handle") or account.get("channel_handle") or ""),
+                "subscriber_count": str(profile.get("subscriber_count") or account.get("subscriber_count") or ""),
+                "hidden_subscriber_count": bool(profile.get("hidden_subscriber_count") or account.get("hidden_subscriber_count")),
             }
         )
     return connected
@@ -824,6 +832,8 @@ def youtube_status(config_name: str) -> dict[str, Any]:
             "channel_id": str(account.get("channel_id") or ""),
             "channel_title": str(account.get("channel_title") or ""),
             "channel_handle": str(account.get("channel_handle") or ""),
+            "subscriber_count": str(account.get("subscriber_count") or ""),
+            "hidden_subscriber_count": bool(account.get("hidden_subscriber_count")),
             "expected_channel_name": youtube_account_expected_channel_name(config, account),
             "message": "Not connected.",
         }
@@ -848,6 +858,8 @@ def youtube_status(config_name: str) -> dict[str, Any]:
                     "channel_id": profile.get("channel_id") or item["channel_id"],
                     "channel_title": profile.get("channel_title") or item["channel_title"],
                     "channel_handle": profile.get("channel_handle") or item["channel_handle"],
+                    "subscriber_count": str(profile.get("subscriber_count") or item["subscriber_count"] or ""),
+                    "hidden_subscriber_count": bool(profile.get("hidden_subscriber_count") or item["hidden_subscriber_count"]),
                     "scopes": valid_tokens.get("scope"),
                     "expires_at": valid_tokens.get("expires_at"),
                 }
@@ -885,6 +897,8 @@ def youtube_status(config_name: str) -> dict[str, Any]:
         "channel_id": active.get("channel_id") if active else "",
         "channel_title": active.get("channel_title") if active else "",
         "channel_handle": active.get("channel_handle") if active else "",
+        "subscriber_count": active.get("subscriber_count") if active else "",
+        "hidden_subscriber_count": bool(active.get("hidden_subscriber_count")) if active else False,
         "expires_at": active.get("expires_at") if active else None,
         "message": message,
     }
@@ -983,6 +997,19 @@ def youtube_oauth_popup_html(status: str, message: str, details: dict[str, Any] 
 """
 
 
+def youtube_subscriber_text(profile: dict[str, Any]) -> str:
+    if bool(profile.get("hidden_subscriber_count")):
+        return "subscribers hidden"
+    raw = str(profile.get("subscriber_count") or "").strip()
+    if not raw:
+        return ""
+    try:
+        count = int(raw)
+    except ValueError:
+        return ""
+    return f"{count:,} subscriber{'s' if count != 1 else ''}"
+
+
 def handle_youtube_oauth_callback(query: dict[str, list[str]]) -> str:
     oauth_state = str(query.get("state", [""])[0] or "")
     error_code = str(query.get("error", [""])[0] or "")
@@ -1018,6 +1045,8 @@ def handle_youtube_oauth_callback(query: dict[str, list[str]]) -> str:
         account["channel_id"] = str(profile.get("channel_id") or "")
         account["channel_title"] = str(profile.get("channel_title") or "")
         account["channel_handle"] = str(profile.get("channel_handle") or "")
+        account["subscriber_count"] = str(profile.get("subscriber_count") or "")
+        account["hidden_subscriber_count"] = bool(profile.get("hidden_subscriber_count"))
         account["expected_channel_name"] = expected_channel_name
         account["last_connected_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         if expected_channel_name:
@@ -1034,6 +1063,8 @@ def handle_youtube_oauth_callback(query: dict[str, list[str]]) -> str:
                     "account_id": account_id,
                     "channel_title": str(profile.get("channel_title") or ""),
                     "channel_handle": str(profile.get("channel_handle") or ""),
+                    "subscriber_count": str(profile.get("subscriber_count") or ""),
+                    "hidden_subscriber_count": bool(profile.get("hidden_subscriber_count")),
                     "expected_channel_name": expected_channel_name,
                     "wrong_account": True,
                 },
@@ -1042,13 +1073,17 @@ def handle_youtube_oauth_callback(query: dict[str, list[str]]) -> str:
         return youtube_oauth_popup_html("error", str(exc))
 
     title = str(profile.get("channel_title") or "your channel")
+    subscriber_text = youtube_subscriber_text(profile)
+    connected_message = f"Connected to {title}{f' ({subscriber_text})' if subscriber_text else ''}."
     return youtube_oauth_popup_html(
         "ok",
-        f"Connected to {title}.",
+        connected_message,
         {
             "account_id": account_id,
             "channel_title": title,
             "channel_handle": str(profile.get("channel_handle") or ""),
+            "subscriber_count": str(profile.get("subscriber_count") or ""),
+            "hidden_subscriber_count": bool(profile.get("hidden_subscriber_count")),
             "expected_channel_name": expected_channel_name,
         },
     )
@@ -1279,6 +1314,8 @@ def verify_youtube_channel_keys(
                     "channel_id": str(profile.get("channel_id") or ""),
                     "channel_title": str(profile.get("channel_title") or ""),
                     "channel_handle": str(profile.get("channel_handle") or ""),
+                    "subscriber_count": str(profile.get("subscriber_count") or ""),
+                    "hidden_subscriber_count": bool(profile.get("hidden_subscriber_count")),
                 }
                 mine_streams = youtube_service.list_mine_live_streams(access_token)
                 mine_streams_by_id: dict[str, dict[str, Any]] = {}
@@ -1301,6 +1338,8 @@ def verify_youtube_channel_keys(
                         "message": f"YouTube account slot '{mapped_account_id}' is not connected: {exc}",
                         "account_id": mapped_account_id,
                         "account_label": str(account.get("label") or mapped_account_id),
+                        "account_subscriber_count": str(account.get("subscriber_count") or ""),
+                        "account_hidden_subscriber_count": bool(account.get("hidden_subscriber_count")),
                         "key_source": "none",
                         "stream_key_suffix": "",
                         "configured_stream_id": str(channel.get("youtube_stream_id") or "").strip(),
@@ -1322,6 +1361,11 @@ def verify_youtube_channel_keys(
         )
         result["account_id"] = mapped_account_id
         result["account_label"] = str(account.get("label") or mapped_account_id)
+        profile = connected_profiles.get(mapped_account_id, {})
+        result["account_subscriber_count"] = str(profile.get("subscriber_count") or account.get("subscriber_count") or "")
+        result["account_hidden_subscriber_count"] = bool(
+            profile.get("hidden_subscriber_count") or account.get("hidden_subscriber_count")
+        )
         result["guard_reason"] = "" if result.get("ok") else str(result.get("status") or "verification_failed")
         checks.append(result)
 
@@ -1333,6 +1377,8 @@ def verify_youtube_channel_keys(
             "channel_id": profile.get("channel_id"),
             "channel_title": profile.get("channel_title"),
             "channel_handle": profile.get("channel_handle"),
+            "subscriber_count": str(profile.get("subscriber_count") or ""),
+            "hidden_subscriber_count": bool(profile.get("hidden_subscriber_count")),
         }
         for account_id, profile in connected_profiles.items()
     ]
@@ -1457,6 +1503,83 @@ def schedule_youtube(config_name: str, body: dict[str, Any]) -> dict[str, Any]:
         "channel": channel_name,
         "account_id": account_id,
         "account_label": str(account.get("label") or account_id),
+        "guard_reason": guard_reason,
+    }
+
+
+def use_existing_youtube_broadcast(config_name: str, body: dict[str, Any]) -> dict[str, Any]:
+    config, error = load_config_or_none(config_name)
+    if not config:
+        raise ValueError(error or "Config not found.")
+
+    channel_name = str(body.get("channel") or "").strip()
+    broadcast_id = str(body.get("broadcast_id") or body.get("broadcast") or "").strip()
+    if not channel_name:
+        raise ValueError("Castarro channel is required.")
+    if not broadcast_id:
+        raise ValueError("YouTube broadcast ID is required.")
+
+    channels = [item for item in config.get("channels", []) if isinstance(item, dict)]
+    selected_channel: dict[str, Any] | None = None
+    for item in channels:
+        if str(item.get("name") or "") == channel_name:
+            selected_channel = item
+            break
+    if not selected_channel:
+        raise ValueError(f"Unknown channel: {channel_name}")
+
+    requested_account_id = normalize_account_id(body.get("account_id") or "")
+    account_id, guard_reason = resolve_channel_account_for_action(config, selected_channel)
+    if not account_id:
+        reason_text = (
+            "No linked YouTube account slot found for this Castarro channel."
+            if not guard_reason
+            else f"No linked YouTube account slot found for this Castarro channel ({guard_reason})."
+        )
+        raise ValueError(reason_text)
+    if requested_account_id and requested_account_id != account_id:
+        raise ValueError(
+            "Requested account does not match this channel's linked account mapping "
+            f"(requested={requested_account_id}, resolved={account_id})."
+        )
+    account = find_youtube_account(config, account_id)
+    if not account:
+        raise ValueError(f"Linked YouTube account slot '{account_id}' was not found.")
+
+    scoped_config = account_config_view(config, account)
+    access_token, _tokens = youtube_service.valid_access_token(ROOT, scoped_config)
+    profile = youtube_service.connected_account_profile(access_token)
+    mismatch_message = youtube_profile_mismatch_message(channel_name or youtube_account_expected_channel_name(config, account), profile)
+    if mismatch_message:
+        raise ValueError(mismatch_message)
+
+    broadcasts = youtube_service.list_upcoming_broadcasts(access_token, limit=50)
+    broadcast = next((item for item in broadcasts if str(item.get("id") or "") == broadcast_id), None)
+    if not broadcast:
+        raise ValueError("That upcoming YouTube broadcast was not found on the linked account.")
+    stream_name = str(broadcast.get("stream_name") or "").strip()
+    if not stream_name:
+        raise ValueError("That YouTube broadcast does not have a bound stream key yet.")
+
+    selected_channel["stream_key_env"] = stream_name
+    selected_channel["youtube_account_id"] = account_id
+    if isinstance(broadcast.get("auto_start"), bool):
+        selected_channel["youtube_auto_start"] = bool(broadcast.get("auto_start"))
+    if isinstance(broadcast.get("auto_stop"), bool):
+        selected_channel["youtube_auto_stop"] = bool(broadcast.get("auto_stop"))
+    selected_channel["youtube_studio_url"] = str(broadcast.get("studio_url") or "")
+    selected_channel["youtube_broadcast_id"] = broadcast_id
+    selected_channel["youtube_stream_id"] = str(broadcast.get("bound_stream_id") or "")
+    save_config(config_name, config)
+
+    return {
+        "ok": True,
+        "channel": channel_name,
+        "account_id": account_id,
+        "account_label": str(account.get("label") or account_id),
+        "broadcast": broadcast,
+        "stream": broadcast.get("stream", {}),
+        "stream_key_suffix": stream_key_suffix(stream_name),
         "guard_reason": guard_reason,
     }
 
@@ -2176,12 +2299,18 @@ class Handler(BaseHTTPRequestHandler):
                 account["channel_id"] = ""
                 account["channel_title"] = ""
                 account["channel_handle"] = ""
+                account["subscriber_count"] = ""
+                account["hidden_subscriber_count"] = False
                 save_config(config_name, config)
                 json_response(self, {"ok": True, "config": config_name, "account_id": account_id})
                 return
 
             if parsed.path == "/api/youtube/schedule":
                 json_response(self, schedule_youtube(config_name, body))
+                return
+
+            if parsed.path == "/api/youtube/use-broadcast":
+                json_response(self, use_existing_youtube_broadcast(config_name, body))
                 return
 
             if parsed.path == "/api/channel/youtube-auto":

@@ -417,6 +417,35 @@ def assert_auth_start_reuses_channel_account_slot() -> None:
     assert payload["account_id"] == "acct-a"
 
 
+def assert_auth_start_creates_standalone_slot_for_unlinked_channel() -> None:
+    config = make_config()
+    config["channels"][0]["name"] = "Inside Us"
+    config["channels"][0]["youtube_account_id"] = "acct-a"
+    config["channels"][1]["name"] = "Inside Us Hindi"
+    config["channels"][1]["youtube_account_id"] = ""
+    config["youtube"]["accounts"][0]["label"] = "Inside Us"
+    config["youtube"]["accounts"][0]["expected_channel_name"] = "Inside Us"
+    captured: dict = {"saved": None}
+
+    original_load = web_ui.load_config_or_none
+    original_save = web_ui.save_config
+    web_ui.load_config_or_none = lambda _name: (config, None)
+    web_ui.save_config = lambda _name, updated: captured.__setitem__("saved", copy.deepcopy(updated))
+    try:
+        payload = web_ui.create_youtube_auth_start("config.ready.json", "", "Inside Us Hindi", "Inside Us Hindi")
+    finally:
+        web_ui.load_config_or_none = original_load
+        web_ui.save_config = original_save
+        with web_ui.STATE.lock:
+            web_ui.STATE.youtube_oauth_states.pop(str(payload.get("state") or ""), None)
+
+    assert payload["account_id"] != "acct-a"
+    saved = captured["saved"]
+    account = next(item for item in saved["youtube"]["accounts"] if item.get("id") == payload["account_id"])
+    assert account.get("label") == "Inside Us Hindi"
+    assert account.get("expected_channel_name") == "Inside Us Hindi"
+
+
 def main() -> int:
     assert_channel_scoped_schedule_routes_to_linked_accounts()
     assert_unlinked_channel_blocked_with_multiple_connected_accounts()
@@ -427,6 +456,7 @@ def main() -> int:
     assert_oauth_callback_persists_wrong_youtube_channel_name()
     assert_oauth_callback_links_selected_channel()
     assert_auth_start_reuses_channel_account_slot()
+    assert_auth_start_creates_standalone_slot_for_unlinked_channel()
     print("channel_workspace_contract_test: PASS")
     return 0
 

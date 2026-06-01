@@ -29,6 +29,8 @@ const state = {
   youtubeActionStatus: "idle",
   youtubeActionAt: "",
   youtubeSelectedAccountId: "",
+  youtubeImportedBroadcastId: "",
+  youtubeScheduleDraft: null,
   activityFilter: "all",
   localActivityEvents: [],
   activityRenderedItems: [],
@@ -169,6 +171,8 @@ function normalizedYoutubeAccounts(config) {
       channel_id: String(item?.channel_id || "").trim(),
       channel_title: String(item?.channel_title || "").trim(),
       channel_handle: String(item?.channel_handle || "").trim(),
+      subscriber_count: String(item?.subscriber_count || "").trim(),
+      hidden_subscriber_count: Boolean(item?.hidden_subscriber_count),
       expected_channel_name: String(item?.expected_channel_name || "").trim(),
       last_connected_at: String(item?.last_connected_at || "").trim(),
     });
@@ -183,6 +187,8 @@ function normalizedYoutubeAccounts(config) {
         channel_id: "",
         channel_title: "",
         channel_handle: "",
+        subscriber_count: "",
+        hidden_subscriber_count: false,
         expected_channel_name: "",
         last_connected_at: "",
       });
@@ -238,6 +244,25 @@ function getLinkedAccountForChannel(status, channel) {
   return null;
 }
 
+function getSelectedWorkspaceChannel(config) {
+  return getSelectedChannel(config || defaultConfigData(), state.workspace.selectedChannelName);
+}
+
+function findReusableYoutubeAccountForChannel(accounts, channelName) {
+  const expected = String(channelName || "").trim();
+  if (!expected) return null;
+  return accounts.find((item) => String(item?.expected_channel_name || "").trim() === expected)
+    || accounts.find((item) => String(item?.label || "").trim() === expected)
+    || null;
+}
+
+function syncYoutubeSelectedAccountFromChannel(config) {
+  const channel = getSelectedWorkspaceChannel(config || state.configData || defaultConfigData());
+  const accountId = normalizeAccountId(channel?.youtube_account_id || "");
+  state.youtubeSelectedAccountId = accountId;
+  return accountId;
+}
+
 function youtubeAccountDisplayName(account) {
   if (!account) return "";
   const slot = String(account.label || account.id || "").trim();
@@ -248,6 +273,20 @@ function youtubeAccountDisplayName(account) {
     return `${slot} / ${youtubeName}`;
   }
   return youtubeName || slot || "Unnamed account";
+}
+
+function youtubeSubscriberText(account) {
+  if (!account) return "";
+  if (account.hidden_subscriber_count) return "Subscribers hidden";
+  const raw = String(account.subscriber_count || "").trim();
+  if (!raw) return "";
+  const count = Number(raw);
+  if (!Number.isFinite(count)) return "";
+  const formatted = new Intl.NumberFormat(undefined, {
+    notation: count >= 1000 ? "compact" : "standard",
+    maximumFractionDigits: count >= 1000 ? 1 : 0,
+  }).format(count);
+  return `${formatted} subscribers`;
 }
 
 function getChannelTasks(tasks, channelName) {
@@ -963,6 +1002,8 @@ function switchWorkspaceChannel(channelName) {
   if (!selected || selected === state.workspace.selectedChannelName) return;
   setWorkspaceSelectedChannel(selected);
   syncActiveSettingsChannelFromWorkspace(state.activeTab === "settings");
+  syncYoutubeSelectedAccountFromChannel(state.configData || defaultConfigData());
+  state.youtubeBroadcasts = [];
   renderChannelWorkspace(state.status || {});
   refreshChannelContext(selected).catch((error) => toast(error.message));
 }
@@ -975,6 +1016,7 @@ function openSettingsForWorkspace(tabName, channelName = "") {
   if (index >= 0) {
     state.activeSettingsChannelIndex = index;
     setWorkspaceSelectedChannel(targetName);
+    syncYoutubeSelectedAccountFromChannel(config);
   }
   showTab("settings");
   showSettingsTab(targetTabName);
@@ -1997,6 +2039,120 @@ function showYoutubeOwnerSetupInUi() {
   }
 }
 
+function isoToDatetimeLocal(value) {
+  const date = new Date(String(value || ""));
+  if (Number.isNaN(date.getTime())) return "";
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}T${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+}
+
+function youtubeBroadcastDurationMinutes(item) {
+  const start = new Date(String(item?.scheduled_start_time || ""));
+  const end = new Date(String(item?.scheduled_end_time || ""));
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || end <= start) {
+    return 120;
+  }
+  return Math.max(15, Math.round((end.getTime() - start.getTime()) / 60000));
+}
+
+function youtubeScheduleDraftFromBroadcast(item) {
+  return {
+    title: String(item?.title || "").trim(),
+    description: String(item?.description || ""),
+    startLocal: isoToDatetimeLocal(item?.scheduled_start_time || ""),
+    durationMinutes: youtubeBroadcastDurationMinutes(item),
+    privacyStatus: String(item?.privacy_status || "unlisted").trim().toLowerCase() || "unlisted",
+  };
+}
+
+function selectedImportedYoutubeBroadcast() {
+  const broadcasts = Array.isArray(state.youtubeBroadcasts) ? state.youtubeBroadcasts : [];
+  const importedId = String(state.youtubeImportedBroadcastId || "").trim();
+  if (!importedId) return null;
+  return broadcasts.find((item) => String(item?.id || "") === importedId) || null;
+}
+
+function syncYoutubeScheduleDraftFromForm() {
+  state.youtubeScheduleDraft = {
+    title: String($("youtubeScheduleTitle")?.value || ""),
+    description: String($("youtubeScheduleDescription")?.value || ""),
+    startLocal: String($("youtubeScheduleStart")?.value || ""),
+    durationMinutes: Number($("youtubeScheduleDuration")?.value || 120),
+    privacyStatus: String($("youtubeSchedulePrivacy")?.value || "unlisted"),
+  };
+}
+
+function importYoutubeBroadcastSettings(broadcastId) {
+  const broadcasts = Array.isArray(state.youtubeBroadcasts) ? state.youtubeBroadcasts : [];
+  const item = broadcasts.find((candidate) => String(candidate?.id || "") === String(broadcastId || ""));
+  if (!item) {
+    toast("Could not find that YouTube broadcast.");
+    return;
+  }
+  state.youtubeImportedBroadcastId = String(item.id || "");
+  state.youtubeScheduleDraft = youtubeScheduleDraftFromBroadcast(item);
+  renderYoutubeSettingsPanel(state.configData || defaultConfigData());
+  toast("YouTube broadcast settings loaded.");
+}
+
+function youtubeSettingValue(value, fallback = "Unknown") {
+  const text = String(value ?? "").trim();
+  if (!text) return fallback;
+  return text;
+}
+
+function youtubeBooleanText(value) {
+  if (value === true) return "On";
+  if (value === false) return "Off";
+  return "Unknown";
+}
+
+function youtubeThumbnailUrl(item) {
+  const direct = String(item?.thumbnail_url || "").trim();
+  if (direct) return direct;
+  const thumbnails = item?.thumbnails && typeof item.thumbnails === "object" ? item.thumbnails : {};
+  for (const key of ["maxres", "standard", "high", "medium", "default"]) {
+    const url = String(thumbnails?.[key]?.url || "").trim();
+    if (url) return url;
+  }
+  return "";
+}
+
+function youtubeBroadcastSettingsMarkup(item) {
+  if (!item) return "";
+  const thumbnailUrl = youtubeThumbnailUrl(item);
+  const stream = item.stream && typeof item.stream === "object" ? item.stream : {};
+  const details = [
+    `Privacy: ${youtubeSettingValue(item.privacy_status)}`,
+    `Lifecycle: ${youtubeSettingValue(item.life_cycle_status)}`,
+    `Auto start: ${youtubeBooleanText(item.auto_start)}`,
+    `Auto stop: ${youtubeBooleanText(item.auto_stop)}`,
+    `DVR: ${youtubeBooleanText(item.enable_dvr)}`,
+    `Record: ${youtubeBooleanText(item.record_from_start)}`,
+    `Latency: ${youtubeSettingValue(item.latency_preference)}`,
+    `Projection: ${youtubeSettingValue(item.projection)}`,
+  ];
+  const streamDetails = [
+    stream.title ? `Stream: ${stream.title}` : "",
+    item.stream_name ? `Key: ${maskSecret(item.stream_name)}` : "",
+    item.stream_resolution || item.stream_frame_rate ? `Input: ${[item.stream_resolution, item.stream_frame_rate].filter(Boolean).join(" / ")}` : "",
+    item.primary_ingestion_address ? `Primary: ${item.primary_ingestion_address}` : "",
+    item.backup_ingestion_address ? `Backup: ${item.backup_ingestion_address}` : "",
+  ].filter(Boolean);
+  return `
+    <div class="youtube-import-preview">
+      ${thumbnailUrl ? `<img class="youtube-import-thumb" src="${escapeAttr(thumbnailUrl)}" alt="">` : `<div class="youtube-import-thumb missing">No thumbnail</div>`}
+      <div class="youtube-import-details">
+        <div class="youtube-broadcast-title">${escapeHtml(item.title || "Untitled")}</div>
+        <div class="meta">${escapeHtml(item.scheduled_start_time || "No start time")}</div>
+        <div class="row wrap">
+          ${details.map((detail) => `<span class="badge">${escapeHtml(detail)}</span>`).join("")}
+        </div>
+        ${streamDetails.length ? `<div class="youtube-stream-details">${streamDetails.map((detail) => `<span>${escapeHtml(detail)}</span>`).join("")}</div>` : `<div class="meta">No bound stream details returned yet.</div>`}
+      </div>
+    </div>
+  `;
+}
+
 function renderYoutubeSettingsPanel(config) {
   const container = $("youtubeSettingsPanel");
   if (!container) return;
@@ -2022,23 +2178,22 @@ function renderYoutubeSettingsPanel(config) {
   const selectedChannelIndex = (config.channels || []).findIndex((channel) => String(channel?.name || "") === selectedChannelName);
   const selectedChannel = selectedChannelIndex >= 0 ? config.channels[selectedChannelIndex] : null;
   const linkedAccountId = normalizeAccountId(selectedChannel?.youtube_account_id || "");
-  const connectedAccount = accounts.find((item) => item.connected) || null;
-  const actionableAccount = connectedAccount || accounts.find((item) => item.wrong_account || item.has_token) || null;
   if (linkedAccountId && accounts.some((item) => item.id === linkedAccountId)) {
     state.youtubeSelectedAccountId = linkedAccountId;
+  } else if (selectedChannelName) {
+    state.youtubeSelectedAccountId = "";
   } else if (!state.youtubeSelectedAccountId || !accounts.some((item) => item.id === state.youtubeSelectedAccountId)) {
-    state.youtubeSelectedAccountId = linkedAccountId || normalizeAccountId(status.default_account_id || "") || normalizeAccountId(actionableAccount?.id || "") || accounts[0]?.id || "";
+    const fallbackAccount = accounts.find((item) => item.connected) || accounts.find((item) => item.wrong_account || item.has_token) || accounts[0] || null;
+    state.youtubeSelectedAccountId = normalizeAccountId(status.default_account_id || "") || normalizeAccountId(fallbackAccount?.id || "");
   }
   let selectedAccount = accounts.find((item) => item.id === state.youtubeSelectedAccountId) || null;
-  if (!linkedAccountId && actionableAccount && !selectedAccount?.connected && !selectedAccount?.wrong_account && !selectedAccount?.has_token) {
-    selectedAccount = actionableAccount;
-    state.youtubeSelectedAccountId = normalizeAccountId(actionableAccount.id || "");
+  if (selectedChannelName && !linkedAccountId) {
+    selectedAccount = null;
   }
   const ownerSetupVisible = showYoutubeOwnerSetupInUi();
   const actionBusy = String(state.youtubeActionBusy || "").trim();
   const actionStatus = String(state.youtubeActionStatus || "idle");
   const actionMessage = String(state.youtubeActionMessage || "").trim();
-  const actionAt = String(state.youtubeActionAt || "").trim();
   const credentialsReady = Boolean(
     status.has_client_credentials
     || hasYoutubeCredentialsConfigured(youtube)
@@ -2070,24 +2225,44 @@ function renderYoutubeSettingsPanel(config) {
     : selectedAccount?.connected
       ? "YouTube account is connected for this channel."
       : "No YouTube account is connected for this channel.";
+  const subscriberText = youtubeSubscriberText(selectedAccount);
+  const connectionMetaText = [connectionMessage, subscriberText].filter(Boolean).join(" | ");
   const broadcasts = Array.isArray(state.youtubeBroadcasts) ? state.youtubeBroadcasts : [];
   const keyChecks = state.youtubeKeyChecks && Array.isArray(state.youtubeKeyChecks.checks)
     ? state.youtubeKeyChecks
+    : null;
+  const visibleKeyChecks = keyChecks
+    ? {
+      ...keyChecks,
+      checks: Array.isArray(keyChecks.checks)
+        ? keyChecks.checks.filter((item) => !selectedChannelName || String(item?.channel || "") === selectedChannelName)
+        : [],
+    }
     : null;
   const now = new Date();
   now.setMinutes(now.getMinutes() + 15 - (now.getMinutes() % 15), 0, 0);
   const defaultLocalTime = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}T${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
   const disabledBase = connectedCount > 0 && !actionBusy;
-  const disabledConnectActions = actionBusy ? "disabled" : "";
   const actionText = actionMessage || (connectedCount > 0
     ? "No YouTube action run yet in this session."
     : "Connect YouTube first, then run schedule/refresh/verify actions.");
   const actionNoticeClass = actionStatus === "error" ? "notice warn" : "notice";
-  const scheduleButtonText = actionBusy === "schedule" ? "Creating..." : "Create Schedule + Stream Key";
+  const scheduleButtonText = actionBusy === "schedule" ? "Creating..." : "Schedule Stream";
+  const useExistingButtonText = actionBusy === "adopt" ? "Using..." : "Use Existing Broadcast";
   const refreshButtonText = actionBusy === "refresh" ? "Refreshing..." : "Refresh Broadcasts";
   const defaultPrivacy = ["private", "unlisted", "public"].includes(String(youtube.default_privacy_status || "").toLowerCase())
     ? String(youtube.default_privacy_status || "").toLowerCase()
     : "unlisted";
+  const scheduleDraft = state.youtubeScheduleDraft && typeof state.youtubeScheduleDraft === "object" ? state.youtubeScheduleDraft : {};
+  const importedBroadcast = selectedImportedYoutubeBroadcast();
+  const importedBroadcastId = String(importedBroadcast?.id || "");
+  const scheduleTitleValue = String(scheduleDraft.title || "");
+  const scheduleStartValue = String(scheduleDraft.startLocal || "") || defaultLocalTime;
+  const scheduleDurationValue = Number.isFinite(Number(scheduleDraft.durationMinutes)) ? Math.max(15, Math.round(Number(scheduleDraft.durationMinutes))) : 120;
+  const schedulePrivacyValue = ["private", "unlisted", "public"].includes(String(scheduleDraft.privacyStatus || "").toLowerCase())
+    ? String(scheduleDraft.privacyStatus || "").toLowerCase()
+    : defaultPrivacy;
+  const scheduleDescriptionValue = String(scheduleDraft.description || "");
   const linkedAccount = accounts.find((item) => item.id === linkedAccountId) || null;
   let scheduleGuardReason = "";
   if (!selectedChannelName) {
@@ -2098,17 +2273,7 @@ function renderYoutubeSettingsPanel(config) {
     scheduleGuardReason = "Linked account is not connected.";
   }
   const disabledSchedule = disabledBase && !scheduleGuardReason ? "" : "disabled";
-  let keyCheckSummary = "Run verification to confirm stream keys match each channel's linked account.";
-  let keyCheckAllGood = false;
-  if (keyChecks) {
-    const checks = Array.isArray(keyChecks.checks) ? keyChecks.checks : [];
-    const enforceable = checks.filter((item) => String(item?.status || "") !== "missing_account");
-    const matched = enforceable.filter((item) => Boolean(item?.ok)).length;
-    keyCheckAllGood = enforceable.length > 0 && matched === enforceable.length;
-    keyCheckSummary = enforceable.length
-      ? `${matched}/${enforceable.length} mapped channel(s) match their linked account.`
-      : "No linked account mappings to verify yet.";
-  }
+  const keyCheckSummary = "Run verification to confirm this channel's stream key matches its linked account.";
   const activeLiveIndex = selectedSettingsChannelIndex(config);
   const liveSettingsMarkup = activeLiveIndex >= 0
     ? liveChannelCard(config.channels[activeLiveIndex], activeLiveIndex, accounts, defaultPrivacy)
@@ -2126,7 +2291,7 @@ function renderYoutubeSettingsPanel(config) {
         <div class="youtube-connection-summary">
           <div class="youtube-connection-name">
             <strong class="${selectedAccount?.wrong_account ? "wrong" : ""}">${escapeHtml(connectionName)}</strong>
-            <span class="meta">${escapeHtml(connectionMessage)}</span>
+            <span class="meta">${escapeHtml(connectionMetaText)}</span>
           </div>
           <span class="${connectionStatusClass}">${escapeHtml(connectionStatusText)}</span>
           <button class="${connectButtonClass}" type="button" onclick="${connectButtonAction}" ${connectButtonDisabled}>${escapeHtml(connectButtonText)}</button>
@@ -2139,60 +2304,78 @@ function renderYoutubeSettingsPanel(config) {
           <div class="section-head compact">
             <div>
               <h3>Schedule Broadcast</h3>
-              <p class="helper">Create a YouTube event + stream key, then assign that key to one Castarro channel.</p>
+              <p class="helper">Create a YouTube event + stream key, or load settings from an existing YouTube broadcast.</p>
             </div>
           </div>
+          ${broadcasts.length ? `
+            <div class="youtube-import-box">
+              <label>
+                Fetch from YouTube
+                <select id="youtubeBroadcastImport" onchange="importYoutubeBroadcastSettings(this.value)" ${actionBusy ? "disabled" : ""}>
+                  <option value="">Choose an existing broadcast</option>
+                  ${broadcasts.map((item) => `<option value="${escapeAttr(item.id || "")}" ${String(item.id || "") === importedBroadcastId ? "selected" : ""}>${escapeHtml(item.title || "Untitled")} (${escapeHtml(item.privacy_status || "unknown")})</option>`).join("")}
+                </select>
+              </label>
+              ${importedBroadcast ? youtubeBroadcastSettingsMarkup(importedBroadcast) : `<div class="meta">Pick a broadcast to preview and copy its available YouTube settings into this form.</div>`}
+            </div>
+          ` : `<div class="notice">Refresh broadcasts to fetch title, description, thumbnail, privacy, auto-start/stop, DVR, latency, and stream details from active or upcoming YouTube broadcasts.</div>`}
           <div class="form-grid youtube-schedule-form">
             <label>
               Title
-              <input id="youtubeScheduleTitle" type="text" placeholder="Live Event Title" ${disabledSchedule}>
+              <input id="youtubeScheduleTitle" type="text" value="${escapeAttr(scheduleTitleValue)}" placeholder="Live Event Title" oninput="syncYoutubeScheduleDraftFromForm()" ${disabledSchedule}>
             </label>
             <label>
               Start time
-              <input id="youtubeScheduleStart" type="datetime-local" value="${defaultLocalTime}" ${disabledSchedule}>
+              <input id="youtubeScheduleStart" type="datetime-local" value="${escapeAttr(scheduleStartValue)}" onchange="syncYoutubeScheduleDraftFromForm()" ${disabledSchedule}>
             </label>
             <label>
               Duration (minutes)
-              <input id="youtubeScheduleDuration" type="number" value="120" min="15" step="5" ${disabledSchedule}>
+              <input id="youtubeScheduleDuration" type="number" value="${escapeAttr(scheduleDurationValue)}" min="15" step="5" onchange="syncYoutubeScheduleDraftFromForm()" ${disabledSchedule}>
             </label>
             <label>
               Privacy
-              <select id="youtubeSchedulePrivacy" ${disabledSchedule}>
-                ${["private", "unlisted", "public"].map((privacy) => `<option value="${privacy}" ${privacy === defaultPrivacy ? "selected" : ""}>${privacy}</option>`).join("")}
+              <select id="youtubeSchedulePrivacy" onchange="syncYoutubeScheduleDraftFromForm()" ${disabledSchedule}>
+                ${["private", "unlisted", "public"].map((privacy) => `<option value="${privacy}" ${privacy === schedulePrivacyValue ? "selected" : ""}>${privacy}</option>`).join("")}
               </select>
             </label>
             <label class="youtube-description">
               Description
-              <textarea id="youtubeScheduleDescription" rows="4" placeholder="Optional broadcast description" ${disabledSchedule}></textarea>
+              <textarea id="youtubeScheduleDescription" rows="4" placeholder="Optional broadcast description" oninput="syncYoutubeScheduleDraftFromForm()" ${disabledSchedule}>${escapeHtml(scheduleDescriptionValue)}</textarea>
             </label>
             <label class="youtube-description">
               Thumbnail
               <input id="youtubeScheduleThumbnail" type="file" accept="image/jpeg,image/png,image/gif,image/bmp" ${disabledSchedule}>
-              <span class="setting-note">Optional. JPG, PNG, GIF, or BMP up to 2 MB.</span>
+              <span class="setting-note">${importedBroadcast && youtubeThumbnailUrl(importedBroadcast) ? "Fetched thumbnail is shown above. Choose a local file only if you want to replace it." : "Optional. JPG, PNG, GIF, or BMP up to 2 MB."}</span>
             </label>
           </div>
           ${scheduleGuardReason ? `<div class="notice warn">Guard: ${escapeHtml(scheduleGuardReason)} | Channel: ${escapeHtml(selectedChannelName || "none")} | Account: ${escapeHtml(linkedAccount?.label || linkedAccountId || "none")}</div>` : ""}
           <div class="row wrap">
+            ${importedBroadcast?.stream_name ? `<button class="pill primary" type="button" onclick="useExistingYoutubeBroadcast().catch((error) => toast(error.message))" ${disabledSchedule}>${escapeHtml(useExistingButtonText)}</button>` : ""}
             <button class="pill success" type="button" onclick="scheduleYoutubeBroadcast().catch((error) => toast(error.message))" ${disabledSchedule}>${scheduleButtonText}</button>
             <button class="pill ghost" type="button" onclick="refreshYoutubeBroadcasts(true).catch((error) => toast(error.message))" ${disabledSchedule}>${refreshButtonText}</button>
           </div>
           <div class="${actionNoticeClass}">${escapeHtml(actionText)}</div>
-          ${actionAt ? `<div class="meta">Last action update: ${escapeHtml(actionAt)}</div>` : ""}
-          <div class="notice ${keyChecks && keyCheckAllGood ? "" : "warn"}">${escapeHtml(keyCheckSummary)}</div>
-          ${keyChecks ? `
+          ${(!visibleKeyChecks || !visibleKeyChecks.checks.length) && !actionMessage ? `<div class="notice warn">${escapeHtml(keyCheckSummary)}</div>` : ""}
+          ${visibleKeyChecks && visibleKeyChecks.checks.length ? `
             <div class="youtube-broadcast-list">
-              ${keyChecks.checks.map((item) => `
+              ${visibleKeyChecks.checks.map((item) => {
+                const accountSubscriberText = youtubeSubscriberText({
+                  subscriber_count: item.account_subscriber_count,
+                  hidden_subscriber_count: item.account_hidden_subscriber_count,
+                });
+                const accountBadge = [item.account_label ? `Account: ${item.account_label}` : "", accountSubscriberText].filter(Boolean).join(" | ");
+                return `
                 <article class="youtube-broadcast-item">
                   <div class="youtube-broadcast-title">${escapeHtml(item.channel || "Unnamed channel")}</div>
                   <div class="meta">${escapeHtml(item.message || "")}</div>
                   <div class="row wrap">
                     <span class="badge ${item.ok ? "live" : "warn"}">${item.ok ? "Matched" : "Mismatch"}</span>
-                    ${item.account_label ? `<span class="badge">Account: ${escapeHtml(item.account_label)}</span>` : ""}
+                    ${accountBadge ? `<span class="badge">${escapeHtml(accountBadge)}</span>` : ""}
                     ${item.stream_key_suffix ? `<span class="badge">Key ends: ${escapeHtml(item.stream_key_suffix)}</span>` : ""}
                     ${item.match_source ? `<span class="badge">${escapeHtml(item.match_source)}</span>` : ""}
                   </div>
                 </article>
-              `).join("")}
+              `;}).join("")}
             </div>
           ` : ""}
         </section>
@@ -2251,23 +2434,41 @@ function renderYoutubeSettingsPanel(config) {
     <section class="nested-card">
       <div class="section-head compact">
         <div>
-          <h3>Upcoming Broadcasts</h3>
-          <p class="helper">Events from the selected YouTube account.</p>
+          <h3>YouTube Broadcasts</h3>
+          <p class="helper">Active and upcoming events from the selected YouTube account.</p>
         </div>
       </div>
       <div class="youtube-broadcast-list">
         ${broadcasts.length
-          ? broadcasts.map((item) => `
+          ? broadcasts.map((item) => {
+            const thumbnailUrl = youtubeThumbnailUrl(item);
+            const details = [
+              item.auto_start !== "" ? `Auto start: ${youtubeBooleanText(item.auto_start)}` : "",
+              item.auto_stop !== "" ? `Auto stop: ${youtubeBooleanText(item.auto_stop)}` : "",
+              item.enable_dvr !== "" ? `DVR: ${youtubeBooleanText(item.enable_dvr)}` : "",
+              item.latency_preference ? `Latency: ${item.latency_preference}` : "",
+              item.has_backup_ingestion ? "Backup ingest available" : "",
+            ].filter(Boolean);
+            return `
             <article class="youtube-broadcast-item">
-              <div class="youtube-broadcast-title">${escapeHtml(item.title || "Untitled")}</div>
-              <div class="meta">${escapeHtml(item.scheduled_start_time || "No start time")} - ${escapeHtml(item.privacy_status || "unknown")} - ${escapeHtml(item.life_cycle_status || "unknown")}</div>
+              <div class="youtube-broadcast-card-body">
+                ${thumbnailUrl ? `<img class="youtube-broadcast-thumb" src="${escapeAttr(thumbnailUrl)}" alt="">` : ""}
+                <div class="youtube-broadcast-card-copy">
+                  <div class="youtube-broadcast-title">${escapeHtml(item.title || "Untitled")}</div>
+                  <div class="meta">${escapeHtml(item.scheduled_start_time || "No start time")} - ${escapeHtml(item.privacy_status || "unknown")} - ${escapeHtml(item.life_cycle_status || "unknown")}</div>
+                  <div class="row wrap">
+                    ${details.map((detail) => `<span class="badge">${escapeHtml(detail)}</span>`).join("")}
+                    ${item.stream_name ? `<span class="badge">Key: ${escapeHtml(maskSecret(item.stream_name))}</span>` : ""}
+                  </div>
+                </div>
+              </div>
               <div class="row wrap">
-                ${item.studio_url ? `<a class="studio-link" href="${escapeHtml(item.studio_url)}" target="_blank">Open Studio</a>` : ""}
-                ${item.stream_name ? `<span class="badge">Key: ${escapeHtml(maskSecret(item.stream_name))}</span>` : ""}
+                <button class="pill small" type="button" onclick="importYoutubeBroadcastSettings('${escapeJs(item.id || "")}')" ${actionBusy ? "disabled" : ""}>Use Settings</button>
+                ${item.studio_url ? `<a class="studio-link" href="${escapeAttr(item.studio_url)}" target="_blank">Open Studio</a>` : ""}
               </div>
             </article>
-          `).join("")
-          : `<div class="meta">No upcoming broadcasts found.</div>`
+          `;}).join("")
+          : `<div class="meta">No active or upcoming broadcasts found.</div>`
         }
       </div>
     </section>
@@ -2281,7 +2482,8 @@ async function refreshYoutubeStatus() {
     const payload = await api(`/api/youtube/status?config=${encodeURIComponent(state.config)}`, { action: "youtube.status" });
     state.youtubeStatus = payload || null;
     const accounts = Array.isArray(payload?.accounts) ? payload.accounts : [];
-    if (!state.youtubeSelectedAccountId || !accounts.some((item) => normalizeAccountId(item.id || "") === state.youtubeSelectedAccountId)) {
+    const linkedAccountId = syncYoutubeSelectedAccountFromChannel(state.configData || defaultConfigData());
+    if (!linkedAccountId && !state.workspace.selectedChannelName && (!state.youtubeSelectedAccountId || !accounts.some((item) => normalizeAccountId(item.id || "") === state.youtubeSelectedAccountId))) {
       state.youtubeSelectedAccountId = normalizeAccountId(payload?.default_account_id || "") || normalizeAccountId(accounts[0]?.id || "");
     }
     if (!state.youtubeStatus?.connected) {
@@ -2316,7 +2518,6 @@ function setYoutubeAction(status, message, busyAction = "") {
 }
 
 async function refreshYoutubeBroadcasts(useLinkedChannel = false) {
-  setYoutubeAction("loading", "Refreshing upcoming broadcasts from YouTube...", "refresh");
   try {
     let accountId = state.youtubeSelectedAccountId;
     if (useLinkedChannel) {
@@ -2324,14 +2525,34 @@ async function refreshYoutubeBroadcasts(useLinkedChannel = false) {
       const channelName = String(state.workspace.selectedChannelName || "").trim();
       const channel = (config.channels || []).find((item) => String(item?.name || "").trim() === channelName);
       accountId = normalizeAccountId(channel?.youtube_account_id || "");
+      if (!accountId) {
+        state.youtubeBroadcasts = [];
+        renderYoutubeSettingsPanel(config);
+        return;
+      }
     }
+    setYoutubeAction("loading", "Refreshing broadcasts from YouTube...", "refresh");
     const query = accountId ? `&account=${encodeURIComponent(accountId)}` : "";
     const payload = await api(`/api/youtube/broadcasts?config=${encodeURIComponent(state.config)}${query}`, { action: "youtube.broadcasts.refresh" });
     state.youtubeBroadcasts = payload.broadcasts || [];
     if (payload.account_id) {
       state.youtubeSelectedAccountId = normalizeAccountId(payload.account_id);
     }
-    setYoutubeAction("success", `Broadcast list refreshed (${state.youtubeBroadcasts.length} item(s)).`);
+    const selectedStillExists = state.youtubeBroadcasts.some((item) => String(item?.id || "") === String(state.youtubeImportedBroadcastId || ""));
+    if (!selectedStillExists) {
+      state.youtubeImportedBroadcastId = "";
+    }
+    if (state.youtubeBroadcasts.length === 1) {
+      const [onlyBroadcast] = state.youtubeBroadcasts;
+      state.youtubeImportedBroadcastId = String(onlyBroadcast?.id || "");
+      state.youtubeScheduleDraft = youtubeScheduleDraftFromBroadcast(onlyBroadcast);
+      setYoutubeAction("success", "Broadcast list refreshed (1 item) and loaded into the form.");
+    } else if (state.youtubeBroadcasts.length > 1) {
+      setYoutubeAction("success", `Broadcast list refreshed (${state.youtubeBroadcasts.length} item(s)). Choose one from Fetch from YouTube.`);
+    } else {
+      state.youtubeScheduleDraft = null;
+      setYoutubeAction("success", "Broadcast list refreshed (0 item(s)). No active or upcoming YouTube broadcasts were found for this linked account.");
+    }
   } catch (error) {
     setYoutubeAction("error", error.message || "Could not refresh broadcasts.");
     throw error;
@@ -2347,12 +2568,13 @@ async function connectYoutube() {
     || ""
   ).trim();
   const selectedChannel = (data.channels || []).find((item) => String(item?.name || "").trim() === channelName) || null;
-  const reusableForChannel = channelName
-    ? accounts.find((item) => String(item?.expected_channel_name || "").trim() === channelName)
-      || accounts.find((item) => String(item?.label || "").trim() === channelName)
-      || null
-    : null;
-  let accountId = normalizeAccountId(selectedChannel?.youtube_account_id || reusableForChannel?.id || state.youtubeSelectedAccountId || data.youtube?.default_account_id || accounts[0]?.id || "");
+  const reusableForChannel = findReusableYoutubeAccountForChannel(accounts, channelName);
+  let accountId = "";
+  if (channelName) {
+    accountId = normalizeAccountId(selectedChannel?.youtube_account_id || reusableForChannel?.id || "");
+  } else {
+    accountId = normalizeAccountId(state.youtubeSelectedAccountId || data.youtube?.default_account_id || accounts[0]?.id || "");
+  }
   let selectedAccount = accountId ? (accounts.find((item) => item.id === accountId) || null) : null;
   if (!channelName && !selectedAccount) {
     selectedAccount = accounts[0] || null;
@@ -2366,7 +2588,7 @@ async function connectYoutube() {
     query.set("channel", channelName);
   }
   if (selectedAccount?.label || selectedChannel?.name) {
-    query.set("label", selectedAccount?.label || selectedChannel?.name || "");
+    query.set("label", selectedChannel?.name || selectedAccount?.label || "");
   }
   const payload = await api(`/api/youtube/auth/start?${query.toString()}`, { action: "youtube.connect.start" });
   if (payload?.account_id) {
@@ -2382,9 +2604,11 @@ async function connectYoutube() {
 async function disconnectYoutube() {
   const config = state.configData || defaultConfigData();
   const accounts = normalizedYoutubeAccounts(config);
-  const accountId = normalizeAccountId(state.youtubeSelectedAccountId || config.youtube?.default_account_id || accounts[0]?.id || "");
+  const channelName = String(state.workspace.selectedChannelName || "").trim();
+  const selectedChannel = (config.channels || []).find((item) => String(item?.name || "").trim() === channelName) || null;
+  const accountId = normalizeAccountId(selectedChannel?.youtube_account_id || (!channelName ? state.youtubeSelectedAccountId || config.youtube?.default_account_id || accounts[0]?.id || "" : ""));
   if (!accountId) {
-    throw new Error("No YouTube account is selected.");
+    throw new Error(channelName ? "This channel is not linked to a YouTube account." : "No YouTube account is selected.");
   }
   await api("/api/youtube/disconnect", {
     method: "POST",
@@ -2538,6 +2762,61 @@ async function scheduleYoutubeBroadcast() {
     toast(streamName ? `YouTube schedule created on ${payload?.account_label || linkedAccountId}. Stream key ends with ${streamName.slice(-4)}.` : `YouTube schedule created on ${payload?.account_label || linkedAccountId}.`);
   } catch (error) {
     setYoutubeAction("error", error.message || "Could not create schedule.");
+    throw error;
+  }
+}
+
+async function useExistingYoutubeBroadcast() {
+  const channelName = String(state.workspace.selectedChannelName || "").trim();
+  const importedBroadcast = selectedImportedYoutubeBroadcast();
+  const config = state.configData || defaultConfigData();
+  const channel = (config.channels || []).find((item) => String(item?.name || "").trim() === channelName);
+  const linkedAccountId = normalizeAccountId(channel?.youtube_account_id || "");
+
+  if (!channelName) {
+    throw new Error("Pick a Castarro channel first.");
+  }
+  if (!linkedAccountId) {
+    throw new Error("Link a YouTube account for this Castarro channel first.");
+  }
+  if (!importedBroadcast?.id) {
+    throw new Error("Choose an existing YouTube broadcast first.");
+  }
+  if (!importedBroadcast?.stream_name) {
+    throw new Error("That YouTube broadcast does not have a bound stream key yet.");
+  }
+
+  const confirmation = window.confirm(
+    `Use existing YouTube broadcast?\nChannel: ${channelName}\nBroadcast: ${importedBroadcast.title || importedBroadcast.id}`
+  );
+  if (!confirmation) {
+    return;
+  }
+
+  setYoutubeAction("loading", "Using existing YouTube broadcast and stream key...", "adopt");
+  try {
+    const payload = await api("/api/youtube/use-broadcast", {
+      method: "POST",
+      body: JSON.stringify({
+        config: state.config,
+        channel: channelName,
+        broadcast_id: importedBroadcast.id,
+        account_id: linkedAccountId,
+      }),
+      action: "youtube.use_existing_broadcast",
+    });
+    await refresh();
+    await loadConfigText();
+    await refreshYoutubeStatus();
+    await refreshYoutubeBroadcasts(true);
+    await verifyYoutubeChannelKeys(channelName);
+    setYoutubeAction(
+      "success",
+      `Existing broadcast linked on ${payload?.account_label || linkedAccountId}; key ends with ${payload?.stream_key_suffix || maskSecret(importedBroadcast.stream_name).slice(-4)}.`
+    );
+    toast("Existing YouTube broadcast linked to this Castarro channel.");
+  } catch (error) {
+    setYoutubeAction("error", error.message || "Could not use existing YouTube broadcast.");
     throw error;
   }
 }
@@ -3371,7 +3650,9 @@ function showSettingsTab(tab) {
           renderYoutubeSettingsPanel(state.configData || defaultConfigData());
           return;
         }
-        return refreshYoutubeBroadcasts().then(() => verifyYoutubeChannelKeys());
+        const selectedChannel = String(state.workspace.selectedChannelName || "").trim();
+        return refreshYoutubeBroadcasts(Boolean(selectedChannel))
+          .then(() => verifyYoutubeChannelKeys(selectedChannel));
       })
       .catch((error) => toast(error.message));
   }
@@ -3501,7 +3782,10 @@ window.addEventListener("message", (event) => {
       .then(() => refresh())
       .then(() => refreshYoutubeBroadcasts(true))
       .then(() => {
-        const connectedName = payload.channel_title ? `Connected to ${payload.channel_title}.` : "YouTube account connected.";
+        const subscriberText = youtubeSubscriberText(payload);
+        const connectedName = payload.channel_title
+          ? `Connected to ${payload.channel_title}${subscriberText ? ` (${subscriberText})` : ""}.`
+          : "YouTube account connected.";
         setYoutubeAction("success", connectedName);
         toast(connectedName);
       })

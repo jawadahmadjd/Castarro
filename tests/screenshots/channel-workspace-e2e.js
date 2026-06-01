@@ -322,6 +322,46 @@ async function runUiChecks(page) {
   assert.match(railConnection, /Disconnected/);
 
   await page.evaluate(() => {
+    setWorkspaceSelectedChannel("C");
+    renderYoutubeSettingsPanel(state.configData);
+    renderChannelWorkspace(state.status);
+  });
+  await page.waitForTimeout(250);
+  await page.locator(".youtube-connection-summary strong", { hasText: "C" }).waitFor();
+  await page.locator(".youtube-connection-summary .badge", { hasText: "Disconnected" }).waitFor();
+  assert.equal(await page.getByRole("button", { name: "Connect", exact: true }).isEnabled(), true);
+  const unlinkedSummary = await page.locator(".youtube-connection-summary").innerText();
+  assert.doesNotMatch(unlinkedSummary, /Account A/);
+  const authStartPath = await page.evaluate(async () => {
+    const originalApi = api;
+    const originalOpen = window.open;
+    const calls = [];
+    api = async (path, options = {}) => {
+      calls.push({ path, action: options.action || "" });
+      if (String(path).startsWith("/api/config/save")) return { ok: true };
+      if (String(path).startsWith("/api/status")) return state.status;
+      if (String(path).startsWith("/api/raw-files")) return { files: [] };
+      if (String(path).startsWith("/api/normalized-files")) return { files: [] };
+      if (String(path).startsWith("/api/youtube/auth/start")) {
+        return { ok: true, account_id: "account-3", url: "http://127.0.0.1/mock-auth" };
+      }
+      return {};
+    };
+    window.open = () => ({ closed: false });
+    state.youtubeSelectedAccountId = "acct-a";
+    try {
+      await connectYoutube();
+    } finally {
+      api = originalApi;
+      window.open = originalOpen;
+    }
+    return calls.find((item) => item.path.startsWith("/api/youtube/auth/start"))?.path || "";
+  });
+  const authStartUrl = new global.URL(`http://local${authStartPath}`);
+  assert.equal(authStartUrl.searchParams.get("channel"), "C");
+  assert.equal(authStartUrl.searchParams.has("account"), false);
+
+  await page.evaluate(() => {
     setWorkspaceSelectedChannel("A");
     renderYoutubeSettingsPanel(state.configData);
     renderChannelWorkspace(state.status);

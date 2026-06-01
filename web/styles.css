@@ -856,6 +856,57 @@ details[open] > .channel-summary::after {
   grid-template-columns: 1fr;
 }
 
+.youtube-import-box {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.5);
+}
+
+.youtube-import-preview,
+.youtube-broadcast-card-body {
+  display: grid;
+  grid-template-columns: 128px minmax(0, 1fr);
+  gap: var(--space-2);
+  align-items: start;
+  min-width: 0;
+}
+
+.youtube-import-thumb,
+.youtube-broadcast-thumb {
+  width: 128px;
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.65);
+}
+
+.youtube-import-thumb.missing {
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  font-size: var(--font-xs);
+  text-align: center;
+}
+
+.youtube-import-details,
+.youtube-broadcast-card-copy {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.youtube-stream-details {
+  display: grid;
+  gap: 3px;
+  color: var(--muted);
+  font-size: var(--font-xs);
+  overflow-wrap: anywhere;
+}
+
 .youtube-schedule-card .notice,
 .youtube-schedule-card .meta,
 .youtube-schedule-card .youtube-broadcast-list {
@@ -1578,6 +1629,17 @@ pre {
   .youtube-schedule-form,
   .youtube-side-stack .form-grid {
     grid-template-columns: 1fr;
+  }
+
+  .youtube-import-preview,
+  .youtube-broadcast-card-body {
+    grid-template-columns: 1fr;
+  }
+
+  .youtube-import-thumb,
+  .youtube-broadcast-thumb {
+    width: 100%;
+    max-width: 320px;
   }
 
   .youtube-pref-row,

@@ -362,51 +362,138 @@ def youtube_upload(access_token: str, url: str, data: bytes, content_type: str) 
 def connected_account_profile(access_token: str) -> dict[str, Any]:
     payload = youtube_get(
         access_token,
-        "https://www.googleapis.com/youtube/v3/channels?part=id,snippet&mine=true&maxResults=1",
+        "https://www.googleapis.com/youtube/v3/channels?part=id,snippet,statistics&mine=true&maxResults=1",
     )
     items = payload.get("items")
     if not isinstance(items, list) or not items:
         return {}
     channel = items[0] if isinstance(items[0], dict) else {}
     snippet = channel.get("snippet", {}) if isinstance(channel.get("snippet"), dict) else {}
+    statistics = channel.get("statistics", {}) if isinstance(channel.get("statistics"), dict) else {}
     return {
         "channel_id": channel.get("id"),
         "channel_title": snippet.get("title"),
         "channel_handle": snippet.get("customUrl"),
+        "subscriber_count": statistics.get("subscriberCount"),
+        "hidden_subscriber_count": bool(statistics.get("hiddenSubscriberCount")),
     }
 
 
-def list_upcoming_broadcasts(access_token: str, limit: int = 25) -> list[dict[str, Any]]:
+def best_thumbnail_url(thumbnails: Any) -> str:
+    if not isinstance(thumbnails, dict):
+        return ""
+    for name in ("maxres", "standard", "high", "medium", "default"):
+        item = thumbnails.get(name)
+        if isinstance(item, dict):
+            url = str(item.get("url") or "").strip()
+            if url:
+                return url
+    return ""
+
+
+def stream_details_from_resource(stream: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(stream, dict):
+        return {}
+    snippet = stream.get("snippet", {}) if isinstance(stream.get("snippet"), dict) else {}
+    cdn = stream.get("cdn", {}) if isinstance(stream.get("cdn"), dict) else {}
+    ingestion = cdn.get("ingestionInfo", {}) if isinstance(cdn.get("ingestionInfo"), dict) else {}
+    content_details = stream.get("contentDetails", {}) if isinstance(stream.get("contentDetails"), dict) else {}
+    status = stream.get("status", {}) if isinstance(stream.get("status"), dict) else {}
+    primary = str(ingestion.get("rtmpsIngestionAddress") or ingestion.get("ingestionAddress") or "").strip()
+    backup = str(ingestion.get("rtmpsBackupIngestionAddress") or ingestion.get("backupIngestionAddress") or "").strip()
+    return {
+        "id": str(stream.get("id") or ""),
+        "title": snippet.get("title", ""),
+        "description": snippet.get("description", ""),
+        "stream_name": stream_name_from_resource(stream),
+        "ingestion_type": cdn.get("ingestionType", ""),
+        "resolution": cdn.get("resolution", ""),
+        "frame_rate": cdn.get("frameRate", ""),
+        "primary_ingestion_address": primary,
+        "backup_ingestion_address": backup,
+        "has_backup_ingestion": bool(backup),
+        "is_reusable": bool(content_details.get("isReusable")),
+        "stream_status": status.get("streamStatus", ""),
+        "health_status": status.get("healthStatus", {}),
+    }
+
+
+def broadcast_from_resource(access_token: str, item: dict[str, Any]) -> dict[str, Any] | None:
+    if not isinstance(item, dict):
+        return None
+    snippet = item.get("snippet", {}) if isinstance(item.get("snippet"), dict) else {}
+    status = item.get("status", {}) if isinstance(item.get("status"), dict) else {}
+    content_details = item.get("contentDetails", {}) if isinstance(item.get("contentDetails"), dict) else {}
+    broadcast_id = str(item.get("id") or "")
+    bound_stream_id = str(content_details.get("boundStreamId") or "")
+    stream = live_stream_by_id(access_token, bound_stream_id) if bound_stream_id else None
+    stream_details = stream_details_from_resource(stream)
+    return {
+        "id": broadcast_id,
+        "title": snippet.get("title"),
+        "description": snippet.get("description", ""),
+        "thumbnail_url": best_thumbnail_url(snippet.get("thumbnails")),
+        "thumbnails": snippet.get("thumbnails", {}),
+        "scheduled_start_time": snippet.get("scheduledStartTime", ""),
+        "scheduled_end_time": snippet.get("scheduledEndTime", ""),
+        "privacy_status": status.get("privacyStatus", ""),
+        "life_cycle_status": status.get("lifeCycleStatus", ""),
+        "made_for_kids": status.get("selfDeclaredMadeForKids", status.get("madeForKids", "")),
+        "auto_start": content_details.get("enableAutoStart", ""),
+        "auto_stop": content_details.get("enableAutoStop", ""),
+        "enable_dvr": content_details.get("enableDvr", ""),
+        "record_from_start": content_details.get("recordFromStart", ""),
+        "latency_preference": content_details.get("latencyPreference", ""),
+        "projection": content_details.get("projection", ""),
+        "monitor_stream": content_details.get("monitorStream", {}),
+        "bound_stream_id": bound_stream_id,
+        "stream": stream_details,
+        "stream_name": stream_details.get("stream_name", ""),
+        "stream_title": stream_details.get("title", ""),
+        "stream_resolution": stream_details.get("resolution", ""),
+        "stream_frame_rate": stream_details.get("frame_rate", ""),
+        "has_backup_ingestion": bool(stream_details.get("has_backup_ingestion")),
+        "primary_ingestion_address": stream_details.get("primary_ingestion_address", ""),
+        "backup_ingestion_address": stream_details.get("backup_ingestion_address", ""),
+        "studio_url": f"https://studio.youtube.com/video/{broadcast_id}/livestreaming" if broadcast_id else "",
+    }
+
+
+def list_broadcasts_by_status(access_token: str, status: str, limit: int = 25) -> list[dict[str, Any]]:
     payload = youtube_get(
         access_token,
         "https://www.googleapis.com/youtube/v3/liveBroadcasts"
-        f"?part=id,snippet,status,contentDetails&broadcastStatus=upcoming&broadcastType=all&maxResults={max(1, min(limit, 50))}",
+        f"?part=id,snippet,status,contentDetails&broadcastStatus={urllib.parse.quote(status)}&broadcastType=all&maxResults={max(1, min(limit, 50))}",
     )
     items = payload.get("items")
     if not isinstance(items, list):
         return []
     results: list[dict[str, Any]] = []
     for item in items:
-        if not isinstance(item, dict):
-            continue
-        snippet = item.get("snippet", {}) if isinstance(item.get("snippet"), dict) else {}
-        status = item.get("status", {}) if isinstance(item.get("status"), dict) else {}
-        content_details = item.get("contentDetails", {}) if isinstance(item.get("contentDetails"), dict) else {}
-        broadcast_id = str(item.get("id") or "")
-        results.append(
-            {
-                "id": broadcast_id,
-                "title": snippet.get("title"),
-                "description": snippet.get("description", ""),
-                "scheduled_start_time": snippet.get("scheduledStartTime", ""),
-                "scheduled_end_time": snippet.get("scheduledEndTime", ""),
-                "privacy_status": status.get("privacyStatus", ""),
-                "life_cycle_status": status.get("lifeCycleStatus", ""),
-                "bound_stream_id": content_details.get("boundStreamId", ""),
-                "studio_url": f"https://studio.youtube.com/video/{broadcast_id}/livestreaming" if broadcast_id else "",
-            }
-        )
+        result = broadcast_from_resource(access_token, item)
+        if result:
+            results.append(result)
     return results
+
+
+def list_upcoming_broadcasts(access_token: str, limit: int = 25) -> list[dict[str, Any]]:
+    results_by_id: dict[str, dict[str, Any]] = {}
+    for status in ("upcoming", "active"):
+        for item in list_broadcasts_by_status(access_token, status, limit):
+            broadcast_id = str(item.get("id") or "")
+            if broadcast_id and broadcast_id not in results_by_id:
+                results_by_id[broadcast_id] = item
+
+    if not results_by_id:
+        for item in list_broadcasts_by_status(access_token, "all", limit):
+            life_cycle_status = str(item.get("life_cycle_status") or "").lower()
+            if life_cycle_status in {"complete", "revoked"}:
+                continue
+            broadcast_id = str(item.get("id") or "")
+            if broadcast_id and broadcast_id not in results_by_id:
+                results_by_id[broadcast_id] = item
+
+    return list(results_by_id.values())
 
 
 def stream_name_from_resource(stream: dict[str, Any]) -> str:

@@ -141,7 +141,7 @@ http://127.0.0.1:8765/oauth2redirect
 5. Keep `Use PKCE` enabled.
 6. Click `Save settings`.
 7. Click `Connect to YouTube` and approve access.
-8. Use `Create Schedule + Stream Key` to create a broadcast and assign its stream key to your selected Castarro channel.
+8. Use `Schedule Stream` to create a broadcast and assign its stream key to your selected Castarro channel.
 
 Important:
 
