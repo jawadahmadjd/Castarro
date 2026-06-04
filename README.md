@@ -67,12 +67,12 @@ The UI lets you:
 The UI has two tabs:
 
 - `Control`: start/stop streams, normalize, validate, and watch activity.
-- `Settings`: config file selection plus `Folders`, `Video Normalization`, `YouTube`, and `Troubleshooting` menus.
+- `Settings`: config file selection plus `Folders`, `Video Encoder`, `YouTube`, and `Troubleshooting` menus.
 
 Inside `Settings`:
 
 - `Folders`: choose exact paths for Raw Videos, Go Live videos, and Logs.
-- `Video Normalization`: per-channel Add Videos, selected source files, and normalization profile.
+- `Video Encoder`: per-channel Add Videos, selected source files, and encoding profile.
 - `YouTube`: live playlist settings, stream keys, account mapping, connect/schedule controls, and Add Channel. OAuth technical fields are hidden from normal users.
 
 Desktop runtime behavior:
@@ -98,7 +98,7 @@ Raw Videos/channel_1/video-002.mp4
 Raw Videos/channel_2/video-001.mp4
 ```
 
-In the UI, open `Settings -> Video Normalization`, open a channel, then click `Add Videos`.
+In the UI, open `Settings -> Video Encoder`, open a channel, then click `Add Videos`.
 
 The app copies selected files into:
 

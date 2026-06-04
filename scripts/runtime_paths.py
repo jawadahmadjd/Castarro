@@ -25,6 +25,18 @@ MUTABLE_FILES = [
     "config.ready.json",
     "stream_control.db",
 ]
+YOUTUBE_OWNER_SEED_FILES = [
+    "youtube.oauth.seed.json",
+    "youtube-owner-oauth.json",
+]
+YOUTUBE_OWNER_FIELDS = [
+    "client_id",
+    "client_secret",
+    "oauth_client_type",
+    "use_pkce",
+    "redirect_uri",
+    "scopes",
+]
 
 
 def ensure_data_root() -> None:
@@ -67,6 +79,131 @@ def apply_runtime_defaults(config: dict[str, Any]) -> dict[str, Any]:
     elif not defaults.get("ffprobe_path"):
         defaults["ffprobe_path"] = "ffprobe"
     return config
+
+
+def _read_json_file(path: Path) -> dict[str, Any] | None:
+    try:
+        if path.exists() and path.is_file():
+            payload = json.loads(path.read_text(encoding="utf-8-sig"))
+            return payload if isinstance(payload, dict) else None
+    except Exception:
+        return None
+    return None
+
+
+def _youtube_owner_settings_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    raw = payload.get("youtube") if isinstance(payload.get("youtube"), dict) else payload
+    if not isinstance(raw, dict):
+        return {}
+    settings: dict[str, Any] = {}
+    for field in YOUTUBE_OWNER_FIELDS:
+        if field not in raw:
+            continue
+        value = raw.get(field)
+        if isinstance(value, str):
+            value = value.strip()
+        if value in (None, ""):
+            continue
+        settings[field] = value
+    return settings if settings.get("client_id") else {}
+
+
+def _youtube_owner_settings_from_env() -> dict[str, Any]:
+    client_id = (
+        os.environ.get("STREAM_YOUTUBE_CLIENT_ID")
+        or os.environ.get("CASTARRO_YOUTUBE_CLIENT_ID")
+        or ""
+    ).strip()
+    if not client_id:
+        return {}
+
+    settings: dict[str, Any] = {"client_id": client_id}
+    client_secret = (
+        os.environ.get("STREAM_YOUTUBE_CLIENT_SECRET")
+        or os.environ.get("CASTARRO_YOUTUBE_CLIENT_SECRET")
+        or ""
+    ).strip()
+    if client_secret:
+        settings["client_secret"] = client_secret
+
+    oauth_client_type = (
+        os.environ.get("STREAM_YOUTUBE_OAUTH_CLIENT_TYPE")
+        or os.environ.get("CASTARRO_YOUTUBE_OAUTH_CLIENT_TYPE")
+        or ""
+    ).strip()
+    if oauth_client_type:
+        settings["oauth_client_type"] = oauth_client_type
+
+    redirect_uri = (
+        os.environ.get("STREAM_YOUTUBE_REDIRECT_URI")
+        or os.environ.get("CASTARRO_YOUTUBE_REDIRECT_URI")
+        or ""
+    ).strip()
+    if redirect_uri:
+        settings["redirect_uri"] = redirect_uri
+    return settings
+
+
+def youtube_owner_seed_settings() -> dict[str, Any]:
+    env_settings = _youtube_owner_settings_from_env()
+    if env_settings:
+        return env_settings
+
+    candidates: list[Path] = []
+    explicit = os.environ.get("STREAM_YOUTUBE_OAUTH_SEED")
+    if explicit:
+        candidates.append(Path(explicit).expanduser())
+
+    roots: list[Path] = [DATA_ROOT]
+    legacy_env = os.environ.get("STREAM_LEGACY_ROOT")
+    if legacy_env:
+        roots.append(Path(legacy_env).resolve())
+    roots.extend(
+        [
+            CODE_ROOT / "resources" / "seed-data",
+            CODE_ROOT / "desktop" / "resources" / "seed-data",
+            CODE_ROOT,
+        ]
+    )
+    for root in roots:
+        for name in YOUTUBE_OWNER_SEED_FILES:
+            candidates.append(root / name)
+
+    seen: set[Path] = set()
+    for candidate in candidates:
+        path = candidate.resolve()
+        if path in seen:
+            continue
+        seen.add(path)
+        payload = _read_json_file(path)
+        if not payload:
+            continue
+        settings = _youtube_owner_settings_from_payload(payload)
+        if settings:
+            return settings
+    return {}
+
+
+def apply_youtube_owner_seed(config: dict[str, Any]) -> bool:
+    seed = youtube_owner_seed_settings()
+    if not seed:
+        return False
+
+    youtube = config.setdefault("youtube", {})
+    if not isinstance(youtube, dict):
+        youtube = {}
+        config["youtube"] = youtube
+
+    changed = False
+    for field, value in seed.items():
+        current = youtube.get(field)
+        missing = current is None or (isinstance(current, str) and not current.strip())
+        if field == "scopes":
+            missing = not current
+        if missing:
+            youtube[field] = value
+            changed = True
+    return changed
 
 
 def runtime_binary_status() -> dict[str, dict[str, Any]]:

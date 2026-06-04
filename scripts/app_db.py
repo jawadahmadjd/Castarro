@@ -461,31 +461,45 @@ def record_stream_stop(config_name: str, channel_name: str, returncode: int | No
         )
 
 
-def recent_stream_sessions(config_name: str | None = None, limit: int = 12) -> list[dict[str, Any]]:
+def stream_sessions(
+    config_name: str | None = None,
+    *,
+    channel_name: str | None = None,
+    started_after: str | None = None,
+    started_before: str | None = None,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
     init_db()
-    safe_limit = max(1, min(int(limit), 100))
+    safe_limit = None if limit is None else max(1, min(int(limit), 10000))
+    where: list[str] = []
+    params: list[Any] = []
+    if config_name:
+        where.append("config_name = ?")
+        params.append(config_name)
+    if channel_name:
+        where.append("channel_name = ?")
+        params.append(channel_name)
+    if started_after:
+        where.append("datetime(started_at) >= datetime(?)")
+        params.append(started_after)
+    if started_before:
+        where.append("datetime(started_at) <= datetime(?)")
+        params.append(started_before)
+    where_clause = f"WHERE {' AND '.join(where)}" if where else ""
+    limit_clause = "LIMIT ?" if safe_limit is not None else ""
+    if safe_limit is not None:
+        params.append(safe_limit)
     with connect() as db:
-        if config_name:
-            rows = db.execute(
-                """
-                SELECT id, config_name, channel_name, live_title, status, returncode, started_at, stopped_at
-                FROM stream_sessions
-                WHERE config_name = ?
-                ORDER BY datetime(started_at) DESC, id DESC
-                LIMIT ?
-                """,
-                (config_name, safe_limit),
-            ).fetchall()
-        else:
-            rows = db.execute(
-                """
-                SELECT id, config_name, channel_name, live_title, status, returncode, started_at, stopped_at
-                FROM stream_sessions
-                ORDER BY datetime(started_at) DESC, id DESC
-                LIMIT ?
-                """,
-                (safe_limit,),
-            ).fetchall()
+        rows = db.execute(
+            f"""
+            SELECT id, config_name, channel_name, live_title, status, returncode, started_at, stopped_at
+            FROM stream_sessions
+            {where_clause}
+            ORDER BY datetime(started_at) DESC, id DESC
+            {limit_clause}
+            """,
+            params,
+        ).fetchall()
 
     sessions: list[dict[str, Any]] = []
     for row in rows:
@@ -504,6 +518,14 @@ def recent_stream_sessions(config_name: str | None = None, limit: int = 12) -> l
     return sessions
 
 
+def recent_stream_sessions(
+    config_name: str | None = None,
+    channel_name: str | None = None,
+    limit: int = 12,
+) -> list[dict[str, Any]]:
+    return stream_sessions(config_name, channel_name=channel_name, limit=limit)
+
+
 def stats() -> dict[str, Any]:
     init_db()
     tables = ["channels", "videos", "settings_snapshots", "tasks", "stream_sessions", "logs", "app_events"]
@@ -514,31 +536,34 @@ def stats() -> dict[str, Any]:
         }
 
 
-def recent_app_events(config_name: str | None = None, limit: int = 40) -> list[dict[str, Any]]:
+def recent_app_events(
+    config_name: str | None = None,
+    channel_name: str | None = None,
+    limit: int = 40,
+) -> list[dict[str, Any]]:
     init_db()
     safe_limit = max(1, min(int(limit), 200))
+    where: list[str] = []
+    params: list[Any] = []
+    if config_name:
+        where.append("(config_name = ? OR config_name IS NULL)")
+        params.append(config_name)
+    if channel_name:
+        where.append("channel_name = ?")
+        params.append(channel_name)
+    where_clause = f"WHERE {' AND '.join(where)}" if where else ""
+    params.append(safe_limit)
     with connect() as db:
-        if config_name:
-            rows = db.execute(
-                """
-                SELECT id, event_type, config_name, channel_name, details_json, created_at
-                FROM app_events
-                WHERE config_name = ? OR config_name IS NULL
-                ORDER BY id DESC
-                LIMIT ?
-                """,
-                (config_name, safe_limit),
-            ).fetchall()
-        else:
-            rows = db.execute(
-                """
-                SELECT id, event_type, config_name, channel_name, details_json, created_at
-                FROM app_events
-                ORDER BY id DESC
-                LIMIT ?
-                """,
-                (safe_limit,),
-            ).fetchall()
+        rows = db.execute(
+            f"""
+            SELECT id, event_type, config_name, channel_name, details_json, created_at
+            FROM app_events
+            {where_clause}
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            params,
+        ).fetchall()
 
     events: list[dict[str, Any]] = []
     for row in rows:
@@ -562,17 +587,24 @@ def recent_app_events(config_name: str | None = None, limit: int = 40) -> list[d
     return events
 
 
-def clear_app_events(config_name: str | None = None, include_global: bool = True) -> int:
+def clear_app_events(
+    config_name: str | None = None,
+    include_global: bool = True,
+    channel_name: str | None = None,
+) -> int:
     init_db()
-    with connect() as db:
-        if config_name:
-            if include_global:
-                cursor = db.execute(
-                    "DELETE FROM app_events WHERE config_name = ? OR config_name IS NULL",
-                    (config_name,),
-                )
-            else:
-                cursor = db.execute("DELETE FROM app_events WHERE config_name = ?", (config_name,))
+    where: list[str] = []
+    params: list[Any] = []
+    if config_name:
+        if include_global and not channel_name:
+            where.append("(config_name = ? OR config_name IS NULL)")
         else:
-            cursor = db.execute("DELETE FROM app_events")
+            where.append("config_name = ?")
+        params.append(config_name)
+    if channel_name:
+        where.append("channel_name = ?")
+        params.append(channel_name)
+    where_clause = f" WHERE {' AND '.join(where)}" if where else ""
+    with connect() as db:
+        cursor = db.execute(f"DELETE FROM app_events{where_clause}", params)
     return int(cursor.rowcount or 0)

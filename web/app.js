@@ -12,7 +12,11 @@ const state = {
   settingsTab: "folders",
   rawFilesByChannel: {},
   normalizedFilesByChannel: {},
+  rawFilesAutoRefreshBusy: false,
+  rawFilesAutoRefreshLastAt: 0,
   activeSettingsChannelIndex: 0,
+  channelDeleteDialog: { index: -1, name: "" },
+  removedChannelUndo: null,
   hadRunningSettingsTask: false,
   expandedTaskLogs: {},
   previewChannel: "",
@@ -34,6 +38,17 @@ const state = {
   activityFilter: "all",
   localActivityEvents: [],
   activityRenderedItems: [],
+  settingsLiveHistory: {
+    sessions: [],
+    filter: "last_28",
+    menuOpen: false,
+    calendarOpen: false,
+    customStart: "",
+    customEnd: "",
+    pendingStart: "",
+    pendingEnd: "",
+    selectingCustomEnd: false,
+  },
 };
 
 const $ = (id) => document.getElementById(id);
@@ -253,6 +268,18 @@ function getSelectedWorkspaceChannel(config) {
   return getSelectedChannel(config || defaultConfigData(), state.workspace.selectedChannelName);
 }
 
+function selectedWorkspaceChannelName() {
+  return String(state.workspace.selectedChannelName || "").trim();
+}
+
+function taskChannelName(task) {
+  return String(task?.channel || task?.progress?.channel || "").trim();
+}
+
+function eventChannelName(event) {
+  return String(event?.channel_name || "").trim();
+}
+
 function findReusableYoutubeAccountForChannel(accounts, channelName) {
   const expected = String(channelName || "").trim();
   if (!expected) return null;
@@ -297,7 +324,7 @@ function youtubeSubscriberText(account) {
 function getChannelTasks(tasks, channelName) {
   const list = Array.isArray(tasks) ? tasks : [];
   if (!channelName) return [];
-  return list.filter((task) => String(task?.channel || "") === String(channelName));
+  return list.filter((task) => taskChannelName(task) === String(channelName));
 }
 
 function getChannelStreams(streams, channelName) {
@@ -308,7 +335,7 @@ function getChannelStreams(streams, channelName) {
 function getChannelEvents(events, channelName) {
   const list = Array.isArray(events) ? events : [];
   if (!channelName) return [];
-  return list.filter((event) => String(event?.channel_name || "") === String(channelName));
+  return list.filter((event) => eventChannelName(event) === String(channelName));
 }
 
 function setWorkspaceSelectedChannel(channelName) {
@@ -370,7 +397,7 @@ function logLocalActivityEvent(eventType, message, details = {}, status = "info"
   const event = {
     id: `local-${Date.now()}-${Math.floor(Math.random() * 1_000_000)}`,
     event_type: eventType,
-    channel_name: details.channel || "",
+    channel_name: details.channel || details.channel_name || "",
     created_at: new Date().toISOString(),
     details: { ...details, status, local: true, message },
   };
@@ -381,6 +408,24 @@ function logLocalActivityEvent(eventType, message, details = {}, status = "info"
   if ($("tasks")) {
     renderTasks(state.status?.tasks || [], state.status?.activity_events || []);
   }
+}
+
+function channelNameFromApiRequest(path, options = {}) {
+  try {
+    const url = new URL(String(path || ""), window.location.origin);
+    const queryChannel = String(url.searchParams.get("channel") || "").trim();
+    if (queryChannel) return queryChannel;
+  } catch {
+    // Keep logging best-effort; malformed local paths should not hide the original error.
+  }
+  try {
+    const body = typeof options.body === "string" ? JSON.parse(options.body) : null;
+    const bodyChannel = String(body?.channel || "").trim();
+    if (bodyChannel) return bodyChannel;
+  } catch {
+    // Ignore non-JSON bodies.
+  }
+  return "";
 }
 
 async function api(path, options = {}) {
@@ -402,10 +447,11 @@ async function api(path, options = {}) {
       ...fetchOptions,
     });
   } catch (error) {
+    const channelName = channelNameFromApiRequest(path, fetchOptions);
     logLocalActivityEvent(
       "api_request",
       `Network error while calling ${path}`,
-      { path, request_id: requestId, client_action: action, error: String(error?.message || error) },
+      { path, request_id: requestId, client_action: action, channel_name: channelName, error: String(error?.message || error) },
       "error"
     );
     throw error;
@@ -423,6 +469,7 @@ async function api(path, options = {}) {
   }
   if (!response.ok) {
     const message = payload?.error || payload || response.statusText;
+    const channelName = channelNameFromApiRequest(path, fetchOptions);
     logLocalActivityEvent(
       "api_request",
       `API request failed: ${path}`,
@@ -430,6 +477,7 @@ async function api(path, options = {}) {
         path,
         request_id: responseRequestId,
         client_action: action,
+        channel_name: channelName,
         status_code: response.status,
         error_message: String(message || ""),
       },
@@ -442,11 +490,12 @@ async function api(path, options = {}) {
 
 async function refresh() {
   const payload = await api(`/api/status?config=${encodeURIComponent(state.config)}`);
-  state.status = payload;
+  const visiblePayload = applyPendingChannelRemovalToStatus(payload);
+  state.status = visiblePayload;
 
   const previousConfig = state.config;
-  if (!payload.configs.includes(state.config)) {
-    state.config = payload.configs.includes("config.json") ? "config.json" : payload.configs[0] || "config.json";
+  if (!visiblePayload.configs.includes(state.config)) {
+    state.config = visiblePayload.configs.includes("config.json") ? "config.json" : visiblePayload.configs[0] || "config.json";
   }
   if (previousConfig !== state.config) {
     hydrateYoutubeStatusFromCache(true);
@@ -454,18 +503,18 @@ async function refresh() {
     hydrateYoutubeStatusFromCache();
   }
 
-  renderConfigSelect(payload.configs);
-  state.appVersion = payload.app_version || state.appVersion;
+  renderConfigSelect(visiblePayload.configs);
+  state.appVersion = visiblePayload.app_version || state.appVersion;
   renderAppVersion();
-  ensureWorkspaceChannelSelection(payload);
-  renderStatus(payload);
-  renderChannels(payload);
-  renderChannelWorkspace(payload);
-  renderPreview(payload.streams);
-  renderLiveHistory(payload.stream_history || []);
-  renderTasks(payload.tasks, payload.activity_events || []);
-  renderLogs(payload.streams);
-  const runningSettingsTask = payload.tasks.some((task) => ["normalize", "validate", "test-stream"].includes(task.name) && task.running);
+  ensureWorkspaceChannelSelection(visiblePayload);
+  renderStatus(visiblePayload);
+  renderChannels(visiblePayload);
+  renderChannelWorkspace(visiblePayload);
+  renderPreview(visiblePayload.streams);
+  renderLiveHistory(visiblePayload.stream_history || []);
+  renderTasks(visiblePayload.tasks, visiblePayload.activity_events || []);
+  renderLogs(visiblePayload.streams);
+  const runningSettingsTask = visiblePayload.tasks.some((task) => ["normalize", "validate", "test-stream"].includes(task.name) && task.running);
   if (state.activeTab === "settings" && (runningSettingsTask || state.hadRunningSettingsTask)) {
     renderSettingsForms();
   }
@@ -473,6 +522,27 @@ async function refresh() {
   renderUpdateBanner();
   writeDashboardCache(payload);
   markBootReady();
+}
+
+function applyPendingChannelRemovalToStatus(payload) {
+  const removedName = String(state.removedChannelUndo?.channel?.name || "").trim();
+  if (!removedName || !payload || typeof payload !== "object") return payload;
+
+  const channels = Array.isArray(payload.channels)
+    ? payload.channels.filter((channel) => String(channel?.name || "").trim() !== removedName)
+    : [];
+  const streams = { ...(payload.streams || {}) };
+  delete streams[removedName];
+  const tasks = Array.isArray(payload.tasks)
+    ? payload.tasks.filter((task) => String(task?.channel || task?.progress?.channel || "").trim() !== removedName)
+    : [];
+
+  return {
+    ...payload,
+    channels,
+    streams,
+    tasks,
+  };
 }
 
 function markBootReady() {
@@ -1059,6 +1129,16 @@ function switchWorkspaceChannel(channelName) {
   syncYoutubeSelectedAccountFromChannel(state.configData || defaultConfigData());
   state.youtubeBroadcasts = [];
   renderChannelWorkspace(state.status || {});
+  renderLiveHistory(state.status?.stream_history || []);
+  if (state.activeTab === "settings" && state.settingsTab === "troubleshooting") {
+    renderTasks(state.status?.tasks || [], state.status?.activity_events || []);
+    renderLogs(state.status?.streams || {});
+  }
+  if (state.activeTab === "settings" && state.settingsTab === "liveHistory") {
+    state.settingsLiveHistory.sessions = [];
+    renderSettingsLiveHistory();
+    fetchSettingsLiveHistory().catch((error) => toast(error.message));
+  }
   refreshChannelContext(selected).catch((error) => toast(error.message));
 }
 
@@ -1130,6 +1210,7 @@ function looksLikeDirectStreamKey(value) {
 function renderTasks(tasks, events = []) {
   const container = $("tasks");
   if (!container) return;
+  const selectedChannel = selectedWorkspaceChannelName();
 
   const hadExisting = container.childElementCount > 0;
   const panelScroll = {
@@ -1139,10 +1220,12 @@ function renderTasks(tasks, events = []) {
   };
   const scrollState = captureLogScrolls("#tasks pre[data-log-id]");
 
-  const taskList = Array.isArray(tasks) ? tasks : [];
+  const taskList = (Array.isArray(tasks) ? tasks : [])
+    .filter((task) => selectedChannel && taskChannelName(task) === selectedChannel);
   const backendEvents = Array.isArray(events) ? events : [];
   const localEvents = Array.isArray(state.localActivityEvents) ? state.localActivityEvents : [];
-  const eventList = [...localEvents, ...backendEvents];
+  const eventList = [...localEvents, ...backendEvents]
+    .filter((event) => selectedChannel && eventChannelName(event) === selectedChannel);
 
   const runOrder = buildRunOrder(taskList);
   const items = [
@@ -1168,8 +1251,13 @@ function renderTasks(tasks, events = []) {
   renderActivityFilterChips(counts);
 
   const filtered = items.filter((item) => activityItemVisible(item));
+  if (!selectedChannel) {
+    container.innerHTML = `<div class="task">Select a channel to view troubleshooting activity.</div>`;
+    state.activityRenderedItems = [];
+    return;
+  }
   if (!items.length) {
-    container.innerHTML = `<div class="task">No activity yet. Normalize, validate, schedule, or verify to see output here.</div>`;
+    container.innerHTML = `<div class="task">No activity yet for ${escapeHtml(selectedChannel)}. Normalize, validate, schedule, or verify this channel to see output here.</div>`;
     state.activityRenderedItems = [];
     return;
   }
@@ -1179,14 +1267,14 @@ function renderTasks(tasks, events = []) {
       <div class="activity-unified-head">
         <div class="task-title-main">
           <span>Execution Timeline</span>
-          <span class="task-subtitle">${escapeHtml(activityFilterLabel())}</span>
+          <span class="task-subtitle">${escapeHtml(selectedChannel)} | ${escapeHtml(activityFilterLabel())}</span>
         </div>
         <div class="row wrap">
           <span class="badge">${escapeHtml(`${filtered.length} shown`)}</span>
         </div>
       </div>
       <div class="task-meta">
-        <span>${escapeHtml(`${counts.all} total entries`)}</span>
+        <span>${escapeHtml(`${counts.all} ${selectedChannel} entries`)}</span>
         <span>Newest to oldest</span>
       </div>
       <div class="activity-stream">
@@ -1266,7 +1354,7 @@ function renderActivityFilterChips(counts) {
 }
 
 function taskActivityEntryMarkup(task, runOrder) {
-  const channel = task.channel || task.progress?.channel || "Unknown channel";
+  const channel = taskChannelName(task) || "Unknown channel";
   const label = task.running ? "Running" : `Exit ${task.returncode}`;
   const lines = task.lines.length ? task.lines.join("\n") : "Waiting for output...";
   const logId = `task-${task.id}`;
@@ -1312,7 +1400,7 @@ function taskActivityEntryMarkup(task, runOrder) {
 function appEventEntryMarkup(event) {
   const eventType = String(event?.event_type || "event");
   const eventId = String(event?.id || `${eventType}-${event?.created_at || ""}`);
-  const channel = String(event?.channel_name || "").trim() || "Global";
+  const channel = eventChannelName(event) || "Unknown channel";
   const created = formatIsoTimestamp(event?.created_at);
   const details = event?.details && typeof event.details === "object" ? event.details : {};
   if (eventType === "api_request") {
@@ -1395,7 +1483,7 @@ function buildRunOrder(tasks) {
   const counters = {};
   chronological.forEach((task, index) => {
     global[task.id] = index + 1;
-    const channel = task.channel || task.progress?.channel || "Unknown channel";
+    const channel = taskChannelName(task) || "Unknown channel";
     const key = `${task.name}|${channel}`;
     counters[key] = (counters[key] || 0) + 1;
     channelAction[task.id] = counters[key];
@@ -1527,12 +1615,20 @@ function renderLiveHistory(sessions) {
   const total = $("liveHistoryTotal");
   if (!list || !count || !total) return;
 
-  const items = Array.isArray(sessions) ? sessions : [];
+  const selectedChannel = selectedWorkspaceChannelName();
+  const items = (Array.isArray(sessions) ? sessions : [])
+    .filter((session) => !selectedChannel || String(session?.channel_name || "") === selectedChannel);
   count.textContent = `${items.length} session${items.length === 1 ? "" : "s"}`;
+
+  if (!selectedChannel) {
+    total.textContent = "Total 0s";
+    list.innerHTML = `<div class="live-history-empty">Select a channel to view live history.</div>`;
+    return;
+  }
 
   if (!items.length) {
     total.textContent = "Total 0s";
-    list.innerHTML = `<div class="live-history-empty">No live sessions recorded yet.</div>`;
+    list.innerHTML = `<div class="live-history-empty">No live sessions recorded for ${escapeHtml(selectedChannel)} yet.</div>`;
     return;
   }
 
@@ -1581,19 +1677,411 @@ function renderLiveHistory(sessions) {
   `;
 }
 
+function localDateKey(date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function dateFromLocalKey(key) {
+  const match = String(key || "").match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return null;
+  const date = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function addLocalDays(date, days) {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate() + days);
+}
+
+function startOfLocalDay(date) {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate(), 0, 0, 0, 0);
+}
+
+function endOfLocalDay(date) {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate(), 23, 59, 59, 999);
+}
+
+function shortDateInputLabel(key) {
+  const date = dateFromLocalKey(key);
+  if (!date) return "";
+  return `${date.getMonth() + 1}/${date.getDate()}/${String(date.getFullYear()).slice(-2)}`;
+}
+
+function longDateLabel(key) {
+  const date = dateFromLocalKey(key);
+  if (!date) return "";
+  return date.toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+}
+
+function monthLabel(date) {
+  return date.toLocaleDateString("en-US", { month: "long" });
+}
+
+function selectedHistoryRange() {
+  const filter = String(state.settingsLiveHistory.filter || "last_28");
+  const today = startOfLocalDay(new Date());
+  const lastCompleteDay = addLocalDays(today, -1);
+  if (filter.startsWith("last_")) {
+    const days = Number(filter.replace("last_", ""));
+    if (Number.isFinite(days) && days > 0) {
+      return {
+        start: startOfLocalDay(addLocalDays(lastCompleteDay, -(days - 1))),
+        end: endOfLocalDay(lastCompleteDay),
+      };
+    }
+  }
+  if (filter === "lifetime") {
+    return { start: null, end: null };
+  }
+  if (filter.startsWith("year_")) {
+    const year = Number(filter.replace("year_", ""));
+    if (Number.isFinite(year)) {
+      return {
+        start: new Date(year, 0, 1, 0, 0, 0, 0),
+        end: new Date(year, 11, 31, 23, 59, 59, 999),
+      };
+    }
+  }
+  if (filter.startsWith("month_")) {
+    const monthStart = dateFromLocalKey(filter.replace("month_", ""));
+    if (monthStart) {
+      return {
+        start: startOfLocalDay(monthStart),
+        end: new Date(monthStart.getFullYear(), monthStart.getMonth() + 1, 0, 23, 59, 59, 999),
+      };
+    }
+  }
+  if (filter === "custom") {
+    const start = dateFromLocalKey(state.settingsLiveHistory.customStart);
+    const end = dateFromLocalKey(state.settingsLiveHistory.customEnd);
+    if (start && end) {
+      return {
+        start: startOfLocalDay(start <= end ? start : end),
+        end: endOfLocalDay(start <= end ? end : start),
+      };
+    }
+  }
+  return {
+    start: startOfLocalDay(addLocalDays(lastCompleteDay, -27)),
+    end: endOfLocalDay(lastCompleteDay),
+  };
+}
+
+function historyDateMenuGroups() {
+  const today = new Date();
+  const currentYear = today.getFullYear();
+  const recentMonths = Array.from({ length: 3 }, (_item, index) => {
+    const date = new Date(currentYear, today.getMonth() - 1 - index, 1);
+    return {
+      key: `month_${localDateKey(date)}`,
+      label: monthLabel(date),
+    };
+  });
+  return [
+    [
+      { key: "last_7", label: "Last 7 days" },
+      { key: "last_28", label: "Last 28 days" },
+      { key: "last_90", label: "Last 90 days" },
+      { key: "last_365", label: "Last 365 days" },
+      { key: "lifetime", label: "Lifetime" },
+    ],
+    [
+      { key: `year_${currentYear}`, label: String(currentYear) },
+      { key: `year_${currentYear - 1}`, label: String(currentYear - 1) },
+    ],
+    recentMonths,
+    [{ key: "custom", label: "Custom" }],
+  ];
+}
+
+function historyFilterLabel(key = state.settingsLiveHistory.filter) {
+  const groups = historyDateMenuGroups();
+  const found = groups.flat().find((item) => item.key === key);
+  if (found && key !== "custom") return found.label;
+  if (key === "custom" && state.settingsLiveHistory.customStart && state.settingsLiveHistory.customEnd) {
+    return `${shortDateInputLabel(state.settingsLiveHistory.customStart)} - ${longDateLabel(state.settingsLiveHistory.customEnd)}`;
+  }
+  return "Custom";
+}
+
+async function fetchSettingsLiveHistory() {
+  const channel = selectedWorkspaceChannelName();
+  if (!channel) {
+    state.settingsLiveHistory.sessions = [];
+    renderSettingsLiveHistory();
+    return;
+  }
+  const payload = await api(`/api/stream-history?config=${encodeURIComponent(state.config)}&channel=${encodeURIComponent(channel)}`);
+  state.settingsLiveHistory.sessions = Array.isArray(payload?.sessions) ? payload.sessions : [];
+  renderSettingsLiveHistory();
+}
+
+function setHistoryFilter(filter) {
+  if (filter === "custom") {
+    const range = selectedHistoryRange();
+    state.settingsLiveHistory.pendingStart = state.settingsLiveHistory.customStart
+      || localDateKey(range.start || addLocalDays(new Date(), -27));
+    state.settingsLiveHistory.pendingEnd = state.settingsLiveHistory.customEnd
+      || localDateKey(range.end || new Date());
+    state.settingsLiveHistory.selectingCustomEnd = false;
+    state.settingsLiveHistory.menuOpen = false;
+    state.settingsLiveHistory.calendarOpen = true;
+    renderSettingsLiveHistory();
+    return;
+  }
+  state.settingsLiveHistory.filter = filter;
+  state.settingsLiveHistory.menuOpen = false;
+  state.settingsLiveHistory.calendarOpen = false;
+  renderSettingsLiveHistory();
+}
+
+function toggleHistoryDateMenu() {
+  const nextOpen = !state.settingsLiveHistory.menuOpen;
+  state.settingsLiveHistory.menuOpen = nextOpen;
+  if (nextOpen) {
+    state.settingsLiveHistory.calendarOpen = false;
+  }
+  renderSettingsLiveHistory();
+}
+
+function selectHistoryCalendarDay(key) {
+  const selected = dateFromLocalKey(key);
+  if (!selected) return;
+  const history = state.settingsLiveHistory;
+  if (!history.pendingStart || !history.selectingCustomEnd) {
+    history.pendingStart = key;
+    history.pendingEnd = key;
+    history.selectingCustomEnd = true;
+  } else {
+    history.pendingEnd = key;
+    history.selectingCustomEnd = false;
+  }
+  renderSettingsLiveHistory();
+}
+
+function applyHistoryCustomRange() {
+  const start = dateFromLocalKey(state.settingsLiveHistory.pendingStart);
+  const end = dateFromLocalKey(state.settingsLiveHistory.pendingEnd);
+  if (!start || !end) return;
+  state.settingsLiveHistory.customStart = localDateKey(start <= end ? start : end);
+  state.settingsLiveHistory.customEnd = localDateKey(start <= end ? end : start);
+  state.settingsLiveHistory.filter = "custom";
+  state.settingsLiveHistory.calendarOpen = false;
+  state.settingsLiveHistory.selectingCustomEnd = false;
+  renderSettingsLiveHistory();
+}
+
+function closeHistoryCustomRange() {
+  state.settingsLiveHistory.calendarOpen = false;
+  state.settingsLiveHistory.selectingCustomEnd = false;
+  renderSettingsLiveHistory();
+}
+
+function renderHistoryDateMenu() {
+  const menu = $("settingsLiveHistoryDateMenu");
+  if (!menu) return;
+  const activeFilter = state.settingsLiveHistory.filter;
+  menu.classList.toggle("hidden", !state.settingsLiveHistory.menuOpen);
+  menu.innerHTML = historyDateMenuGroups().map((group) => `
+    <div class="history-date-menu-section">
+      ${group.map((item) => `
+        <button
+          class="history-menu-item ${item.key === activeFilter ? "active" : ""}"
+          type="button"
+          role="menuitem"
+          onclick="event.stopPropagation(); setHistoryFilter('${escapeJs(item.key)}')"
+        >${escapeHtml(item.label)}</button>
+      `).join("")}
+    </div>
+  `).join("");
+}
+
+function renderHistoryCalendar() {
+  const calendar = $("settingsLiveHistoryCalendar");
+  if (!calendar) return;
+  const history = state.settingsLiveHistory;
+  calendar.classList.toggle("hidden", !history.calendarOpen);
+  if (!history.calendarOpen) {
+    calendar.innerHTML = "";
+    return;
+  }
+
+  const startDate = dateFromLocalKey(history.pendingStart) || addLocalDays(new Date(), -27);
+  const endDate = dateFromLocalKey(history.pendingEnd) || new Date();
+  const orderedStart = startDate <= endDate ? startDate : endDate;
+  const orderedEnd = startDate <= endDate ? endDate : startDate;
+  const viewDate = new Date(orderedEnd.getFullYear(), orderedEnd.getMonth(), 1);
+  const firstWeekday = viewDate.getDay();
+  const daysInMonth = new Date(viewDate.getFullYear(), viewDate.getMonth() + 1, 0).getDate();
+  const cells = [];
+  for (let i = 0; i < firstWeekday; i += 1) {
+    cells.push(`<button class="history-calendar-day" type="button" disabled></button>`);
+  }
+  for (let day = 1; day <= daysInMonth; day += 1) {
+    const cellDate = new Date(viewDate.getFullYear(), viewDate.getMonth(), day);
+    const key = localDateKey(cellDate);
+    const inRange = cellDate >= startOfLocalDay(orderedStart) && cellDate <= startOfLocalDay(orderedEnd);
+    const isStart = key === localDateKey(orderedStart);
+    const isEnd = key === localDateKey(orderedEnd);
+    cells.push(`
+      <button
+        class="history-calendar-day ${inRange ? "in-range" : ""} ${isStart ? "range-start" : ""} ${isEnd ? "range-end" : ""}"
+        type="button"
+        onclick="event.stopPropagation(); selectHistoryCalendarDay('${escapeJs(key)}')"
+      >${day}</button>
+    `);
+  }
+
+  const selectedDays = Math.max(1, Math.round((endOfLocalDay(orderedEnd).getTime() - startOfLocalDay(orderedStart).getTime()) / 86400000) + 1);
+  calendar.innerHTML = `
+    <div class="history-calendar-fields">
+      <input class="history-date-input" value="${escapeAttr(shortDateInputLabel(localDateKey(orderedStart)))}" readonly>
+      <span class="history-date-separator">-</span>
+      <input class="history-date-input" value="${escapeAttr(longDateLabel(localDateKey(orderedEnd)))}" readonly>
+    </div>
+    <div class="history-range-count">${selectedDays} day${selectedDays === 1 ? "" : "s"} selected</div>
+    <div class="history-calendar-weekdays">
+      <span>S</span><span>M</span><span>T</span><span>W</span><span>T</span><span>F</span><span>S</span>
+    </div>
+    <div class="history-calendar-month">
+      <span>${escapeHtml(viewDate.toLocaleDateString("en-US", { month: "short", year: "numeric" }))}</span>
+    </div>
+    <div class="history-calendar-grid">${cells.join("")}</div>
+    <div class="history-calendar-actions">
+      <button class="pill ghost small" type="button" onclick="event.stopPropagation(); closeHistoryCustomRange()">Cancel</button>
+      <button class="pill primary small" type="button" onclick="event.stopPropagation(); applyHistoryCustomRange()">Apply</button>
+    </div>
+  `;
+}
+
+function settingsHistoryStatus(session) {
+  if (session?.is_active || String(session?.status || "").toLowerCase() === "running") {
+    return { label: "Live", className: "live" };
+  }
+  const code = Number(session?.returncode);
+  if (Number.isFinite(code) && code !== 0) {
+    return { label: "Failed", className: "warn" };
+  }
+  return { label: "Completed", className: "live" };
+}
+
+function renderSettingsLiveHistory() {
+  const table = $("settingsLiveHistoryTable");
+  const summary = $("settingsLiveHistorySummary");
+  const button = $("settingsLiveHistoryRangeButton");
+  if (!table || !summary || !button) return;
+
+  const selectedChannel = selectedWorkspaceChannelName();
+  button.textContent = historyFilterLabel();
+  button.setAttribute("aria-expanded", state.settingsLiveHistory.menuOpen ? "true" : "false");
+  renderHistoryDateMenu();
+  renderHistoryCalendar();
+
+  if (!selectedChannel) {
+    summary.innerHTML = `
+      <span class="badge">0 sessions</span>
+      <span class="badge live">Total 0s</span>
+      <span class="badge">0 completed</span>
+      <span class="badge warn">0 failed</span>
+    `;
+    table.innerHTML = `<div class="live-history-empty">Select a channel to view live history.</div>`;
+    return;
+  }
+
+  const search = String($("settingsLiveHistorySearch")?.value || "").trim().toLowerCase();
+  const range = selectedHistoryRange();
+  const sessions = (Array.isArray(state.settingsLiveHistory.sessions) ? state.settingsLiveHistory.sessions : [])
+    .filter((session) => {
+      const started = parseIsoDate(session?.started_at);
+      if (!started) return false;
+      if (range.start && started < range.start) return false;
+      if (range.end && started > range.end) return false;
+      if (!search) return true;
+      const haystack = `${session?.live_title || ""} ${session?.channel_name || ""} ${session?.status || ""}`.toLowerCase();
+      return haystack.includes(search);
+    });
+
+  const nowMs = Date.now();
+  const totalSeconds = sessions.reduce((sum, item) => sum + sessionDurationSeconds(item, nowMs), 0);
+  const completed = sessions.filter((session) => settingsHistoryStatus(session).label === "Completed").length;
+  const failed = sessions.filter((session) => settingsHistoryStatus(session).label === "Failed").length;
+  summary.innerHTML = `
+    <span class="badge">${sessions.length} session${sessions.length === 1 ? "" : "s"}</span>
+    <span class="badge live">Total ${escapeHtml(durationText(totalSeconds))}</span>
+    <span class="badge">${completed} completed</span>
+    <span class="badge warn">${failed} failed</span>
+  `;
+
+  if (!sessions.length) {
+    table.innerHTML = `<div class="live-history-empty">No live sessions found for ${escapeHtml(selectedChannel)} with this filter.</div>`;
+    return;
+  }
+
+  const rows = sessions.map((session) => {
+    const started = formatSessionDateParts(session?.started_at);
+    const status = settingsHistoryStatus(session);
+    const isLive = status.label === "Live";
+    const durationSeconds = sessionDurationSeconds(session, nowMs);
+    const title = String(session?.live_title || session?.channel_name || "Untitled live");
+    const channelName = String(session?.channel_name || "Unknown channel");
+    return `
+      <div class="settings-history-row ${isLive ? "current" : ""}">
+        <div class="settings-history-date">
+          <strong>${escapeHtml(started.date)}</strong>
+          ${started.time ? `<span>${escapeHtml(started.time)}</span>` : ""}
+        </div>
+        <div class="settings-history-primary">
+          <strong>${escapeHtml(channelName)}</strong>
+          <span>${escapeHtml(session?.config_name || state.config || "")}</span>
+        </div>
+        <div class="settings-history-primary">
+          <strong>${escapeHtml(title)}</strong>
+          <span>${escapeHtml(isLive ? "Streaming now" : "Stored session")}</span>
+        </div>
+        <div>${durationChip(durationSeconds, isLive)}</div>
+        <span class="badge ${escapeAttr(status.className)} settings-history-status">${escapeHtml(status.label)}</span>
+      </div>
+    `;
+  }).join("");
+
+  table.innerHTML = `
+    <div class="settings-history-head">
+      <span>Started</span>
+      <span>Channel</span>
+      <span>Live title</span>
+      <span>Duration</span>
+      <span>Status</span>
+    </div>
+    ${rows}
+  `;
+}
+
 function toggleTaskLog(taskId) {
   state.expandedTaskLogs[taskId] = !state.expandedTaskLogs[taskId];
   renderTasks(state.status?.tasks || [], state.status?.activity_events || []);
 }
 
 function renderLogs(streams) {
-  const entries = Object.values(streams);
   const pre = $("streamLogs");
+  if (!pre) return;
+  const selectedChannel = selectedWorkspaceChannelName();
+  const entries = Object.values(streams || {})
+    .filter((stream) => selectedChannel && String(stream?.name || "") === selectedChannel);
   const wasAtBottom = isNearBottom(pre);
   const scrollTop = pre.scrollTop;
   const scrollLeft = pre.scrollLeft;
+  if (!selectedChannel) {
+    pre.textContent = "Select a channel to view stream logs.";
+    return;
+  }
   if (!entries.length) {
-    pre.textContent = "No stream logs yet.";
+    pre.textContent = `No stream logs for ${selectedChannel} yet.`;
     return;
   }
   pre.textContent = entries.map((stream) => {
@@ -1746,11 +2234,22 @@ function initActivityStreamSplitter() {
   const minRight = 280;
   let dragging = false;
   let activePointerId = null;
+  let dragFrame = null;
+
+  const gridColumnGap = () => {
+    const styles = window.getComputedStyle(grid);
+    const gap = Number.parseFloat(styles.columnGap || styles.gap || "0");
+    return Number.isFinite(gap) ? gap : 0;
+  };
+
+  const availableTrackWidth = (gridWidth = grid.getBoundingClientRect().width) => (
+    Math.max(0, gridWidth - splitterWidth - (gridColumnGap() * 2))
+  );
 
   const applyByRatio = (ratio) => {
     const normalized = Number(ratio);
     if (!Number.isFinite(normalized) || normalized <= 0 || normalized >= 1) return;
-    const total = Math.max(0, grid.clientWidth - splitterWidth);
+    const total = availableTrackWidth();
     if (total < (minLeft + minRight)) return;
     const nextLeft = Math.round(total * normalized);
     const clampedLeft = Math.min(Math.max(nextLeft, minLeft), total - minRight);
@@ -1771,10 +2270,13 @@ function initActivityStreamSplitter() {
   };
 
   const applyByPointerX = (clientX) => {
-    const rect = grid.getBoundingClientRect();
-    const total = Math.max(0, rect.width - splitterWidth);
+    const frame = dragFrame || {
+      left: grid.getBoundingClientRect().left,
+      total: availableTrackWidth(),
+    };
+    const total = frame.total;
     if (total < (minLeft + minRight)) return;
-    const rawLeft = clientX - rect.left - (splitterWidth / 2);
+    const rawLeft = clientX - frame.left - (splitterWidth / 2);
     const left = Math.min(Math.max(rawLeft, minLeft), total - minRight);
     const right = total - left;
     grid.style.gridTemplateColumns = `${Math.round(left)}px ${splitterWidth}px ${Math.round(right)}px`;
@@ -1782,8 +2284,12 @@ function initActivityStreamSplitter() {
 
   splitter.addEventListener("pointerdown", (event) => {
     if (event.button !== 0) return;
+    const rect = grid.getBoundingClientRect();
+    const total = availableTrackWidth(rect.width);
+    if (total < (minLeft + minRight)) return;
     dragging = true;
     activePointerId = event.pointerId;
+    dragFrame = { left: rect.left, total };
     splitter.classList.add("dragging");
     splitter.setPointerCapture(event.pointerId);
     event.preventDefault();
@@ -1807,6 +2313,7 @@ function initActivityStreamSplitter() {
       }
     }
     activePointerId = null;
+    dragFrame = null;
     saveCurrentRatio();
   };
 
@@ -1817,6 +2324,7 @@ function initActivityStreamSplitter() {
     dragging = false;
     splitter.classList.remove("dragging");
     activePointerId = null;
+    dragFrame = null;
     saveCurrentRatio();
   });
 
@@ -1824,7 +2332,7 @@ function initActivityStreamSplitter() {
     const leftRect = $("activityPanel")?.getBoundingClientRect();
     const rightRect = $("streamLogsPanel")?.getBoundingClientRect();
     if (!leftRect || !rightRect) return;
-    const total = Math.max(0, grid.clientWidth - splitterWidth);
+    const total = availableTrackWidth();
     if (total < (minLeft + minRight)) return;
     const step = event.shiftKey ? 48 : 24;
     let nextLeft = leftRect.width;
@@ -1864,12 +2372,14 @@ function initActivityStreamSplitter() {
 
 async function copyActivityLogs() {
   const items = Array.isArray(state.activityRenderedItems) ? state.activityRenderedItems : [];
+  const selectedChannel = selectedWorkspaceChannelName();
   if (!items.length) {
     toast("No activity logs to copy.");
     return;
   }
   const lines = [];
   lines.push(`Activity export (${new Date().toLocaleString()})`);
+  lines.push(`Channel: ${selectedChannel || "none"}`);
   lines.push(`Filter: ${activityFilterLabel()}`);
   lines.push("");
   items.forEach((item, index) => {
@@ -1884,17 +2394,25 @@ async function copyActivityLogs() {
 }
 
 async function clearActivityLogs() {
-  const statusTaskCount = Array.isArray(state.status?.tasks) ? state.status.tasks.length : 0;
-  const statusEventCount = Array.isArray(state.status?.activity_events) ? state.status.activity_events.length : 0;
-  const localEventCount = Array.isArray(state.localActivityEvents) ? state.localActivityEvents.length : 0;
+  const selectedChannel = selectedWorkspaceChannelName();
+  if (!selectedChannel) {
+    toast("Select a channel to clear activity logs.");
+    return;
+  }
+  const statusTaskCount = (Array.isArray(state.status?.tasks) ? state.status.tasks : [])
+    .filter((task) => taskChannelName(task) === selectedChannel).length;
+  const statusEventCount = (Array.isArray(state.status?.activity_events) ? state.status.activity_events : [])
+    .filter((event) => eventChannelName(event) === selectedChannel).length;
+  const localEventCount = (Array.isArray(state.localActivityEvents) ? state.localActivityEvents : [])
+    .filter((event) => eventChannelName(event) === selectedChannel).length;
   const total = statusTaskCount + statusEventCount + localEventCount;
   if (!total) {
-    toast("No activity logs to clear.");
+    toast(`No activity logs to clear for ${selectedChannel}.`);
     return;
   }
 
   const confirmed = window.confirm(
-    "Clear activity logs now?\nRunning tasks will stay visible."
+    `Clear activity logs for ${selectedChannel} now?\nRunning tasks will stay visible.`
   );
   if (!confirmed) return;
 
@@ -1902,18 +2420,20 @@ async function clearActivityLogs() {
     method: "POST",
     body: JSON.stringify({
       config: state.config,
+      channel: selectedChannel,
       preserve_running_tasks: true,
     }),
     action: "activity.clear",
   });
-  state.localActivityEvents = [];
+  state.localActivityEvents = state.localActivityEvents
+    .filter((event) => eventChannelName(event) !== selectedChannel);
   state.expandedTaskLogs = {};
   await refresh();
-  toast("Activity logs cleared.");
+  toast(`Activity logs cleared for ${selectedChannel}.`);
 }
 
 function formatTaskForExport(task, n) {
-  const channel = task.channel || task.progress?.channel || "Unknown channel";
+  const channel = taskChannelName(task) || "Unknown channel";
   const status = task.running ? "running" : Number(task.returncode) === 0 ? "success" : `failed (${task.returncode})`;
   const started = formatTimestamp(task.started_at);
   const header = `[${n}] TASK ${taskTitle(task.name)} | channel=${channel} | status=${status} | ${started}`;
@@ -1924,7 +2444,7 @@ function formatTaskForExport(task, n) {
 
 function formatEventForExport(event, n) {
   const eventType = String(event?.event_type || "event");
-  const channel = String(event?.channel_name || "").trim() || "Global";
+  const channel = eventChannelName(event) || "Unknown channel";
   const created = formatIsoTimestamp(event?.created_at);
   const details = event?.details && typeof event.details === "object" ? event.details : {};
   const compactDetails = JSON.stringify(details, null, 2);
@@ -2064,6 +2584,38 @@ async function loadRawFilesForChannel(channel) {
   return state.rawFilesByChannel[channel.name];
 }
 
+function rawFilesSignature(files) {
+  return (Array.isArray(files) ? files : [])
+    .map((file) => `${String(file?.path || "")}|${String(file?.name || "")}`)
+    .sort()
+    .join("\n");
+}
+
+async function refreshActiveRawFiles({ force = false } = {}) {
+  if (state.activeTab !== "settings" || state.settingsTab !== "normalize") return;
+  const now = Date.now();
+  if (!force && now - Number(state.rawFilesAutoRefreshLastAt || 0) < 1500) return;
+  if (state.rawFilesAutoRefreshBusy) return;
+
+  const config = state.configData || defaultConfigData();
+  const index = selectedSettingsChannelIndex(config);
+  const channel = config.channels?.[index];
+  if (!channel?.name) return;
+
+  state.rawFilesAutoRefreshBusy = true;
+  state.rawFilesAutoRefreshLastAt = now;
+  try {
+    const previous = state.rawFilesByChannel[channel.name] || [];
+    const next = await loadRawFilesForChannel(channel);
+    if (force || rawFilesSignature(previous) !== rawFilesSignature(next)) {
+      state.configData = collectSettingsData();
+      renderSettingsForms();
+    }
+  } finally {
+    state.rawFilesAutoRefreshBusy = false;
+  }
+}
+
 async function loadNormalizedFilesForChannel(channel) {
   if (!channel?.name) return [];
   const payload = await api(`/api/normalized-files?config=${encodeURIComponent(state.config)}&channel=${encodeURIComponent(channel.name)}`, {
@@ -2088,6 +2640,10 @@ function renderSettingsForms() {
   config.channels.forEach((channel) => {
     channel.youtube_account_id = normalizeAccountId(channel.youtube_account_id || "");
   });
+  if ($("removeChannelNormalize")) {
+    $("removeChannelNormalize").disabled = !config.channels.length;
+  }
+  renderRemovedChannelUndo();
   $("folderSettingsFields").innerHTML = folderSettingsMarkup(config.defaults);
 
   const activeNormalizeIndex = selectedSettingsChannelIndex(config);
@@ -2096,6 +2652,23 @@ function renderSettingsForms() {
     : `<div class="card">No channels yet. Click <strong>Add Channel</strong> to create one.</div>`;
 
   renderYoutubeSettingsPanel(config);
+}
+
+function renderRemovedChannelUndo() {
+  const notice = $("removedChannelUndo");
+  if (!notice) return;
+
+  const undo = state.removedChannelUndo;
+  if (!undo?.channel?.name) {
+    notice.classList.add("hidden");
+    return;
+  }
+
+  const text = $("removedChannelUndoText");
+  if (text) {
+    text.textContent = `Removed ${undo.channel.name}.`;
+  }
+  notice.classList.remove("hidden");
 }
 
 function selectedSettingsChannelIndex(config) {
@@ -3046,32 +3619,29 @@ function normalizationCard(channel, index) {
           <span>${escapeHtml(file.path)}</span>
         </label>
       `).join("")
-    : `<div class="meta">No videos found yet in Raw Videos/${escapeHtml(channel.name || "")}. Add files there, then click Refresh Raw Videos.</div>`;
+    : `<div class="meta">No videos found yet in Raw Videos/${escapeHtml(channel.name || "")}. Add videos here or copy files into that folder; the list updates automatically when you return to this view.</div>`;
 
   return `
-    <div class="channel-settings selected-normalize-settings" data-index="${index}">
+    <div class="channel-settings selected-normalize-settings" data-index="${index}" data-channel-name="${escapeAttr(channel.name || "")}">
       <div class="section-head compact">
         <div>
           <h3>${escapeHtml(channel.name || `channel_${index + 1}`)}</h3>
-          <p class="helper">Normalizing only the selected channel from the Channels rail.</p>
+          <p class="helper">Encoding only the selected channel from the Channels rail.</p>
         </div>
         <span class="badge">${selected.length} selected</span>
       </div>
       <div class="row wrap">
         <input class="hidden-file" id="upload-${index}" type="file" multiple accept="video/*" onchange="uploadRawVideos(${index}, this.files).catch((error) => toast(error.message))">
         <button class="pill primary" type="button" onclick="document.getElementById('upload-${index}').click()">Add Videos</button>
-        <button class="pill success" type="button" onclick="startSettingsTask('normalize', ${index})">Normalize</button>
-        <button class="pill" type="button" onclick="startSettingsTask('validate', ${index})">Validate</button>
-        <button class="pill ghost" type="button" onclick="loadRawFiles().catch((error) => toast(error.message))">Refresh</button>
-        <button class="pill danger small" type="button" onclick="removeChannel(${index})">Remove Channel</button>
+        <button class="pill success" type="button" onclick="startSettingsTask('normalize', ${index})">Encode</button>
       </div>
       ${task ? taskProgressMarkup(task) : ""}
       <div class="file-picker">
         <div class="file-list">${fileOptions}</div>
-        <div class="meta">If a normalized file name already exists, a new version like <code>-v2</code> is created and a heads-up appears in Activity.</div>
+        <div class="meta">If an encoded file name already exists, a new version like <code>-v2</code> is created and a heads-up appears in Activity.</div>
       </div>
       <div>
-        <h3>Normalization Profile</h3>
+        <h3>Encoder Profile</h3>
         <div class="form-grid">
           ${normalizeInput(index, "width", "Width", normalizeProfile.width ?? 1920, "number")}
           ${normalizeInput(index, "height", "Height", normalizeProfile.height ?? 1080, "number")}
@@ -3119,7 +3689,7 @@ function taskForChannel(channelName) {
 function taskProgressMarkup(task) {
   const progress = task.progress || {};
   const percent = Math.max(0, Math.min(100, Number(progress.percent) || 0));
-  const action = task.name === "normalize" ? "Normalizing" : task.name === "validate" ? "Validating" : "Testing stream";
+  const action = task.name === "normalize" ? "Encoding" : task.name === "validate" ? "Validating" : "Testing stream";
   const status = task.running ? action : task.returncode === 0 ? "Finished" : "Failed";
   const total = Number(progress.total) || 0;
   const current = Number(progress.current) || 0;
@@ -3270,7 +3840,7 @@ function liveChannelCard(channel, index, _accounts = [], defaultPrivacy = "unlis
     ? files.map((file) => liveVideoOption(file, index, channel.name || "", selectedSet)).join("")
     : `<div class="meta">No normalized videos found yet in Go Live/${escapeHtml(channel.name || "")}. Normalize videos first, then click Refresh.</div>`;
   return `
-    <div class="channel-settings selected-live-settings" data-index="${index}">
+    <div class="channel-settings selected-live-settings" data-index="${index}" data-channel-name="${escapeAttr(channel.name || "")}">
       <div class="nested-card">
         <div class="section-head compact">
           <div>
@@ -3565,6 +4135,9 @@ function collectSettingsData() {
     const index = Number(card.dataset.index);
     if (!Number.isInteger(index) || index < 0) return;
     const existingChannel = nextChannels[index] || {};
+    const cardChannelName = String(card.dataset.channelName || "").trim();
+    const existingChannelName = String(existingChannel?.name || "").trim();
+    if (!existingChannelName || (cardChannelName && cardChannelName !== existingChannelName)) return;
     const channel = { ...existingChannel };
     card.querySelectorAll("[data-channel-field]").forEach((input) => {
       const field = input.dataset.channelField;
@@ -3631,6 +4204,10 @@ function collectSettingsData() {
     const index = Number(input.dataset.youtubeChannelIndex);
     const field = input.dataset.youtubeChannelField;
     if (!Number.isInteger(index) || !field || !config.channels?.[index]) return;
+    const card = input.closest(".channel-settings");
+    const cardChannelName = String(card?.dataset.channelName || "").trim();
+    const existingChannelName = String(config.channels[index]?.name || "").trim();
+    if (cardChannelName && cardChannelName !== existingChannelName) return;
     if (input.type === "checkbox") {
       config.channels[index][field] = input.checked;
     } else {
@@ -3720,6 +4297,16 @@ async function saveConfigData(data) {
   await loadNormalizedFiles();
 }
 
+function clonePlain(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
+function syncConfigEditor() {
+  if ($("configEditor")) {
+    $("configEditor").value = JSON.stringify(state.configData || defaultConfigData(), null, 2) + "\n";
+  }
+}
+
 function addChannel() {
   const config = state.configData || defaultConfigData();
   config.channels = Array.isArray(config.channels) ? config.channels : [];
@@ -3727,21 +4314,155 @@ function addChannel() {
   state.activeSettingsChannelIndex = config.channels.length - 1;
   setWorkspaceSelectedChannel(config.channels[state.activeSettingsChannelIndex]?.name || "");
   state.configData = config;
-  $("configEditor").value = JSON.stringify(config, null, 2) + "\n";
+  state.removedChannelUndo = null;
+  syncConfigEditor();
+  showTab("settings");
+  showSettingsTab("normalize");
   renderSettingsForms();
 }
 
-function removeChannel(index) {
+function openChannelDeleteDialog(index) {
   const config = state.configData || defaultConfigData();
+  const channel = config.channels?.[index];
+  const channelName = String(channel?.name || "").trim();
+  if (!channelName) {
+    toast("Select a named channel before removing it.");
+    return;
+  }
+
+  state.channelDeleteDialog = { index, name: channelName };
+  const nameNode = $("deleteChannelName");
+  const input = $("deleteChannelNameInput");
+  const confirmButton = $("confirmDeleteChannel");
+  if (nameNode) nameNode.textContent = channelName;
+  if (input) input.value = "";
+  if (confirmButton) confirmButton.disabled = true;
+  $("deleteChannelDialog")?.classList.remove("hidden");
+  window.setTimeout(() => input?.focus(), 0);
+}
+
+function closeChannelDeleteDialog() {
+  state.channelDeleteDialog = { index: -1, name: "" };
+  $("deleteChannelDialog")?.classList.add("hidden");
+}
+
+function syncChannelDeleteConsent() {
+  const input = $("deleteChannelNameInput");
+  const confirmButton = $("confirmDeleteChannel");
+  if (!input || !confirmButton) return;
+  confirmButton.disabled = input.value.trim() !== state.channelDeleteDialog.name;
+}
+
+async function removeChannel(index, { confirmed = false } = {}) {
+  if (!confirmed) {
+    openChannelDeleteDialog(index);
+    return;
+  }
+
+  const config = collectSettingsData();
   const removed = config.channels?.[index];
+  if (!removed) return;
+  const previousConfig = clonePlain(config);
+  const previousSelectedChannelName = state.workspace.selectedChannelName;
   config.channels = (config.channels || []).filter((_channel, currentIndex) => currentIndex !== index);
   state.activeSettingsChannelIndex = Math.max(0, Math.min(index, config.channels.length - 1));
   if (removed && removed.name === state.workspace.selectedChannelName) {
     setWorkspaceSelectedChannel(config.channels[state.activeSettingsChannelIndex]?.name || "");
   }
   state.configData = config;
-  $("configEditor").value = JSON.stringify(config, null, 2) + "\n";
+  state.removedChannelUndo = {
+    channel: clonePlain(removed),
+    index,
+    previousSelectedChannelName,
+  };
+  syncConfigEditor();
   renderSettingsForms();
+  if (state.status) {
+    state.status = applyPendingChannelRemovalToStatus(state.status);
+    ensureWorkspaceChannelSelection(state.status);
+    renderStatus(state.status);
+    renderChannels(state.status);
+    renderChannelWorkspace(state.status);
+  }
+  toast(`Removing ${removed.name}...`);
+  try {
+    await saveConfigData(config);
+    toast(`Removed ${removed.name}. Use Undo in Video Encoder to restore it.`);
+  } catch (error) {
+    state.configData = previousConfig;
+    state.removedChannelUndo = null;
+    setWorkspaceSelectedChannel(previousSelectedChannelName);
+    syncConfigEditor();
+    renderSettingsForms();
+    throw error;
+  }
+}
+
+async function confirmChannelDelete() {
+  const { index, name } = state.channelDeleteDialog;
+  const input = $("deleteChannelNameInput");
+  if (input?.value.trim() !== name) return;
+  const confirmButton = $("confirmDeleteChannel");
+  if (confirmButton) {
+    confirmButton.disabled = true;
+    confirmButton.textContent = "Removing...";
+  }
+  closeChannelDeleteDialog();
+  try {
+    await removeChannel(index, { confirmed: true });
+  } finally {
+    if (confirmButton) {
+      confirmButton.textContent = "Remove Channel";
+    }
+  }
+}
+
+async function undoRemoveChannel() {
+  const undo = state.removedChannelUndo;
+  if (!undo?.channel) {
+    toast("No removed channel to undo.");
+    return;
+  }
+
+  const config = collectSettingsData();
+  config.channels = Array.isArray(config.channels) ? config.channels : [];
+  const restoredName = String(undo.channel.name || "").trim();
+  if (restoredName && config.channels.some((channel) => String(channel?.name || "").trim() === restoredName)) {
+    toast(`A channel named ${restoredName} already exists.`);
+    state.removedChannelUndo = null;
+    renderRemovedChannelUndo();
+    return;
+  }
+
+  const insertAt = Math.max(0, Math.min(Number(undo.index) || 0, config.channels.length));
+  config.channels.splice(insertAt, 0, clonePlain(undo.channel));
+  const previousUndo = clonePlain(undo);
+  state.configData = config;
+  state.activeSettingsChannelIndex = insertAt;
+  setWorkspaceSelectedChannel(restoredName || undo.previousSelectedChannelName || config.channels[insertAt]?.name || "");
+  state.removedChannelUndo = null;
+  syncConfigEditor();
+  showTab("settings");
+  showSettingsTab("normalize");
+  renderSettingsForms();
+  toast(`Restoring ${restoredName || "channel"}...`);
+  try {
+    await saveConfigData(config);
+    toast(`Restored ${restoredName || "channel"}.`);
+  } catch (error) {
+    config.channels.splice(insertAt, 1);
+    state.configData = config;
+    state.removedChannelUndo = previousUndo;
+    syncConfigEditor();
+    renderSettingsForms();
+    throw error;
+  }
+}
+
+function removeActiveSettingsChannel() {
+  const config = state.configData || defaultConfigData();
+  if (!Array.isArray(config.channels) || !config.channels.length) return;
+  removeChannel(selectedSettingsChannelIndex(config));
 }
 
 async function startSettingsTask(action, index) {
@@ -3815,11 +4536,20 @@ function showSettingsTab(tab) {
   $("settingsFoldersTab").classList.toggle("active", tab === "folders");
   $("settingsNormalizeTab").classList.toggle("active", tab === "normalize");
   $("settingsYoutubeTab").classList.toggle("active", tab === "youtube");
+  $("settingsLiveHistoryTab").classList.toggle("active", tab === "liveHistory");
   $("settingsTroubleshootingTab").classList.toggle("active", tab === "troubleshooting");
   $("settingsFoldersView").classList.toggle("active", tab === "folders");
   $("settingsNormalizeView").classList.toggle("active", tab === "normalize");
   $("settingsYoutubeView").classList.toggle("active", tab === "youtube");
+  $("settingsLiveHistoryView").classList.toggle("active", tab === "liveHistory");
   $("settingsTroubleshootingView").classList.toggle("active", tab === "troubleshooting");
+  if (tab === "liveHistory") {
+    renderSettingsLiveHistory();
+    fetchSettingsLiveHistory().catch((error) => toast(error.message));
+  }
+  if (tab === "normalize") {
+    refreshActiveRawFiles({ force: true }).catch((error) => toast(error.message));
+  }
   if (tab === "youtube") {
     refreshYoutubeStatus()
       .then(() => {
@@ -3862,6 +4592,9 @@ $("tabControl").addEventListener("click", () => showTab("control"));
 $("tabSettings").addEventListener("click", () => showTab("settings"));
 $("settingsFoldersTab").addEventListener("click", () => showSettingsTab("folders"));
 $("settingsNormalizeTab").addEventListener("click", () => showSettingsTab("normalize"));
+if ($("settingsLiveHistoryTab")) {
+  $("settingsLiveHistoryTab").addEventListener("click", () => showSettingsTab("liveHistory"));
+}
 if ($("settingsTroubleshootingTab")) {
   $("settingsTroubleshootingTab").addEventListener("click", () => showSettingsTab("troubleshooting"));
 }
@@ -3872,6 +4605,33 @@ if ($("activityFilterErrors")) $("activityFilterErrors").addEventListener("click
 if ($("settingsYoutubeTab")) {
   $("settingsYoutubeTab").addEventListener("click", () => showSettingsTab("youtube"));
 }
+if ($("settingsLiveHistoryRangeButton")) {
+  $("settingsLiveHistoryRangeButton").addEventListener("click", (event) => {
+    event.stopPropagation();
+    toggleHistoryDateMenu();
+  });
+}
+if ($("settingsLiveHistorySearch")) {
+  $("settingsLiveHistorySearch").addEventListener("input", renderSettingsLiveHistory);
+}
+document.addEventListener("click", (event) => {
+  const target = event.target;
+  const withinFilter = target instanceof Element && target.closest(".history-filter-wrap");
+  if (withinFilter) return;
+  if (state.settingsLiveHistory.menuOpen || state.settingsLiveHistory.calendarOpen) {
+    state.settingsLiveHistory.menuOpen = false;
+    state.settingsLiveHistory.calendarOpen = false;
+    renderSettingsLiveHistory();
+  }
+});
+window.addEventListener("focus", () => {
+  refreshActiveRawFiles().catch((error) => toast(error.message));
+});
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") {
+    refreshActiveRawFiles().catch((error) => toast(error.message));
+  }
+});
 
 if ($("configSelect")) {
   $("configSelect").addEventListener("change", async (event) => {
@@ -3890,9 +4650,41 @@ if ($("reload")) {
   $("reload").addEventListener("click", () => refresh().then(loadConfigText).catch((error) => toast(error.message)));
 }
 $("saveSettings").addEventListener("click", () => saveSettings().catch((error) => toast(error.message)));
-$("addChannel").addEventListener("click", addChannel);
-$("addChannelNormalize").addEventListener("click", addChannel);
-$("refreshRawFiles").addEventListener("click", () => loadRawFiles().catch((error) => toast(error.message)));
+if ($("addChannelRail")) {
+  $("addChannelRail").addEventListener("click", addChannel);
+}
+if ($("removeChannelNormalize")) {
+  $("removeChannelNormalize").addEventListener("click", removeActiveSettingsChannel);
+}
+if ($("deleteChannelNameInput")) {
+  $("deleteChannelNameInput").addEventListener("input", syncChannelDeleteConsent);
+  $("deleteChannelNameInput").addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !$("confirmDeleteChannel")?.disabled) {
+      confirmChannelDelete().catch((error) => toast(error.message));
+    }
+  });
+}
+if ($("cancelDeleteChannel")) {
+  $("cancelDeleteChannel").addEventListener("click", closeChannelDeleteDialog);
+}
+if ($("confirmDeleteChannel")) {
+  $("confirmDeleteChannel").addEventListener("click", () => confirmChannelDelete().catch((error) => toast(error.message)));
+}
+if ($("deleteChannelDialog")) {
+  $("deleteChannelDialog").addEventListener("click", (event) => {
+    if (event.target === $("deleteChannelDialog")) {
+      closeChannelDeleteDialog();
+    }
+  });
+}
+if ($("undoRemoveChannel")) {
+  $("undoRemoveChannel").addEventListener("click", () => undoRemoveChannel().catch((error) => toast(error.message)));
+}
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !$("deleteChannelDialog")?.classList.contains("hidden")) {
+    closeChannelDeleteDialog();
+  }
+});
 $("startAll").addEventListener("click", () => startStream().catch((error) => toast(error.message)));
 $("stopAll").addEventListener("click", () => stopStream().catch((error) => toast(error.message)));
 if ($("workspaceVerifyAll")) {

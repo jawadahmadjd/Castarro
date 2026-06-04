@@ -6,10 +6,12 @@ from __future__ import annotations
 import copy
 from pathlib import Path
 import sys
+import tempfile
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
+import app_db  # noqa: E402
 import web_ui  # noqa: E402
 
 
@@ -446,6 +448,40 @@ def assert_auth_start_creates_standalone_slot_for_unlinked_channel() -> None:
     assert account.get("expected_channel_name") == "Inside Us Hindi"
 
 
+def assert_history_and_activity_are_channel_specific() -> None:
+    original_root = app_db.ROOT
+    original_db_path = app_db.DB_PATH
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+        temp_root = Path(temp_dir)
+        app_db.ROOT = temp_root
+        app_db.DB_PATH = temp_root / "stream_control.db"
+        try:
+            app_db.init_db()
+            app_db.record_stream_start("config.ready.json", "A", 101, "ffmpeg-a", "logs/A.log", "A live")
+            app_db.record_stream_start("config.ready.json", "B", 202, "ffmpeg-b", "logs/B.log", "B live")
+            app_db.record_event("stream_started", "config.ready.json", "A", {"message": "A started"})
+            app_db.record_event("stream_started", "config.ready.json", "B", {"message": "B started"})
+            app_db.record_event("app_started", None, None, {"message": "global"})
+
+            a_sessions = app_db.stream_sessions("config.ready.json", channel_name="A")
+            b_sessions = app_db.stream_sessions("config.ready.json", channel_name="B")
+            assert [session["channel_name"] for session in a_sessions] == ["A"]
+            assert [session["channel_name"] for session in b_sessions] == ["B"]
+
+            a_events = app_db.recent_app_events("config.ready.json", channel_name="A")
+            assert [event["channel_name"] for event in a_events] == ["A"]
+
+            removed = app_db.clear_app_events("config.ready.json", channel_name="A", include_global=False)
+            remaining_channels = [event["channel_name"] for event in app_db.recent_app_events("config.ready.json")]
+            assert removed == 1
+            assert "A" not in remaining_channels
+            assert "B" in remaining_channels
+            assert None in remaining_channels
+        finally:
+            app_db.ROOT = original_root
+            app_db.DB_PATH = original_db_path
+
+
 def main() -> int:
     assert_channel_scoped_schedule_routes_to_linked_accounts()
     assert_unlinked_channel_blocked_with_multiple_connected_accounts()
@@ -457,6 +493,7 @@ def main() -> int:
     assert_oauth_callback_links_selected_channel()
     assert_auth_start_reuses_channel_account_slot()
     assert_auth_start_creates_standalone_slot_for_unlinked_channel()
+    assert_history_and_activity_are_channel_specific()
     print("channel_workspace_contract_test: PASS")
     return 0
 

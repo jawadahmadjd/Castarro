@@ -1,0 +1,13 @@
+{
+  "youtube": {
+    "client_id": "YOUR_GOOGLE_OAUTH_CLIENT_ID.apps.googleusercontent.com",
+    "client_secret": "",
+    "oauth_client_type": "desktop",
+    "use_pkce": true,
+    "redirect_uri": "http://127.0.0.1:8765/api/youtube/oauth/callback",
+    "scopes": [
+      "https://www.googleapis.com/auth/youtube",
+      "https://www.googleapis.com/auth/youtube.force-ssl"
+    ]
+  }
+}

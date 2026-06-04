@@ -76,6 +76,37 @@ jobs:
         shell: pwsh
         run: npm run bundle:runtime
 
+      - name: Create YouTube OAuth seed
+        if: steps.version.outputs.exists != 'true'
+        shell: pwsh
+        env:
+          CASTARRO_YOUTUBE_CLIENT_ID: ${{ secrets.CASTARRO_YOUTUBE_CLIENT_ID }}
+          CASTARRO_YOUTUBE_CLIENT_SECRET: ${{ secrets.CASTARRO_YOUTUBE_CLIENT_SECRET }}
+          CASTARRO_YOUTUBE_OAUTH_CLIENT_TYPE: ${{ secrets.CASTARRO_YOUTUBE_OAUTH_CLIENT_TYPE }}
+          CASTARRO_YOUTUBE_REDIRECT_URI: ${{ secrets.CASTARRO_YOUTUBE_REDIRECT_URI }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:CASTARRO_YOUTUBE_CLIENT_ID)) {
+            Write-Host "::warning::CASTARRO_YOUTUBE_CLIENT_ID is not configured. Packaged users will see owner OAuth credentials as missing."
+            exit 0
+          }
+
+          $SeedDir = "desktop/resources/seed-data"
+          New-Item -ItemType Directory -Force -Path $SeedDir | Out-Null
+          $Payload = @{
+            youtube = @{
+              client_id = $env:CASTARRO_YOUTUBE_CLIENT_ID
+              client_secret = $env:CASTARRO_YOUTUBE_CLIENT_SECRET
+              oauth_client_type = if ([string]::IsNullOrWhiteSpace($env:CASTARRO_YOUTUBE_OAUTH_CLIENT_TYPE)) { "desktop" } else { $env:CASTARRO_YOUTUBE_OAUTH_CLIENT_TYPE }
+              use_pkce = $true
+              redirect_uri = if ([string]::IsNullOrWhiteSpace($env:CASTARRO_YOUTUBE_REDIRECT_URI)) { "http://127.0.0.1:8765/api/youtube/oauth/callback" } else { $env:CASTARRO_YOUTUBE_REDIRECT_URI }
+              scopes = @(
+                "https://www.googleapis.com/auth/youtube",
+                "https://www.googleapis.com/auth/youtube.force-ssl"
+              )
+            }
+          }
+          $Payload | ConvertTo-Json -Depth 5 | Set-Content -Encoding UTF8 -Path "$SeedDir/youtube.oauth.seed.json"
+
       - name: Detect signing configuration
         if: steps.version.outputs.exists != 'true'
         id: signing

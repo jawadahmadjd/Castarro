@@ -417,6 +417,7 @@ def load_config_or_none(config_name: str) -> tuple[dict[str, Any] | None, str | 
     try:
         with path.open("r", encoding="utf-8-sig") as fh:
             config = runtime_paths.apply_runtime_defaults(json.load(fh))
+            runtime_paths.apply_youtube_owner_seed(config)
             normalize_ui_settings(config)
             normalize_youtube_accounts(config)
             return config, None
@@ -425,6 +426,7 @@ def load_config_or_none(config_name: str) -> tuple[dict[str, Any] | None, str | 
 
 
 def save_config(config_name: str, config: dict[str, Any]) -> None:
+    runtime_paths.apply_youtube_owner_seed(config)
     normalize_ui_settings(config)
     normalize_youtube_accounts(config)
     for channel in config.get("channels", []):
@@ -1944,12 +1946,19 @@ def stop_task(task_id: str | None = None, channel_name: str | None = None, actio
     return stopped
 
 
-def clear_activity_logs(config_name: str, preserve_running_tasks: bool = True) -> dict[str, int]:
+def clear_activity_logs(
+    config_name: str,
+    preserve_running_tasks: bool = True,
+    channel_name: str | None = None,
+) -> dict[str, int]:
     removed_task_count = 0
     with STATE.lock:
         retained: deque[Task] = deque(maxlen=STATE.tasks.maxlen)
         for task in list(STATE.tasks):
             if task.config_name != config_name:
+                retained.append(task)
+                continue
+            if channel_name and task.channel_name != channel_name:
                 retained.append(task)
                 continue
             if preserve_running_tasks and task.process.poll() is None:
@@ -1958,7 +1967,7 @@ def clear_activity_logs(config_name: str, preserve_running_tasks: bool = True) -
             removed_task_count += 1
         STATE.tasks = retained
 
-    removed_event_count = app_db.clear_app_events(config_name, include_global=True)
+    removed_event_count = app_db.clear_app_events(config_name, include_global=not bool(channel_name), channel_name=channel_name)
     return {"tasks": removed_task_count, "events": removed_event_count}
 
 
@@ -2160,6 +2169,28 @@ class Handler(BaseHTTPRequestHandler):
                 config_name = safe_config_name(query.get("config", [DEFAULT_CONFIG])[0])
                 update_request_trace(self, config_name=config_name)
                 json_response(self, status_payload(config_name))
+                return
+
+            if parsed.path == "/api/stream-history":
+                config_name = safe_config_name(query.get("config", [DEFAULT_CONFIG])[0])
+                channel_name = str(query.get("channel", [""])[0] or "").strip() or None
+                start_at = str(query.get("start", [""])[0] or "").strip() or None
+                end_at = str(query.get("end", [""])[0] or "").strip() or None
+                limit_text = str(query.get("limit", [""])[0] or "").strip()
+                limit = int(limit_text) if limit_text else None
+                update_request_trace(self, config_name=config_name, channel_name=channel_name)
+                json_response(
+                    self,
+                    {
+                        "sessions": app_db.stream_sessions(
+                            config_name,
+                            channel_name=channel_name,
+                            started_after=start_at,
+                            started_before=end_at,
+                            limit=limit,
+                        )
+                    },
+                )
                 return
 
             if parsed.path == "/api/youtube/status":
@@ -2388,7 +2419,9 @@ class Handler(BaseHTTPRequestHandler):
 
             if parsed.path == "/api/activity/clear":
                 preserve_running_tasks = bool(body.get("preserve_running_tasks", True))
-                cleared = clear_activity_logs(config_name, preserve_running_tasks)
+                channel_name = str(body.get("channel") or "").strip() or None
+                update_request_trace(self, config_name=config_name, channel_name=channel_name)
+                cleared = clear_activity_logs(config_name, preserve_running_tasks, channel_name)
                 json_response(
                     self,
                     {
@@ -2396,6 +2429,7 @@ class Handler(BaseHTTPRequestHandler):
                         "cleared_tasks": cleared["tasks"],
                         "cleared_events": cleared["events"],
                         "preserve_running_tasks": preserve_running_tasks,
+                        "channel": channel_name,
                     },
                 )
                 return
