@@ -6,6 +6,14 @@ const state = {
     selectedChannelName: "",
     lastSelectedByTab: {},
     channelCache: {},
+    activeRoute: "overview",
+    channelSearch: "",
+    editingChannelName: "",
+    editingChannelPicture: "",
+    editingChannelImage: null,
+    editingChannelPictureType: "image/png",
+    editingChannelCrop: { x: 0, y: 0 },
+    editingChannelDrag: null,
     loading: { channelSwitch: false, module: null },
   },
   activeTab: "control",
@@ -57,6 +65,14 @@ const ACTIVITY_STREAM_SPLIT_KEY = "castarro.activityStreamSplitRatio.v1";
 const WORKSPACE_SELECTED_CHANNEL_KEY = "castarro.workspace.selectedChannel.v1";
 const DASHBOARD_CACHE_KEY = "castarro.dashboard.frontPage.v1";
 const YOUTUBE_STATUS_CACHE_KEY = "castarro.youtube.status.v1";
+const WORKSPACE_ROUTES = ["overview", "folders", "encoder", "youtube", "history", "troubleshoot"];
+const routeToSettingsTab = {
+  folders: "folders",
+  encoder: "normalize",
+  youtube: "youtube",
+  history: "liveHistory",
+  troubleshoot: "troubleshooting",
+};
 
 const defaultLiveProfile = () => ({
   mode: "copy",
@@ -770,6 +786,14 @@ function renderStatus(payload) {
   const taskRunning = payload.tasks.some((task) => task.running);
 
   $("serverState").textContent = payload.config_exists ? `${running} live stream${running === 1 ? "" : "s"}` : "Config needed";
+  const startAllButton = $("startAll");
+  if (startAllButton) {
+    const anyRunning = running > 0;
+    startAllButton.textContent = anyRunning ? "Stop all streams" : "Start All Streams";
+    startAllButton.classList.toggle("success", !anyRunning);
+    startAllButton.classList.toggle("danger", anyRunning);
+    startAllButton.setAttribute("aria-label", anyRunning ? "Stop all streams" : "Start All Streams");
+  }
   $("taskState").textContent = taskRunning ? "Working" : "Idle";
   $("channelCount").textContent = `${payload.channels.length} channel${payload.channels.length === 1 ? "" : "s"}`;
   const activeConfigLabel = $("activeConfigLabel");
@@ -856,30 +880,128 @@ function renderChannels(payload) {
   }).join("");
 }
 
-function renderGlobalOverview(payload) {
-  const strip = $("workspaceOverviewStrip");
-  if (!strip) return;
-  const channels = Array.isArray(payload?.channels) ? payload.channels : [];
-  if (!channels.length) {
-    strip.innerHTML = `<div class="meta">No channels configured yet.</div>`;
-    return;
+function normalizeWorkspaceRoute(routeName) {
+  const route = String(routeName || "overview").trim();
+  const aliases = {
+    control: "overview",
+    dashboard: "overview",
+    normalize: "encoder",
+    live: "youtube",
+    liveHistory: "history",
+    troubleshooting: "troubleshoot",
+  };
+  const normalized = aliases[route] || route;
+  return WORKSPACE_ROUTES.includes(normalized) ? normalized : "overview";
+}
+
+function workspaceRouteLabel(routeName) {
+  return {
+    overview: "Overview",
+    folders: "Folders",
+    encoder: "Encoder",
+    youtube: "YouTube",
+    history: "History",
+    troubleshoot: "Troubleshoot",
+  }[normalizeWorkspaceRoute(routeName)] || "Overview";
+}
+
+function getChannelHealthViewModel(channel, payload) {
+  const channelName = String(channel?.name || "").trim();
+  const stream = getChannelStreams(payload?.streams || {}, channelName);
+  const linked = getLinkedAccountForChannel(state.youtubeStatus, channel);
+  const checks = Array.isArray(state.youtubeKeyChecks?.checks) ? state.youtubeKeyChecks.checks : [];
+  const check = checks.find((item) => String(item?.channel || "") === channelName);
+  const connected = Boolean(linked?.connected);
+  const mapped = Boolean(normalizeAccountId(channel?.youtube_account_id || ""));
+  const streamRunning = Boolean(stream?.running);
+  const rawCount = Number(channel?.raw_playlist_count || (Array.isArray(channel?.raw_playlist) ? channel.raw_playlist.length : 0));
+  const normalizedCount = Number(channel?.normalized_count || 0);
+  const hasManualKey = Boolean(String(channel?.stream_key_env || "").trim());
+  const ready = Boolean(channel?.enabled !== false && (mapped || hasManualKey) && rawCount >= 0);
+  return {
+    name: channelName,
+    enabled: channel?.enabled !== false,
+    connected,
+    mapped,
+    ready,
+    streamRunning,
+    streamState: streamRunning ? "Live" : "Idle",
+    verificationState: check ? (check.ok ? "Verified" : "Needs review") : "Not verified",
+    linkedAccountLabel: linked?.label || linked?.id || (mapped ? normalizeAccountId(channel?.youtube_account_id || "") : "Not linked"),
+    hasManualKey,
+    rawCount,
+    normalizedCount,
+    statusTone: streamRunning || connected ? "live" : ready ? "" : "warn",
+  };
+}
+
+function getChannelReadinessViewModel(channel, payload) {
+  const health = getChannelHealthViewModel(channel, payload);
+  const defaults = state.configData?.defaults || {};
+  return [
+    {
+      label: "YouTube account",
+      value: health.mapped ? health.linkedAccountLabel : "Not linked",
+      status: health.connected ? "Connected" : health.mapped ? "Reconnect" : "Link account",
+      tone: health.connected ? "live" : "warn",
+      routeTarget: "youtube",
+    },
+    {
+      label: "Stream key",
+      value: health.hasManualKey ? streamKeyLabel(channel) : "Missing",
+      status: health.hasManualKey ? "Present" : "Needed",
+      tone: health.hasManualKey ? "" : "warn",
+      routeTarget: "youtube",
+    },
+    {
+      label: "Encoder preset",
+      value: `${channel?.normalize_profile?.width || state.configData?.normalize_profile?.width || 1920}p source profile`,
+      status: "Ready",
+      tone: "",
+      routeTarget: "encoder",
+    },
+    {
+      label: "Folders",
+      value: `${defaults.raw_dir || "Raw Videos"} -> ${defaults.normalized_dir || "Go Live"}`,
+      status: "Configured",
+      tone: "",
+      routeTarget: "folders",
+    },
+  ];
+}
+
+function getRecentActivityViewModel(channelName, payload) {
+  const sessions = Array.isArray(payload?.stream_history) ? payload.stream_history : [];
+  const events = getChannelEvents(payload?.activity_events || [], channelName);
+  const tasks = getChannelTasks(payload?.tasks || [], channelName);
+  const latestSession = sessions.find((session) => String(session?.channel_name || "") === channelName);
+  const items = [];
+  if (latestSession) {
+    items.push({
+      title: latestSession.is_active ? "Live session in progress" : "Latest live session",
+      detail: `${formatSessionDateParts(latestSession.started_at).date} | ${durationText(sessionDurationSeconds(latestSession))}`,
+    });
   }
-  const selected = getSelectedChannel({ channels }, state.workspace.selectedChannelName);
-  const liveCount = channels.filter((channel) => Boolean(payload?.streams?.[channel.name]?.running)).length;
-  const enabledCount = channels.filter((channel) => channel?.enabled !== false).length;
-  const linkedCount = channels.filter((channel) => Boolean(normalizeAccountId(channel?.youtube_account_id || ""))).length;
-  strip.innerHTML = [
-    `<div class="workspace-overview-stat"><span class="field-hint">Selected</span><strong>${escapeHtml(selected?.name || "None")}</strong></div>`,
-    `<div class="workspace-overview-stat"><span class="field-hint">Live</span><strong>${liveCount}/${channels.length}</strong></div>`,
-    `<div class="workspace-overview-stat"><span class="field-hint">Enabled</span><strong>${enabledCount}/${channels.length}</strong></div>`,
-    `<div class="workspace-overview-stat"><span class="field-hint">YouTube Linked</span><strong>${linkedCount}/${channels.length}</strong></div>`,
-  ].join("");
+  tasks.slice(0, 2).forEach((task) => {
+    items.push({
+      title: taskTitle(task.name),
+      detail: task.running ? "Running now" : Number(task.returncode) === 0 ? "Finished successfully" : "Needs review",
+    });
+  });
+  events.slice(0, 2).forEach((event) => {
+    items.push({
+      title: String(event?.event_type || "Activity").replaceAll("_", " "),
+      detail: formatIsoTimestamp(event?.created_at),
+    });
+  });
+  return items.slice(0, 4);
 }
 
 function renderWorkspaceChannelList(payload) {
   const list = $("workspaceChannelList");
   if (!list) return;
   const channels = Array.isArray(payload?.channels) ? payload.channels : [];
+  const searchText = String(state.workspace.channelSearch || "").trim().toLowerCase();
   const countBadge = $("workspaceChannelCountBadge");
   if (countBadge) {
     countBadge.textContent = `${channels.length} channel${channels.length === 1 ? "" : "s"}`;
@@ -894,7 +1016,16 @@ function renderWorkspaceChannelList(payload) {
     setWorkspaceSelectedChannel(current.name);
   }
   const checks = Array.isArray(state.youtubeKeyChecks?.checks) ? state.youtubeKeyChecks.checks : [];
-  list.innerHTML = channels.map((channel) => {
+  const visibleChannels = channels.filter((channel) => {
+    if (!searchText) return true;
+    return String(channel?.name || "").toLowerCase().includes(searchText);
+  });
+  if (!visibleChannels.length) {
+    list.innerHTML = `<div class="meta">No channels match that search.</div>`;
+    return;
+  }
+  list.innerHTML = visibleChannels.map((statusChannel) => {
+    const channel = channelWithConfigVisuals(statusChannel);
     const channelName = String(channel?.name || "").trim();
     const stream = payload?.streams?.[channel.name];
     const linked = getLinkedAccountForChannel(state.youtubeStatus, channel);
@@ -903,12 +1034,14 @@ function renderWorkspaceChannelList(payload) {
     const connectionClass = isConnected ? "badge live" : "badge warn";
     const liveText = stream?.running ? "Live" : "Ready";
     const liveClass = stream?.running ? "badge live" : "badge";
-    const logoText = String(channel?.name || "?").trim().charAt(0).toUpperCase() || "?";
+    const logoText = channelLogoText(channel);
+    const pictureSrc = channelPictureSrc(channel);
     const check = checks.find((item) => String(item?.channel || "") === String(channel.name));
     const hasMismatch = check && !check.ok;
+    const isSelected = state.workspace.selectedChannelName === channel.name;
     const cardClass = [
       "workspace-channel-item",
-      state.workspace.selectedChannelName === channel.name ? "active" : "",
+      isSelected ? "active" : "",
       hasMismatch ? "has-warning" : "",
     ].join(" ").trim();
     const nameLength = channelName.length;
@@ -919,181 +1052,467 @@ function renderWorkspaceChannelList(payload) {
       titleSizeClass = "size-sm";
     }
     return `
-      <button class="${cardClass}" type="button" data-channel-name="${escapeAttr(channel.name)}" onclick="switchWorkspaceChannel('${escapeJs(channel.name)}')">
-        <span class="workspace-channel-logo" aria-hidden="true">${escapeHtml(logoText)}</span>
+      <div class="workspace-channel-card ${isSelected ? "is-active" : ""} ${hasMismatch ? "has-warning" : ""}" data-channel-name="${escapeAttr(channel.name)}">
+      <button class="${cardClass}" type="button" onclick="switchWorkspaceChannel('${escapeJs(channel.name)}')" ${isSelected ? 'aria-current="true"' : ""}>
+        <span class="workspace-channel-logo" aria-hidden="true">${pictureSrc ? `<img src="${escapeAttr(pictureSrc)}" alt="">` : escapeHtml(logoText)}</span>
         <div class="workspace-channel-body">
           <div class="workspace-channel-item-head">
             <span class="channel-name workspace-channel-title ${titleSizeClass}" title="${escapeAttr(channelName)}">${escapeHtml(channelName)}</span>
           </div>
           <div class="workspace-channel-item-meta">
-            <span class="${connectionClass}">${escapeHtml(connectionText)}</span>
-            <span class="${liveClass}">${escapeHtml(liveText)}</span>
+            <span class="sidebar-status-dot ${isConnected ? "is-connected" : ""}" aria-hidden="true"></span>
+            <span>${escapeHtml(connectionText)} · ${escapeHtml(liveText)}</span>
           </div>
         </div>
       </button>
+        <button class="workspace-channel-edit-button" type="button" onclick="openWorkspaceChannelEdit('${escapeJs(channel.name)}')" aria-label="Edit ${escapeAttr(channelName)}">
+          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="M12 20h9"></path>
+            <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"></path>
+          </svg>
+        </button>
+      </div>
     `;
   }).join("");
 }
 
-function renderChannelHeader(payload, channel) {
-  const nameNode = $("workspaceChannelName");
-  const accountNode = $("workspaceLinkedAccountBadge");
-  const statusNode = $("workspaceContextGuard");
-  const studioLink = $("workspaceOpenStudio");
-  if (!nameNode || !accountNode || !statusNode) return;
+function channelLogoText(channel) {
+  const icon = String(channel?.icon || "").trim();
+  if (icon) return Array.from(icon).slice(0, 2).join("");
+  return String(channel?.name || "?").trim().charAt(0).toUpperCase() || "?";
+}
+
+function channelWithConfigVisuals(channel) {
+  const channelName = String(channel?.name || "").trim();
+  const configChannels = Array.isArray(state.configData?.channels) ? state.configData.channels : [];
+  const configChannel = configChannels.find((item) => String(item?.name || "").trim() === channelName);
+  if (!configChannel) return channel;
+  return {
+    ...channel,
+    icon: configChannel.icon || channel?.icon,
+    picture: configChannel.picture || configChannel.picture_data_url || channel?.picture,
+  };
+}
+
+function channelPictureSrc(channel) {
+  const picture = String(channel?.picture || channel?.picture_data_url || "").trim();
+  if (!picture) return "";
+  if (picture.startsWith("data:image/") || picture.startsWith("http://") || picture.startsWith("https://")) {
+    return picture;
+  }
+  return "";
+}
+
+function openWorkspaceChannelEdit(channelName) {
+  const targetName = String(channelName || "").trim();
+  const channels = Array.isArray(state.configData?.channels) ? state.configData.channels : [];
+  const channel = channels.find((item) => String(item?.name || "").trim() === targetName);
   if (!channel) {
-    nameNode.textContent = "No channel selected";
-    accountNode.textContent = "No linked account";
-    accountNode.className = "badge warn";
-    statusNode.className = "notice warn";
-    statusNode.textContent = "Select a channel to continue.";
-    if (studioLink) {
-      studioLink.setAttribute("href", "#");
-      studioLink.classList.add("hidden");
-    }
+    toast(`Unknown channel: ${targetName}`);
     return;
   }
+  state.workspace.editingChannelName = targetName;
+  state.workspace.editingChannelPicture = channelPictureSrc(channel);
+  state.workspace.editingChannelImage = null;
+  state.workspace.editingChannelPictureType = state.workspace.editingChannelPicture.startsWith("data:image/png") ? "image/png" : "image/jpeg";
+  state.workspace.editingChannelCrop = { x: 0, y: 0 };
+  state.workspace.editingChannelDrag = null;
+  const nameInput = $("workspaceChannelEditName");
+  const fileInput = $("workspaceChannelEditPicture");
+  const title = $("workspaceChannelEditTitle");
+  if (title) title.textContent = `Edit ${targetName}`;
+  if (nameInput) nameInput.value = targetName;
+  if (fileInput) fileInput.value = "";
+  syncWorkspaceChannelEditPreview();
+  $("workspaceChannelEditDialog")?.classList.remove("hidden");
+  window.setTimeout(() => $("workspaceChannelEditName")?.focus(), 0);
+}
 
-  const linked = getLinkedAccountForChannel(state.youtubeStatus, channel);
-  const linkedText = linked
-    ? (linked.channel_title ? `${linked.label || linked.id} (${linked.channel_title})` : (linked.label || linked.id))
-    : "Not linked";
-  const connected = Boolean(linked?.connected);
-  const mapped = Boolean(normalizeAccountId(channel.youtube_account_id || ""));
-  nameNode.textContent = channel.name;
-  accountNode.textContent = linkedText;
-  accountNode.className = `badge ${connected ? "live" : "warn"}`;
-  if (!mapped) {
-    statusNode.className = "notice warn";
-    statusNode.textContent = "This channel is not linked to a YouTube account. Connect YouTube from this selected channel before scheduling.";
-  } else if (!connected) {
-    statusNode.className = "notice warn";
-    statusNode.textContent = "Linked account is not connected. Connect it before scheduling or verification.";
-  } else {
-    statusNode.className = "notice";
-    statusNode.textContent = `Channel ${channel.name} is safely linked to ${linkedText}.`;
+function closeWorkspaceChannelEdit() {
+  state.workspace.editingChannelName = "";
+  state.workspace.editingChannelPicture = "";
+  state.workspace.editingChannelImage = null;
+  state.workspace.editingChannelCrop = { x: 0, y: 0 };
+  state.workspace.editingChannelDrag = null;
+  $("workspaceChannelEditDialog")?.classList.add("hidden");
+}
+
+function handleWorkspaceChannelEditKey(event, channelName) {
+  if (event.key === "Escape") {
+    closeWorkspaceChannelEdit();
+    return;
   }
-
-  if (studioLink) {
-    if (channel.youtube_studio_url) {
-      studioLink.setAttribute("href", channel.youtube_studio_url);
-      studioLink.classList.remove("hidden");
-    } else {
-      studioLink.setAttribute("href", "#");
-      studioLink.classList.add("hidden");
-    }
+  if (event.key === "Enter") {
+    event.preventDefault();
+    saveWorkspaceChannelEdit(channelName).catch((error) => toast(error.message));
   }
 }
 
-function workspaceModuleCard(title, helper, content) {
-  return `
-    <article class="nested-card workspace-module-card">
+function syncWorkspaceChannelEditPreview() {
+  const preview = $("workspaceChannelPicturePreview");
+  if (!preview) return;
+  const picture = state.workspace.editingChannelImage
+    ? String(state.workspace.editingChannelPicture || renderWorkspaceChannelCroppedPicture())
+    : String(state.workspace.editingChannelPicture || "").trim();
+  const name = String($("workspaceChannelEditName")?.value || state.workspace.editingChannelName || "?").trim();
+  preview.classList.toggle("is-draggable", Boolean(state.workspace.editingChannelImage));
+  if (picture) {
+    preview.innerHTML = `<img src="${escapeAttr(picture)}" alt="">`;
+  } else {
+    preview.textContent = name.charAt(0).toUpperCase() || "?";
+  }
+}
+
+function loadWorkspaceChannelImage(file) {
+  return new Promise((resolve, reject) => {
+    if (!file || !String(file.type || "").startsWith("image/")) {
+      reject(new Error("Choose an image file for the channel picture."));
+      return;
+    }
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("Could not read the selected image."));
+    reader.onload = () => {
+      const image = new Image();
+      image.onerror = () => reject(new Error("Could not load the selected image."));
+      image.onload = () => {
+        const isPng = String(file.type || "").toLowerCase() === "image/png"
+          || String(file.name || "").toLowerCase().endsWith(".png");
+        resolve({
+          src: String(reader.result || ""),
+          image,
+          width: image.naturalWidth || image.width || 1,
+          height: image.naturalHeight || image.height || 1,
+          type: isPng ? "image/png" : "image/jpeg",
+        });
+      };
+      image.src = String(reader.result || "");
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+function cropBoundsForImage(imageState, outputSize = 256) {
+  const width = Number(imageState?.width || 1);
+  const height = Number(imageState?.height || 1);
+  const scale = Math.max(outputSize / width, outputSize / height);
+  const drawWidth = width * scale;
+  const drawHeight = height * scale;
+  return {
+    drawWidth,
+    drawHeight,
+    maxX: Math.max(0, (drawWidth - outputSize) / 2),
+    maxY: Math.max(0, (drawHeight - outputSize) / 2),
+  };
+}
+
+function clampWorkspaceChannelCrop() {
+  const imageState = state.workspace.editingChannelImage;
+  if (!imageState) return;
+  const bounds = cropBoundsForImage(imageState);
+  const crop = state.workspace.editingChannelCrop || { x: 0, y: 0 };
+  state.workspace.editingChannelCrop = {
+    x: Math.max(-bounds.maxX, Math.min(bounds.maxX, Number(crop.x || 0))),
+    y: Math.max(-bounds.maxY, Math.min(bounds.maxY, Number(crop.y || 0))),
+  };
+}
+
+function renderWorkspaceChannelCroppedPicture() {
+  const imageState = state.workspace.editingChannelImage;
+  if (!imageState) return String(state.workspace.editingChannelPicture || "");
+  clampWorkspaceChannelCrop();
+  const outputSize = 256;
+  const canvas = document.createElement("canvas");
+  canvas.width = outputSize;
+  canvas.height = outputSize;
+  const context = canvas.getContext("2d");
+  const outputType = state.workspace.editingChannelPictureType === "image/png" ? "image/png" : "image/jpeg";
+  if (outputType !== "image/png") {
+    context.fillStyle = "#ffffff";
+    context.fillRect(0, 0, outputSize, outputSize);
+  }
+  const bounds = cropBoundsForImage(imageState, outputSize);
+  const crop = state.workspace.editingChannelCrop || { x: 0, y: 0 };
+  const drawX = (outputSize - bounds.drawWidth) / 2 + Number(crop.x || 0);
+  const drawY = (outputSize - bounds.drawHeight) / 2 + Number(crop.y || 0);
+  context.drawImage(imageState.image, drawX, drawY, bounds.drawWidth, bounds.drawHeight);
+  return outputType === "image/png"
+    ? canvas.toDataURL("image/png")
+    : canvas.toDataURL("image/jpeg", 0.9);
+}
+
+async function handleWorkspaceChannelPictureChange(input) {
+  const file = input?.files?.[0];
+  if (!file) return;
+  const imageState = await loadWorkspaceChannelImage(file);
+  state.workspace.editingChannelImage = imageState;
+  state.workspace.editingChannelPictureType = imageState.type;
+  state.workspace.editingChannelCrop = { x: 0, y: 0 };
+  state.workspace.editingChannelPicture = renderWorkspaceChannelCroppedPicture();
+  syncWorkspaceChannelEditPreview();
+}
+
+function clearWorkspaceChannelPicture() {
+  state.workspace.editingChannelPicture = "";
+  state.workspace.editingChannelImage = null;
+  state.workspace.editingChannelCrop = { x: 0, y: 0 };
+  const fileInput = $("workspaceChannelEditPicture");
+  if (fileInput) fileInput.value = "";
+  syncWorkspaceChannelEditPreview();
+}
+
+function startWorkspaceChannelPictureDrag(event) {
+  if (!state.workspace.editingChannelImage) return;
+  event.preventDefault();
+  const preview = $("workspaceChannelPicturePreview");
+  const rect = preview?.getBoundingClientRect();
+  if (!rect?.width) return;
+  state.workspace.editingChannelDrag = {
+    pointerId: event.pointerId,
+    startX: event.clientX,
+    startY: event.clientY,
+    cropX: Number(state.workspace.editingChannelCrop?.x || 0),
+    cropY: Number(state.workspace.editingChannelCrop?.y || 0),
+    pixelsPerPreviewPixel: 256 / rect.width,
+  };
+  preview?.setPointerCapture?.(event.pointerId);
+}
+
+function moveWorkspaceChannelPictureDrag(event) {
+  const drag = state.workspace.editingChannelDrag;
+  if (!drag || drag.pointerId !== event.pointerId) return;
+  event.preventDefault();
+  const scale = Number(drag.pixelsPerPreviewPixel || 1);
+  state.workspace.editingChannelCrop = {
+    x: Number(drag.cropX || 0) + (event.clientX - drag.startX) * scale,
+    y: Number(drag.cropY || 0) + (event.clientY - drag.startY) * scale,
+  };
+  state.workspace.editingChannelPicture = renderWorkspaceChannelCroppedPicture();
+  syncWorkspaceChannelEditPreview();
+}
+
+function stopWorkspaceChannelPictureDrag(event) {
+  const drag = state.workspace.editingChannelDrag;
+  if (!drag || drag.pointerId !== event.pointerId) return;
+  state.workspace.editingChannelDrag = null;
+  $("workspaceChannelPicturePreview")?.releasePointerCapture?.(event.pointerId);
+}
+
+async function saveWorkspaceChannelEdit(channelName = "") {
+  const oldName = String(channelName || state.workspace.editingChannelName || "").trim();
+  const nameInput = $("workspaceChannelEditName");
+  const nextName = String(nameInput?.value || "").trim();
+  const nextPicture = String(
+    state.workspace.editingChannelImage
+      ? renderWorkspaceChannelCroppedPicture()
+      : state.workspace.editingChannelPicture || ""
+  ).trim();
+  if (!oldName) throw new Error("Select a channel to edit.");
+  if (!nextName) throw new Error("Channel name is required.");
+
+  const data = collectSettingsData();
+  const channels = Array.isArray(data.channels) ? data.channels : [];
+  const channelIndex = channels.findIndex((channel) => String(channel?.name || "").trim() === oldName);
+  if (channelIndex < 0) throw new Error(`Unknown channel: ${oldName}`);
+  const duplicate = channels.some((channel, index) => (
+    index !== channelIndex && String(channel?.name || "").trim() === nextName
+  ));
+  if (duplicate) throw new Error(`A channel named "${nextName}" already exists.`);
+
+  channels[channelIndex].name = nextName;
+  if (nextPicture) {
+    channels[channelIndex].picture = nextPicture;
+  } else {
+    delete channels[channelIndex].picture;
+    delete channels[channelIndex].picture_data_url;
+  }
+  data.channels = channels;
+
+  if (state.workspace.selectedChannelName === oldName) {
+    setWorkspaceSelectedChannel(nextName);
+  }
+  state.workspace.editingChannelName = "";
+  state.workspace.editingChannelPicture = "";
+  state.workspace.editingChannelImage = null;
+  state.workspace.editingChannelCrop = { x: 0, y: 0 };
+  state.workspace.editingChannelDrag = null;
+  $("workspaceChannelEditDialog")?.classList.add("hidden");
+  state.configData = data;
+  syncConfigEditor();
+  renderWorkspaceChannelList(state.status || {});
+  await saveConfigData(data);
+  toast("Channel updated.");
+}
+
+function renderWorkspaceHeader(payload, channel) {
+  const route = normalizeWorkspaceRoute(state.workspace.activeRoute);
+  const routeLabel = workspaceRouteLabel(route);
+  const channelName = String(channel?.name || "No channel selected").trim();
+  const title = route === "overview" ? channelName : `${channelName} / ${routeLabel}`;
+  const breadcrumb = channel ? `Channel / ${channelName}` : "Channel / None";
+  const subtitles = {
+    overview: "Controls and status for this channel only.",
+    folders: "Folder paths used by this selected channel.",
+    encoder: "Source videos and encoder profile for this channel.",
+    youtube: "Account, broadcast, stream key, and scheduling for this channel.",
+    history: "Recorded live sessions for this channel.",
+    troubleshoot: "Activity and stream logs for this channel.",
+  };
+  const breadcrumbNode = $("workspaceBreadcrumb");
+  const titleNode = $("workspacePageTitle");
+  const legacyNameNode = $("workspaceChannelName");
+  const subtitleNode = $("workspacePageSubtitle");
+  const actionsNode = $("workspaceHeaderActions");
+  if (breadcrumbNode) breadcrumbNode.textContent = route === "overview" ? breadcrumb : `${channelName} / ${routeLabel}`;
+  if (titleNode) titleNode.textContent = title;
+  if (legacyNameNode) legacyNameNode.textContent = channelName;
+  if (subtitleNode) subtitleNode.textContent = subtitles[route] || subtitles.overview;
+  if (!actionsNode) return;
+  if (!channel) {
+    actionsNode.innerHTML = `<button class="pill primary" type="button" onclick="addChannel()">Add Channel</button>`;
+    return;
+  }
+  const escapedName = escapeJs(channel.name);
+  const saveButton = route === "overview" ? "" : `<button class="pill primary" type="button" onclick="saveSettings().catch((error) => toast(error.message))">Save settings</button>`;
+  actionsNode.innerHTML = `
+    <button class="pill ghost" type="button" onclick="verifyYoutubeChannelKeys('${escapedName}').catch((error) => toast(error.message))">Verify channel</button>
+    <button class="pill success" type="button" onclick="startStream('${escapedName}').catch((error) => toast(error.message))">Start Stream</button>
+    <button class="pill danger" type="button" onclick="stopStream('${escapedName}').catch((error) => toast(error.message))">Stop Stream</button>
+    ${saveButton}
+  `;
+}
+
+function renderWorkspaceStatusBand(payload, channel) {
+  const connectionNode = $("workspaceStatusConnection");
+  const readinessNode = $("workspaceStatusReadiness");
+  const streamNode = $("workspaceStatusStream");
+  const accountNode = $("workspaceStatusAccount");
+  if (!connectionNode || !readinessNode || !streamNode || !accountNode) return;
+  if (!channel) {
+    connectionNode.textContent = "No channel";
+    readinessNode.textContent = "Select channel";
+    streamNode.textContent = "Idle";
+    accountNode.textContent = "Not linked";
+    return;
+  }
+  const health = getChannelHealthViewModel(channel, payload);
+  connectionNode.textContent = health.connected ? "Connected" : health.mapped ? "Reconnect account" : "Not linked";
+  readinessNode.textContent = health.ready ? "Ready" : "Needs setup";
+  streamNode.textContent = health.streamState;
+  accountNode.textContent = health.linkedAccountLabel;
+}
+
+function renderChannelTools() {
+  const activeRoute = normalizeWorkspaceRoute(state.workspace.activeRoute);
+  document.querySelectorAll("[data-route]").forEach((node) => {
+    const route = normalizeWorkspaceRoute(node.dataset.route);
+    node.classList.toggle("active", route === activeRoute);
+    if (route === activeRoute) {
+      node.setAttribute("aria-current", "page");
+    } else {
+      node.removeAttribute("aria-current");
+    }
+  });
+}
+
+function renderOverviewPanels(payload, channel) {
+  const readinessNode = $("workspaceReadinessPanel");
+  const activityNode = $("workspaceRecentActivityPanel");
+  if (!channel) {
+    if (readinessNode) readinessNode.innerHTML = `<div class="notice warn">Select a channel to see readiness.</div>`;
+    if (activityNode) activityNode.innerHTML = `<div class="live-history-empty">Select a channel to view activity.</div>`;
+    return;
+  }
+  if (readinessNode) {
+    const rows = getChannelReadinessViewModel(channel, payload);
+    readinessNode.innerHTML = `
       <div class="section-head compact">
         <div>
-          <h3>${escapeHtml(title)}</h3>
-          <p class="helper">${escapeHtml(helper)}</p>
+          <h2>Channel Readiness</h2>
+          <p class="helper">Key setup checks for ${escapeHtml(channel.name)}.</p>
         </div>
       </div>
-      ${content}
-    </article>
-  `;
+      <div class="readiness-list">
+        ${rows.map((row) => `
+          <button class="readiness-row" type="button" onclick="setWorkspaceRoute('${escapeJs(row.routeTarget)}')">
+            <span>
+              <strong>${escapeHtml(row.label)}</strong>
+              <small>${escapeHtml(row.value)}</small>
+            </span>
+            <span class="badge ${escapeAttr(row.tone)}">${escapeHtml(row.status)}</span>
+          </button>
+        `).join("")}
+      </div>
+    `;
+  }
+  if (activityNode) {
+    const items = getRecentActivityViewModel(channel.name, payload);
+    activityNode.innerHTML = items.length
+      ? items.map((item) => `
+        <div class="activity-preview-row">
+          <strong>${escapeHtml(item.title)}</strong>
+          <span>${escapeHtml(item.detail)}</span>
+        </div>
+      `).join("")
+      : `<div class="live-history-empty">No recent activity for ${escapeHtml(channel.name)} yet.</div>`;
+  }
+}
+
+function applyLegacyTabView(tab) {
+  state.activeTab = tab;
+  $("tabControl")?.classList.toggle("active", tab === "control");
+  $("tabSettings")?.classList.toggle("active", tab === "settings");
+  $("viewControl")?.classList.toggle("active", tab === "control");
+  $("viewSettings")?.classList.toggle("active", tab === "settings");
+}
+
+function applySettingsSection(tab) {
+  $("settingsFoldersTab")?.classList.toggle("active", tab === "folders");
+  $("settingsNormalizeTab")?.classList.toggle("active", tab === "normalize");
+  $("settingsYoutubeTab")?.classList.toggle("active", tab === "youtube");
+  $("settingsLiveHistoryTab")?.classList.toggle("active", tab === "liveHistory");
+  $("settingsTroubleshootingTab")?.classList.toggle("active", tab === "troubleshooting");
+  $("settingsFoldersView")?.classList.toggle("active", tab === "folders");
+  $("settingsNormalizeView")?.classList.toggle("active", tab === "normalize");
+  $("settingsYoutubeView")?.classList.toggle("active", tab === "youtube");
+  $("settingsLiveHistoryView")?.classList.toggle("active", tab === "liveHistory");
+  $("settingsTroubleshootingView")?.classList.toggle("active", tab === "troubleshooting");
+}
+
+function renderWorkspaceRoute(payload, routeName) {
+  const route = normalizeWorkspaceRoute(routeName);
+  const selected = getSelectedChannel({ channels: payload?.channels || [] }, state.workspace.selectedChannelName);
+  renderChannelTools();
+  if (route === "overview") {
+    applyLegacyTabView("control");
+    renderOverviewPanels(payload, selected);
+    renderLiveHistory(payload?.stream_history || []);
+    renderPreview(payload?.streams || {});
+    return;
+  }
+  const settingsTab = routeToSettingsTab[route] || "folders";
+  applyLegacyTabView("settings");
+  state.settingsTab = settingsTab;
+  applySettingsSection(settingsTab);
+  syncActiveSettingsChannelFromWorkspace(false);
+  if (settingsTab !== "troubleshooting") {
+    renderSettingsForms();
+  }
+  if (settingsTab === "liveHistory") {
+    renderSettingsLiveHistory();
+  }
+  if (settingsTab === "troubleshooting") {
+    renderTasks(payload?.tasks || [], payload?.activity_events || []);
+    renderLogs(payload?.streams || {});
+  }
 }
 
 function renderChannelWorkspace(payload) {
   renderWorkspaceChannelList(payload);
-  const panel = $("channelWorkspacePanel");
-  if (!panel || !isChannelWorkspaceEnabled()) return;
-  renderGlobalOverview(payload);
+  renderChannelTools();
   const selected = getSelectedChannel({ channels: payload.channels || [] }, state.workspace.selectedChannelName);
-  renderChannelHeader(payload, selected);
-
-  const body = $("workspaceModules");
-  if (!body) return;
-  if (!selected) {
-    body.innerHTML = `<div class="notice warn">No channel found. Add a channel in Settings.</div>`;
-    return;
-  }
-  const stream = getChannelStreams(payload.streams || {}, selected.name);
-  const channelTasks = getChannelTasks(payload.tasks || [], selected.name);
-  const channelEvents = getChannelEvents(payload.activity_events || [], selected.name);
-  const linked = getLinkedAccountForChannel(state.youtubeStatus, selected);
-  const canSchedule = Boolean(linked?.connected);
-  const rawCount = Number(selected.raw_playlist_count || 0);
-  const normalizedCount = Number(selected.normalized_count || 0);
-  const playlistCount = Number(selected.playlist_count || 0);
-  const activeTask = channelTasks.find((task) => task.running) || channelTasks[0] || null;
-  const latestEvent = channelEvents[0];
-
-  body.innerHTML = [
-    workspaceModuleCard(
-      "Normalize",
-      "Pick source videos and produce go-live assets for this channel.",
-      `
-        <div class="row wrap">
-          <span class="badge">${rawCount} raw</span>
-          <span class="badge">${normalizedCount} normalized</span>
-        </div>
-        <div class="row wrap">
-          <button class="pill" type="button" onclick="openSettingsForWorkspace('normalize')">Open Normalize</button>
-          <button class="pill success" type="button" onclick="startTask('normalize', '${escapeJs(selected.name)}').catch((error) => toast(error.message))">Normalize Now</button>
-          <button class="pill" type="button" onclick="startTask('validate', '${escapeJs(selected.name)}').catch((error) => toast(error.message))">Validate</button>
-        </div>
-        ${activeTask ? `<div class="meta">Latest task: ${escapeHtml(taskTitle(activeTask.name))} (${activeTask.running ? "running" : activeTask.returncode === 0 ? "success" : "failed"})</div>` : '<div class="meta">No channel tasks yet.</div>'}
-      `
-    ),
-    workspaceModuleCard(
-      "Live Output",
-      "Run, test, and monitor stream output for this channel.",
-      `
-        <div class="row wrap">
-          <span class="badge ${stream?.running ? "live" : ""}">${stream?.running ? "Live" : "Idle"}</span>
-          <span class="badge">${playlistCount} playlist override</span>
-        </div>
-        <div class="row wrap">
-          <button class="pill success" type="button" onclick="startStream('${escapeJs(selected.name)}').catch((error) => toast(error.message))">Start Channel</button>
-          <button class="pill" type="button" onclick="startTask('test-stream', '${escapeJs(selected.name)}', false).catch((error) => toast(error.message))">Test Stream</button>
-          <button class="pill danger" type="button" onclick="stopStream('${escapeJs(selected.name)}').catch((error) => toast(error.message))">Stop Channel</button>
-          <button class="pill ghost" type="button" onclick="openSettingsForWorkspace('live')">Open Live Settings</button>
-        </div>
-      `
-    ),
-    workspaceModuleCard(
-      "YouTube Mapping",
-      "Check or fix this channel's account link before schedule or verify.",
-      `
-        <div class="row wrap">
-          <span class="badge ${linked?.connected ? "live" : "warn"}">${escapeHtml(linked?.label || "Not linked")}</span>
-          <span class="badge">${escapeHtml(normalizeAccountId(selected.youtube_account_id || "") || "not linked")}</span>
-        </div>
-        <div class="row wrap">
-          <button class="pill" type="button" onclick="openSettingsForWorkspace('youtube')">Edit YouTube Mapping</button>
-          <button class="pill ghost" type="button" onclick="openSettingsForWorkspace('youtube')">Open YouTube Accounts</button>
-        </div>
-      `
-    ),
-    workspaceModuleCard(
-      "Schedule",
-      "Create broadcast safely in this channel's linked account.",
-      `
-        <div class="notice ${canSchedule ? "" : "warn"}">
-          Channel: ${escapeHtml(selected.name)} | Account: ${escapeHtml(linked?.label || "Not linked")}
-        </div>
-        <div class="row wrap">
-          <button class="pill success" type="button" onclick="openSettingsForWorkspace('youtube', '${escapeJs(selected.name)}')" ${canSchedule ? "" : "disabled"}>Open Scoped Scheduler</button>
-        </div>
-      `
-    ),
-    workspaceModuleCard(
-      "Channel Logs",
-      "Track task and API events related to the selected channel.",
-      `
-        <div class="meta">${latestEvent ? escapeHtml(String(latestEvent.details?.message || latestEvent.event_type || "Recent activity available")) : "No channel activity yet."}</div>
-        <div class="row wrap">
-          <button class="pill ghost" type="button" onclick="showTab('settings'); showSettingsTab('troubleshooting')">Open Troubleshooting</button>
-        </div>
-      `
-    ),
-  ].join("");
+  renderWorkspaceHeader(payload, selected);
+  renderWorkspaceStatusBand(payload, selected);
+  renderWorkspaceRoute(payload, state.workspace.activeRoute);
 }
 
 async function refreshChannelContext(channelName) {
@@ -1125,7 +1544,7 @@ function switchWorkspaceChannel(channelName) {
   const selected = String(channelName || "").trim();
   if (!selected || selected === state.workspace.selectedChannelName) return;
   setWorkspaceSelectedChannel(selected);
-  syncActiveSettingsChannelFromWorkspace(state.activeTab === "settings");
+  syncActiveSettingsChannelFromWorkspace(false);
   syncYoutubeSelectedAccountFromChannel(state.configData || defaultConfigData());
   state.youtubeBroadcasts = [];
   renderChannelWorkspace(state.status || {});
@@ -1152,9 +1571,19 @@ function openSettingsForWorkspace(tabName, channelName = "") {
     setWorkspaceSelectedChannel(targetName);
     syncYoutubeSelectedAccountFromChannel(config);
   }
-  showTab("settings");
-  showSettingsTab(targetTabName);
+  const route = {
+    folders: "folders",
+    normalize: "encoder",
+    youtube: "youtube",
+    liveHistory: "history",
+    troubleshooting: "troubleshoot",
+  }[targetTabName] || "encoder";
+  state.workspace.activeRoute = route;
+  applyLegacyTabView("settings");
+  state.settingsTab = targetTabName;
+  applySettingsSection(targetTabName);
   renderSettingsForms();
+  renderChannelWorkspace(state.status || {});
 }
 
 function openWorkspaceRoute(routeName) {
@@ -1163,22 +1592,40 @@ function openWorkspaceRoute(routeName) {
     toast("Select a channel first.");
     return;
   }
-  if (routeName === "control") {
-    showTab("control");
-    renderChannelWorkspace(state.status || {});
-    return;
+  setWorkspaceRoute(routeName);
+}
+
+function runRouteSideEffects(routeName) {
+  if (routeName === "history") {
+    fetchSettingsLiveHistory().catch((error) => toast(error.message));
   }
-  if (routeName === "normalize") {
-    openSettingsForWorkspace("normalize", selected);
-    return;
-  }
-  if (routeName === "live") {
-    openSettingsForWorkspace("youtube", selected);
-    return;
+  if (routeName === "encoder") {
+    refreshActiveRawFiles({ force: true }).catch((error) => toast(error.message));
   }
   if (routeName === "youtube") {
-    openSettingsForWorkspace("youtube", selected);
+    refreshYoutubeStatus()
+      .then(() => {
+        if (!state.youtubeStatus?.connected) {
+          state.youtubeBroadcasts = [];
+          state.youtubeKeyChecks = null;
+          renderYoutubeSettingsPanel(state.configData || defaultConfigData());
+          return null;
+        }
+        const selectedChannel = String(state.workspace.selectedChannelName || "").trim();
+        return refreshYoutubeBroadcasts(Boolean(selectedChannel))
+          .then(() => verifyYoutubeChannelKeys(selectedChannel));
+      })
+      .catch((error) => toast(error.message));
   }
+}
+
+function setWorkspaceRoute(routeName) {
+  const route = normalizeWorkspaceRoute(routeName);
+  state.workspace.activeRoute = route;
+  syncActiveSettingsChannelFromWorkspace(false);
+  syncYoutubeSelectedAccountFromChannel(state.configData || defaultConfigData());
+  renderChannelWorkspace(state.status || {});
+  runRouteSideEffects(route);
 }
 
 function streamKeyLabel(channel) {
@@ -2495,6 +2942,7 @@ async function loadConfigText() {
     state.configData = text ? JSON.parse(text) : defaultConfigData();
     normalizeConfigShape();
     renderSettingsForms();
+    renderWorkspaceChannelList(state.status || {});
     await loadRawFiles();
     await loadNormalizedFiles();
     if (!response.ok) {
@@ -4519,30 +4967,30 @@ async function stopStream(channel = null) {
 }
 
 function showTab(tab) {
-  state.activeTab = tab;
   state.workspace.lastSelectedByTab[tab] = state.workspace.selectedChannelName || "";
+  if (tab === "control") {
+    state.workspace.activeRoute = "overview";
+  } else if (tab === "settings" && state.workspace.activeRoute === "overview") {
+    state.workspace.activeRoute = normalizeWorkspaceRoute(Object.entries(routeToSettingsTab)
+      .find((entry) => entry[1] === state.settingsTab)?.[0] || "folders");
+  }
   if (tab === "settings") {
     syncActiveSettingsChannelFromWorkspace(true);
   }
-  $("tabControl").classList.toggle("active", tab === "control");
-  $("tabSettings").classList.toggle("active", tab === "settings");
-  $("viewControl").classList.toggle("active", tab === "control");
-  $("viewSettings").classList.toggle("active", tab === "settings");
+  applyLegacyTabView(tab);
+  renderChannelTools();
 }
 
 function showSettingsTab(tab) {
   tab = tab === "live" ? "youtube" : tab;
   state.settingsTab = tab;
-  $("settingsFoldersTab").classList.toggle("active", tab === "folders");
-  $("settingsNormalizeTab").classList.toggle("active", tab === "normalize");
-  $("settingsYoutubeTab").classList.toggle("active", tab === "youtube");
-  $("settingsLiveHistoryTab").classList.toggle("active", tab === "liveHistory");
-  $("settingsTroubleshootingTab").classList.toggle("active", tab === "troubleshooting");
-  $("settingsFoldersView").classList.toggle("active", tab === "folders");
-  $("settingsNormalizeView").classList.toggle("active", tab === "normalize");
-  $("settingsYoutubeView").classList.toggle("active", tab === "youtube");
-  $("settingsLiveHistoryView").classList.toggle("active", tab === "liveHistory");
-  $("settingsTroubleshootingView").classList.toggle("active", tab === "troubleshooting");
+  const route = Object.entries(routeToSettingsTab).find((entry) => entry[1] === tab)?.[0];
+  if (route) {
+    state.workspace.activeRoute = route;
+  }
+  applyLegacyTabView("settings");
+  applySettingsSection(tab);
+  renderChannelTools();
   if (tab === "liveHistory") {
     renderSettingsLiveHistory();
     fetchSettingsLiveHistory().catch((error) => toast(error.message));
@@ -4624,6 +5072,9 @@ document.addEventListener("click", (event) => {
     renderSettingsLiveHistory();
   }
 });
+document.addEventListener("pointermove", moveWorkspaceChannelPictureDrag);
+document.addEventListener("pointerup", stopWorkspaceChannelPictureDrag);
+document.addEventListener("pointercancel", stopWorkspaceChannelPictureDrag);
 window.addEventListener("focus", () => {
   refreshActiveRawFiles().catch((error) => toast(error.message));
 });
@@ -4653,6 +5104,15 @@ $("saveSettings").addEventListener("click", () => saveSettings().catch((error) =
 if ($("addChannelRail")) {
   $("addChannelRail").addEventListener("click", addChannel);
 }
+if ($("workspaceChannelSearch")) {
+  $("workspaceChannelSearch").addEventListener("input", (event) => {
+    state.workspace.channelSearch = event.target.value || "";
+    renderWorkspaceChannelList(state.status || {});
+  });
+}
+document.querySelectorAll("[data-route]").forEach((button) => {
+  button.addEventListener("click", () => setWorkspaceRoute(button.dataset.route));
+});
 if ($("removeChannelNormalize")) {
   $("removeChannelNormalize").addEventListener("click", removeActiveSettingsChannel);
 }
@@ -4670,6 +5130,19 @@ if ($("cancelDeleteChannel")) {
 if ($("confirmDeleteChannel")) {
   $("confirmDeleteChannel").addEventListener("click", () => confirmChannelDelete().catch((error) => toast(error.message)));
 }
+if ($("cancelWorkspaceChannelEdit")) {
+  $("cancelWorkspaceChannelEdit").addEventListener("click", closeWorkspaceChannelEdit);
+}
+if ($("saveWorkspaceChannelEditButton")) {
+  $("saveWorkspaceChannelEditButton").addEventListener("click", () => saveWorkspaceChannelEdit().catch((error) => toast(error.message)));
+}
+if ($("workspaceChannelEditDialog")) {
+  $("workspaceChannelEditDialog").addEventListener("click", (event) => {
+    if (event.target === $("workspaceChannelEditDialog")) {
+      closeWorkspaceChannelEdit();
+    }
+  });
+}
 if ($("deleteChannelDialog")) {
   $("deleteChannelDialog").addEventListener("click", (event) => {
     if (event.target === $("deleteChannelDialog")) {
@@ -4681,12 +5154,24 @@ if ($("undoRemoveChannel")) {
   $("undoRemoveChannel").addEventListener("click", () => undoRemoveChannel().catch((error) => toast(error.message)));
 }
 document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !$("workspaceChannelEditDialog")?.classList.contains("hidden")) {
+    closeWorkspaceChannelEdit();
+  }
   if (event.key === "Escape" && !$("deleteChannelDialog")?.classList.contains("hidden")) {
     closeChannelDeleteDialog();
   }
 });
-$("startAll").addEventListener("click", () => startStream().catch((error) => toast(error.message)));
-$("stopAll").addEventListener("click", () => stopStream().catch((error) => toast(error.message)));
+if ($("startAll")) {
+  $("startAll").addEventListener("click", () => {
+    const streams = state.status?.streams || {};
+    const anyRunning = Object.values(streams).some((stream) => stream?.running);
+    const action = anyRunning ? stopStream : startStream;
+    action().catch((error) => toast(error.message));
+  });
+}
+if ($("stopAll")) {
+  $("stopAll").addEventListener("click", () => stopStream().catch((error) => toast(error.message)));
+}
 if ($("workspaceVerifyAll")) {
   $("workspaceVerifyAll").addEventListener("click", () => {
     verifyYoutubeChannelKeys().catch((error) => toast(error.message));

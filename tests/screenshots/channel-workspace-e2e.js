@@ -246,12 +246,12 @@ async function captureScreenshots(page) {
   await page.screenshot({ path: path.join(OUT_DIR, "workspace-control-768.png"), fullPage: true });
   await page.setViewportSize({ width: 1490, height: 900 });
 
-  await page.locator("#railOpenNormalize").click();
+  await page.locator("#railOpenEncoder").click();
   await page.waitForSelector("#settingsNormalizeView.active");
   await page.waitForTimeout(250);
   await page.screenshot({ path: path.join(OUT_DIR, "workspace-normalize.png"), fullPage: true });
 
-  await page.locator("#railOpenLive").click();
+  await page.locator("#railOpenYoutube").click();
   await page.waitForSelector("#settingsYoutubeView.active");
   await page.waitForTimeout(250);
   await page.screenshot({ path: path.join(OUT_DIR, "workspace-live.png"), fullPage: true });
@@ -378,7 +378,7 @@ async function runUiChecks(page) {
   });
   await page.waitForTimeout(250);
 
-  await page.locator("#railOpenLive").click();
+  await page.locator("#railOpenYoutube").click();
   await page.waitForSelector("#settingsYoutubeView.active");
   await page.waitForSelector("#channelSettings .selected-live-settings");
   assert.equal(await page.locator("#channelSettings .channel-settings").count(), 1);
@@ -388,7 +388,7 @@ async function runUiChecks(page) {
 
   await page.locator("#railOpenDashboard").click();
   await page.waitForSelector("#viewControl.active");
-  const headerText = await page.locator("#workspaceChannelName").innerText();
+  const headerText = await page.locator("#workspacePageTitle").innerText();
   assert.equal(headerText.trim(), "B");
 }
 
