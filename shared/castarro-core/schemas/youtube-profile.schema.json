@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://castarro.local/schemas/youtube-profile.schema.json",
+  "title": "YoutubeProfile",
+  "type": "object",
+  "required": ["id", "channelId", "displayName", "connectionStatus", "createdAt", "updatedAt"],
+  "additionalProperties": false,
+  "properties": {
+    "id": { "type": "string", "minLength": 1 },
+    "channelId": { "type": "string", "minLength": 1 },
+    "displayName": { "type": "string", "minLength": 1 },
+    "handle": { "type": ["string", "null"] },
+    "connectionStatus": { "type": "string", "enum": ["disconnected", "connected", "wrongAccount", "expired"] },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "updatedAt": { "type": "string", "format": "date-time" }
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://castarro.local/schemas/stream-session.schema.json",
+  "title": "StreamSession",
+  "type": "object",
+  "required": ["id", "channelId", "videoAssetId", "startedAt", "status"],
+  "additionalProperties": false,
+  "properties": {
+    "id": { "type": "string", "minLength": 1 },
+    "channelId": { "type": "string", "minLength": 1 },
+    "videoAssetId": { "type": "string", "minLength": 1 },
+    "startedAt": { "type": "string", "format": "date-time" },
+    "endedAt": { "type": ["string", "null"], "format": "date-time" },
+    "status": { "type": "string", "enum": ["idle", "connecting", "live", "reconnecting", "stopped", "failed"] },
+    "exitCode": { "type": ["integer", "null"] },
+    "bytesUploaded": { "type": "integer", "minimum": 0 },
+    "averageBitrate": { "type": ["number", "null"], "minimum": 0 },
+    "failureReason": { "type": ["string", "null"] },
+    "logPath": { "type": ["string", "null"] }
+  }
+}

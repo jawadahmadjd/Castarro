@@ -6,6 +6,8 @@ dist/
 .packaged-smoke-user-data/
 *.blockmap
 *.exe
+*.apk
+*.aab
 
 # Runtime caches and generated app state
 .runtime/
@@ -22,6 +24,10 @@ config.json
 config.ready.json
 .env
 .env.*
+local.properties
+keystore.properties
+*.jks
+*.keystore
 
 # User media and generated streaming assets
 Raw Videos/

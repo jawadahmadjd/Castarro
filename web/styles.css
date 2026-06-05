@@ -1314,6 +1314,53 @@ details[open] > .channel-summary::after {
   align-items: start;
 }
 
+#channelSettings {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.youtube-go-live-card .section-head {
+  align-items: start;
+}
+
+.youtube-go-live-card .section-head .pill {
+  justify-self: end;
+}
+
+.youtube-go-live-form {
+  grid-template-columns: minmax(0, 1fr) minmax(180px, 260px);
+}
+
+#youtubeScheduleThumbnail {
+  min-height: 46px;
+  padding: 5px 12px 5px 5px;
+  font-size: 0.86rem;
+  font-weight: 600;
+  line-height: 34px;
+}
+
+#youtubeScheduleThumbnail::file-selector-button {
+  min-height: 34px;
+  margin: 0 10px 0 0;
+  padding: 0 12px;
+  border: 1px solid rgba(117, 111, 99, 0.34);
+  border-radius: 8px;
+  color: var(--ink);
+  background: rgba(255, 250, 240, 0.88);
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+#youtubeScheduleThumbnail:hover::file-selector-button {
+  background: rgba(255, 255, 255, 0.96);
+  border-color: rgba(31, 111, 98, 0.42);
+}
+
+.youtube-stream-settings-card .form-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .youtube-side-stack {
   display: grid;
   gap: var(--space-3);
@@ -1370,7 +1417,7 @@ details[open] > .channel-summary::after {
 }
 
 .youtube-schedule-form {
-  grid-template-columns: 1fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .youtube-import-box {
@@ -2155,9 +2202,15 @@ pre {
     justify-self: start;
   }
 
+  .youtube-go-live-form,
   .youtube-schedule-form,
+  .youtube-stream-settings-card .form-grid,
   .youtube-side-stack .form-grid {
     grid-template-columns: 1fr;
+  }
+
+  .youtube-go-live-card .section-head .pill {
+    justify-self: start;
   }
 
   .youtube-import-preview,
@@ -2468,6 +2521,37 @@ h1 {
   min-height: 34px;
   padding: 7px 10px;
   white-space: normal;
+}
+
+.sidebar-global-actions .pill.ghost,
+.sidebar-footer .pill.ghost {
+  background: rgba(255, 250, 240, 0.08);
+  border-color: rgba(244, 223, 173, 0.7);
+  color: #fff8ea;
+}
+
+.sidebar-global-actions .pill.ghost:hover,
+.sidebar-global-actions .pill.ghost:focus-visible,
+.sidebar-footer .pill.ghost:hover,
+.sidebar-footer .pill.ghost:focus-visible {
+  background: rgba(255, 250, 240, 0.14);
+  border-color: #f4dfad;
+  color: #ffffff;
+}
+
+.sidebar-global-actions .pill.danger,
+.sidebar-footer .pill.danger {
+  background: var(--ui-danger);
+  border-color: rgba(244, 223, 173, 0.65);
+  color: #ffffff;
+}
+
+.sidebar-global-actions .pill.danger:hover,
+.sidebar-global-actions .pill.danger:focus-visible,
+.sidebar-footer .pill.danger:hover,
+.sidebar-footer .pill.danger:focus-visible {
+  background: #b75448;
+  color: #ffffff;
 }
 
 .sidebar-global .command-notice {

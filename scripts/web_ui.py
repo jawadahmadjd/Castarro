@@ -37,6 +37,7 @@ VIDEO_EXTENSIONS = {".mp4", ".m4v", ".mov", ".flv", ".mkv"}
 THUMBNAIL_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".bmp"}
 THUMBNAIL_MAX_BYTES = 2 * 1024 * 1024
 YOUTUBE_CHANNEL_NAME_MATCH_THRESHOLD = 0.80
+UI_PORT = int(os.environ.get("STREAM_UI_PORT", "8765"))
 
 
 def windows_creation_flags(*, new_process_group: bool = False) -> int:
@@ -236,6 +237,30 @@ class AppState:
 
 
 STATE = AppState()
+
+
+def desktop_oauth_redirect_uri(configured_redirect_uri: Any = "") -> str:
+    configured = str(configured_redirect_uri or "").strip()
+    path = "/oauth2redirect"
+    try:
+        parsed = urlparse(configured)
+        if parsed.scheme in {"http", "https"} and parsed.path:
+            path = parsed.path
+        elif configured.startswith("/"):
+            path = configured
+    except Exception:
+        path = "/oauth2redirect"
+    if not path.startswith("/"):
+        path = f"/{path}"
+    return f"http://127.0.0.1:{UI_PORT}{path}"
+
+
+def active_youtube_oauth_redirect_uri(config: dict[str, Any]) -> str:
+    settings = youtube_service.merge_settings(config)
+    configured = str(settings.get("redirect_uri") or "").strip()
+    if settings.get("oauth_client_type") == "web":
+        return configured
+    return desktop_oauth_redirect_uri(configured)
 
 
 def is_client_disconnect_error(exc: BaseException) -> bool:
@@ -818,6 +843,7 @@ def youtube_status(config_name: str) -> dict[str, Any]:
 
     youtube_service.ensure_shape(config)
     settings = youtube_service.merge_settings(config)
+    active_redirect_uri = active_youtube_oauth_redirect_uri(config)
     has_credentials = youtube_service.credentials_ready(config)
     accounts = normalize_youtube_accounts(config)
     account_statuses: list[dict[str, Any]] = []
@@ -893,7 +919,8 @@ def youtube_status(config_name: str) -> dict[str, Any]:
         "has_client_credentials": has_credentials,
         "oauth_client_type": settings.get("oauth_client_type"),
         "use_pkce": bool(settings.get("use_pkce", True)),
-        "redirect_uri": settings.get("redirect_uri"),
+        "redirect_uri": active_redirect_uri,
+        "configured_redirect_uri": settings.get("redirect_uri"),
         "accounts": account_statuses,
         "default_account_id": str(settings.get("default_account_id") or ""),
         "channel_id": active.get("channel_id") if active else "",
@@ -936,6 +963,7 @@ def create_youtube_auth_start(config_name: str, account_id: str, label: str = ""
     save_config(config_name, config)
 
     settings = youtube_service.merge_settings(config)
+    auth_redirect_uri = active_youtube_oauth_redirect_uri(config)
     use_pkce = bool(settings.get("use_pkce", True))
     code_verifier = ""
     code_challenge = ""
@@ -951,12 +979,18 @@ def create_youtube_auth_start(config_name: str, account_id: str, label: str = ""
             "account_id": str(account.get("id") or ""),
             "channel_name": expected_channel_name,
             "code_verifier": code_verifier,
+            "redirect_uri": auth_redirect_uri,
         }
     return {
         "ok": True,
         "state": oauth_state,
         "account_id": str(account.get("id") or ""),
-        "url": youtube_service.build_auth_url(config, oauth_state, code_challenge=code_challenge or None),
+        "url": youtube_service.build_auth_url(
+            config,
+            oauth_state,
+            auth_redirect_uri,
+            code_challenge=code_challenge or None,
+        ),
     }
 
 
@@ -1040,7 +1074,14 @@ def handle_youtube_oauth_callback(query: dict[str, list[str]]) -> str:
         account = ensure_youtube_account(config, account_id)
         scoped_config = account_config_view(config, account)
         code_verifier = str(state_payload.get("code_verifier") or "").strip() or None
-        youtube_service.exchange_code_for_tokens(ROOT, scoped_config, auth_code, code_verifier=code_verifier)
+        oauth_redirect_uri = str(state_payload.get("redirect_uri") or "").strip() or active_youtube_oauth_redirect_uri(scoped_config)
+        youtube_service.exchange_code_for_tokens(
+            ROOT,
+            scoped_config,
+            auth_code,
+            oauth_redirect_uri,
+            code_verifier=code_verifier,
+        )
         access_token, _tokens = youtube_service.valid_access_token(ROOT, scoped_config)
         profile = youtube_service.connected_account_profile(access_token)
         mismatch_message = youtube_profile_mismatch_message(expected_channel_name, profile) if expected_channel_name else ""
@@ -2480,7 +2521,7 @@ def shutdown_tasks() -> None:
 
 
 def main() -> int:
-    global DEFAULT_CONFIG
+    global DEFAULT_CONFIG, UI_PORT
     runtime_paths.ensure_data_root()
     migrated = runtime_paths.migrate_legacy_layout()
     if migrated:
@@ -2494,6 +2535,7 @@ def main() -> int:
 
     port = int(os.environ.get("STREAM_UI_PORT", "8765"))
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    UI_PORT = int(server.server_address[1])
 
     def handle_stop(_signum: int, _frame: Any) -> None:
         print("\nStopping UI, tasks, and streams...")
@@ -2504,7 +2546,7 @@ def main() -> int:
     signal.signal(signal.SIGINT, handle_stop)
     signal.signal(signal.SIGTERM, handle_stop)
 
-    print(f"Castarro UI running at http://127.0.0.1:{port}")
+    print(f"Castarro UI running at http://127.0.0.1:{UI_PORT}")
     print("Press Ctrl+C to stop the UI and any streams started from it.")
     try:
         server.serve_forever()

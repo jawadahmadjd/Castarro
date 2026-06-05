@@ -1,4 +1,4 @@
-name: Release Windows App
+name: Release Apps
 
 on:
   push:
@@ -14,8 +14,153 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  prepare:
+    name: Prepare release version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      android_version_code: ${{ steps.version.outputs.android_version_code }}
+      tag: ${{ steps.version.outputs.tag }}
+      exists: ${{ steps.version.outputs.exists }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Read package version
+        id: version
+        shell: pwsh
+        run: |
+          $Package = Get-Content -Raw package.json | ConvertFrom-Json
+          $Version = [string]$Package.version
+          if ($Version -notmatch '^(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)(?:[-+].*)?$') {
+            throw "package.json version '$Version' must start with semantic version major.minor.patch for Android versionCode generation."
+          }
+
+          $Major = [int]$Matches.major
+          $Minor = [int]$Matches.minor
+          $Patch = [int]$Matches.patch
+          $AndroidVersionCode = ($Major * 1000000) + ($Minor * 1000) + $Patch
+          $Tag = "v$Version"
+          $Existing = git ls-remote --tags origin "refs/tags/$Tag"
+          $Exists = if ([string]::IsNullOrWhiteSpace($Existing)) { "false" } else { "true" }
+
+          "version=$Version" >> $env:GITHUB_OUTPUT
+          "android_version_code=$AndroidVersionCode" >> $env:GITHUB_OUTPUT
+          "tag=$Tag" >> $env:GITHUB_OUTPUT
+          "exists=$Exists" >> $env:GITHUB_OUTPUT
+
+          if ($Exists -eq "true") {
+            Write-Host "::notice::Release $Tag already exists. Bump package.json version to publish another auto-update."
+          }
+
+  android-release-apk:
+    name: Build signed Android release APK
+    needs: prepare
+    if: needs.prepare.outputs.exists != 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mobile/android/CastarroMobile
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Make Gradle wrapper executable
+        run: chmod +x gradlew
+
+      - name: Validate Android signing secrets
+        shell: bash
+        env:
+          CASTARRO_ANDROID_KEYSTORE_BASE64: ${{ secrets.CASTARRO_ANDROID_KEYSTORE_BASE64 }}
+          CASTARRO_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.CASTARRO_ANDROID_KEYSTORE_PASSWORD }}
+          CASTARRO_ANDROID_KEY_ALIAS: ${{ secrets.CASTARRO_ANDROID_KEY_ALIAS }}
+          CASTARRO_ANDROID_KEY_PASSWORD: ${{ secrets.CASTARRO_ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for name in \
+            CASTARRO_ANDROID_KEYSTORE_BASE64 \
+            CASTARRO_ANDROID_KEYSTORE_PASSWORD \
+            CASTARRO_ANDROID_KEY_ALIAS \
+            CASTARRO_ANDROID_KEY_PASSWORD
+          do
+            if [ -z "${!name:-}" ]; then
+              missing+=("$name")
+            fi
+          done
+
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::Missing Android release signing secret(s): ${missing[*]}. Configure these repository secrets before publishing a GitHub Release with an APK."
+            exit 1
+          fi
+
+      - name: Write Android signing config
+        shell: bash
+        env:
+          CASTARRO_ANDROID_KEYSTORE_BASE64: ${{ secrets.CASTARRO_ANDROID_KEYSTORE_BASE64 }}
+          CASTARRO_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.CASTARRO_ANDROID_KEYSTORE_PASSWORD }}
+          CASTARRO_ANDROID_KEY_ALIAS: ${{ secrets.CASTARRO_ANDROID_KEY_ALIAS }}
+          CASTARRO_ANDROID_KEY_PASSWORD: ${{ secrets.CASTARRO_ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          keystore_path="$RUNNER_TEMP/castarro-release.jks"
+          printf '%s' "$CASTARRO_ANDROID_KEYSTORE_BASE64" | base64 --decode > "$keystore_path"
+          cat > keystore.properties <<EOF
+          storeFile=$keystore_path
+          storePassword=$CASTARRO_ANDROID_KEYSTORE_PASSWORD
+          keyAlias=$CASTARRO_ANDROID_KEY_ALIAS
+          keyPassword=$CASTARRO_ANDROID_KEY_PASSWORD
+          EOF
+
+      - name: Run Android unit tests
+        run: |
+          ./gradlew :app:testReleaseUnitTest --no-daemon \
+            -PcastarroVersionName=${{ needs.prepare.outputs.version }} \
+            -PcastarroVersionCode=${{ needs.prepare.outputs.android_version_code }}
+
+      - name: Build signed release APK
+        run: |
+          ./gradlew :app:assembleRelease --no-daemon \
+            -PcastarroVersionName=${{ needs.prepare.outputs.version }} \
+            -PcastarroVersionCode=${{ needs.prepare.outputs.android_version_code }}
+
+      - name: Stage Android release asset
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ needs.prepare.outputs.version }}"
+          mkdir -p release-artifacts
+          cp app/build/outputs/apk/release/app-release.apk "release-artifacts/Castarro-Android-$version.apk"
+          sha256sum "release-artifacts/Castarro-Android-$version.apk" > "release-artifacts/Castarro-Android-$version.apk.sha256"
+
+      - name: Upload Android release APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: castarro-android-release-apk
+          path: mobile/android/CastarroMobile/release-artifacts/*
+          if-no-files-found: error
+          retention-days: 7
+
   release:
-    name: Build and publish Windows release
+    name: Build and publish Windows + Android release
+    needs:
+      - prepare
+      - android-release-apk
+    if: needs.prepare.outputs.exists != 'true'
     runs-on: windows-2022
     env:
       CSC_IDENTITY_AUTO_DISCOVERY: false
@@ -28,6 +173,15 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Use prepared release version
+        id: version
+        shell: pwsh
+        run: |
+          "version=${{ needs.prepare.outputs.version }}" >> $env:GITHUB_OUTPUT
+          "android_version_code=${{ needs.prepare.outputs.android_version_code }}" >> $env:GITHUB_OUTPUT
+          "tag=${{ needs.prepare.outputs.tag }}" >> $env:GITHUB_OUTPUT
+          "exists=${{ needs.prepare.outputs.exists }}" >> $env:GITHUB_OUTPUT
+
       - name: Set up Node.js
         uses: actions/setup-node@v5
         with:
@@ -36,24 +190,6 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
-
-      - name: Read package version
-        id: version
-        shell: pwsh
-        run: |
-          $Package = Get-Content -Raw package.json | ConvertFrom-Json
-          $Tag = "v$($Package.version)"
-          $Existing = git ls-remote --tags origin "refs/tags/$Tag"
-          $Exists = if ([string]::IsNullOrWhiteSpace($Existing)) { "false" } else { "true" }
-          "version=$($Package.version)" >> $env:GITHUB_OUTPUT
-          "tag=$Tag" >> $env:GITHUB_OUTPUT
-          "exists=$Exists" >> $env:GITHUB_OUTPUT
-
-      - name: Skip existing release
-        if: steps.version.outputs.exists == 'true'
-        shell: pwsh
-        run: |
-          Write-Host "::notice::Release ${{ steps.version.outputs.tag }} already exists. Bump package.json version to publish another auto-update."
 
       - name: Cache Electron build tools
         if: steps.version.outputs.exists != 'true'
@@ -196,6 +332,13 @@ jobs:
         shell: pwsh
         run: npm run smoke:installer
 
+      - name: Download Android release APK
+        if: steps.version.outputs.exists != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: castarro-android-release-apk
+          path: dist
+
       - name: Create version tag
         if: steps.version.outputs.exists != 'true'
         shell: pwsh
@@ -211,6 +354,15 @@ jobs:
         with:
           tag_name: ${{ steps.version.outputs.tag }}
           name: Castarro ${{ steps.version.outputs.version }}
+          body: |
+            ## Downloads
+
+            - Windows desktop: `Castarro-Setup-${{ steps.version.outputs.version }}.exe`
+            - Android sideload APK: `Castarro-Android-${{ steps.version.outputs.version }}.apk`
+
+            The Android APK is a signed release build for direct sideloading. Android may ask the user to allow installs from the browser or file manager before installing it.
+
+            Android MVP note: the mobile app uses manual RTMP/RTMPS stream settings. YouTube OAuth/account mode remains a desktop feature for this release.
           generate_release_notes: true
           make_latest: true
           fail_on_unmatched_files: true
@@ -218,3 +370,5 @@ jobs:
             dist/Castarro-Setup-${{ steps.version.outputs.version }}.exe
             dist/Castarro-Setup-${{ steps.version.outputs.version }}.exe.blockmap
             dist/latest.yml
+            dist/Castarro-Android-${{ steps.version.outputs.version }}.apk
+            dist/Castarro-Android-${{ steps.version.outputs.version }}.apk.sha256

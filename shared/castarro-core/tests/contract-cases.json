@@ -1,0 +1,33 @@
+{
+  "schemaCases": [
+    {
+      "name": "ready H.264/AAC compatibility fixture",
+      "schema": "schemas/compatibility-report.schema.json",
+      "fixture": "fixtures/compatibility/ready-h264-aac-1080p30.json"
+    },
+    {
+      "name": "blocked HEVC compatibility fixture",
+      "schema": "schemas/compatibility-report.schema.json",
+      "fixture": "fixtures/compatibility/blocked-hevc.json"
+    },
+    {
+      "name": "blocked Opus audio compatibility fixture",
+      "schema": "schemas/compatibility-report.schema.json",
+      "fixture": "fixtures/compatibility/blocked-opus-audio.json"
+    },
+    {
+      "name": "manual RTMPS stream profile fixture",
+      "schema": "schemas/stream-profile.schema.json",
+      "fixture": "fixtures/stream-profiles/manual-rtmps.json"
+    },
+    {
+      "name": "YouTube account stream profile fixture",
+      "schema": "schemas/stream-profile.schema.json",
+      "fixture": "fixtures/stream-profiles/youtube-account.json"
+    }
+  ],
+  "futureAndroidTask": {
+    "path": "mobile/android/CastarroMobile/app/src/test/java/com/castarro/mobile/SharedCoreFixtureTest.kt",
+    "description": "Load these same fixtures in Kotlin tests once the Android Gradle environment is available."
+  }
+}

@@ -1,0 +1,47 @@
+{
+  "features": [
+    {
+      "id": "manual_rtmps_streaming",
+      "scope": "shared",
+      "desktop": true,
+      "android": true,
+      "ios": false
+    },
+    {
+      "id": "copy_mode_compatibility_check",
+      "scope": "shared",
+      "desktop": true,
+      "android": true,
+      "ios": false
+    },
+    {
+      "id": "stream_session_history",
+      "scope": "shared",
+      "desktop": true,
+      "android": true,
+      "ios": false
+    },
+    {
+      "id": "desktop_folder_normalization",
+      "scope": "desktopOnly",
+      "desktop": true,
+      "android": false,
+      "ios": false
+    },
+    {
+      "id": "android_foreground_stream_notification",
+      "scope": "mobileOnly",
+      "desktop": false,
+      "android": true,
+      "ios": false
+    },
+    {
+      "id": "youtube_account_mode",
+      "scope": "shared",
+      "desktop": true,
+      "android": false,
+      "ios": false,
+      "status": "future"
+    }
+  ]
+}

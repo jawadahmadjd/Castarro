@@ -1,0 +1,18 @@
+{
+  "isReady": false,
+  "videoCodec": "hevc",
+  "audioCodec": "aac",
+  "container": "mov",
+  "pixelFormat": "yuv420p10le",
+  "width": 3840,
+  "height": 2160,
+  "fps": 30,
+  "audioSampleRate": 48000,
+  "keyframeIntervalSeconds": 2,
+  "warnings": [],
+  "blockingIssues": [
+    "HEVC video cannot be sent with RTMP copy mode."
+  ],
+  "recommendedFix": "Open Castarro Desktop and normalize this video first.",
+  "statusLabel": "Needs desktop prep"
+}

@@ -7,6 +7,7 @@ import copy
 from pathlib import Path
 import sys
 import tempfile
+from urllib.parse import parse_qs, urlparse
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -448,6 +449,88 @@ def assert_auth_start_creates_standalone_slot_for_unlinked_channel() -> None:
     assert account.get("expected_channel_name") == "Inside Us Hindi"
 
 
+def assert_auth_start_uses_runtime_desktop_redirect_uri() -> None:
+    config = make_config()
+    config["youtube"]["redirect_uri"] = "http://localhost:8765/api/youtube/oauth/callback"
+    captured: dict = {"saved": None}
+    payload: dict = {}
+    state_payload: dict = {}
+
+    original_load = web_ui.load_config_or_none
+    original_save = web_ui.save_config
+    original_ui_port = web_ui.UI_PORT
+    web_ui.load_config_or_none = lambda _name: (config, None)
+    web_ui.save_config = lambda _name, updated: captured.__setitem__("saved", copy.deepcopy(updated))
+    web_ui.UI_PORT = 54321
+    try:
+        payload = web_ui.create_youtube_auth_start("config.ready.json", "", "Sports Desk", "B")
+        with web_ui.STATE.lock:
+            state_payload = copy.deepcopy(web_ui.STATE.youtube_oauth_states.get(str(payload.get("state") or ""), {}))
+    finally:
+        web_ui.load_config_or_none = original_load
+        web_ui.save_config = original_save
+        web_ui.UI_PORT = original_ui_port
+        with web_ui.STATE.lock:
+            web_ui.STATE.youtube_oauth_states.pop(str(payload.get("state") or ""), None)
+
+    query = parse_qs(urlparse(payload["url"]).query)
+    expected_redirect = "http://127.0.0.1:54321/api/youtube/oauth/callback"
+    assert query.get("redirect_uri") == [expected_redirect]
+    assert state_payload.get("redirect_uri") == expected_redirect
+    assert captured["saved"]["youtube"]["redirect_uri"] == "http://localhost:8765/api/youtube/oauth/callback"
+
+
+def assert_oauth_callback_exchanges_with_stored_redirect_uri() -> None:
+    config = make_config()
+    config["channels"][1]["name"] = "Sports Desk"
+    captured: dict = {"saved": None, "redirect_uri": "", "code_verifier": ""}
+    state_key = "test-state-runtime-redirect"
+
+    original_load = web_ui.load_config_or_none
+    original_save = web_ui.save_config
+    original_exchange = web_ui.youtube_service.exchange_code_for_tokens
+    original_valid_token = web_ui.youtube_service.valid_access_token
+    original_profile = web_ui.youtube_service.connected_account_profile
+
+    def fake_exchange(_root: Path, _config: dict, _code: str, redirect_uri: str | None = None, **kwargs: object) -> None:
+        captured["redirect_uri"] = redirect_uri
+        captured["code_verifier"] = kwargs.get("code_verifier")
+
+    web_ui.load_config_or_none = lambda _name: (config, None)
+    web_ui.save_config = lambda _name, updated: captured.__setitem__("saved", copy.deepcopy(updated))
+    web_ui.youtube_service.exchange_code_for_tokens = fake_exchange
+    web_ui.youtube_service.valid_access_token = lambda *_args, **_kwargs: ("token", {})
+    web_ui.youtube_service.connected_account_profile = lambda _token: {
+        "channel_id": "yt-sports",
+        "channel_title": "Sports Desk",
+        "channel_handle": "@sportsdesk",
+    }
+
+    with web_ui.STATE.lock:
+        web_ui.STATE.youtube_oauth_states[state_key] = {
+            "created_at": web_ui.time.time(),
+            "config_name": "config.ready.json",
+            "account_id": "acct-b",
+            "channel_name": "Sports Desk",
+            "code_verifier": "verifier-123",
+            "redirect_uri": "http://127.0.0.1:54321/oauth2redirect",
+        }
+    try:
+        html = web_ui.handle_youtube_oauth_callback({"state": [state_key], "code": ["auth-code"]})
+    finally:
+        web_ui.load_config_or_none = original_load
+        web_ui.save_config = original_save
+        web_ui.youtube_service.exchange_code_for_tokens = original_exchange
+        web_ui.youtube_service.valid_access_token = original_valid_token
+        web_ui.youtube_service.connected_account_profile = original_profile
+        with web_ui.STATE.lock:
+            web_ui.STATE.youtube_oauth_states.pop(state_key, None)
+
+    assert "Connected to Sports Desk" in html
+    assert captured["redirect_uri"] == "http://127.0.0.1:54321/oauth2redirect"
+    assert captured["code_verifier"] == "verifier-123"
+
+
 def assert_history_and_activity_are_channel_specific() -> None:
     original_root = app_db.ROOT
     original_db_path = app_db.DB_PATH
@@ -493,6 +576,8 @@ def main() -> int:
     assert_oauth_callback_links_selected_channel()
     assert_auth_start_reuses_channel_account_slot()
     assert_auth_start_creates_standalone_slot_for_unlinked_channel()
+    assert_auth_start_uses_runtime_desktop_redirect_uri()
+    assert_oauth_callback_exchanges_with_stored_redirect_uri()
     assert_history_and_activity_are_channel_specific()
     print("channel_workspace_contract_test: PASS")
     return 0

@@ -1,0 +1,45 @@
+{
+  "color": {
+    "background": "#F4F0E8",
+    "surface": "#FFFAF0",
+    "surfaceSoft": "#FBF2DF",
+    "navigationDark": "#2F2414",
+    "navigationSoft": "#4B3821",
+    "ink": "#2A241B",
+    "muted": "#766B59",
+    "line": "#E2D5BF",
+    "gold": "#D99A32",
+    "goldSoft": "#F4DFAD",
+    "green": "#2F7A55",
+    "tealDark": "#1E3430",
+    "danger": "#A9493D",
+    "warning": "#C97926"
+  },
+  "radius": {
+    "tool": 8,
+    "sheet": 20
+  },
+  "spacing": {
+    "xs": 4,
+    "sm": 8,
+    "md": 12,
+    "lg": 16,
+    "xl": 24
+  },
+  "typography": {
+    "appTitleSp": 22,
+    "screenTitleSp": 24,
+    "cardTitleSp": 16,
+    "bodySp": 14,
+    "metadataSp": 12,
+    "buttonSp": 14
+  },
+  "statusTone": {
+    "ready": "green",
+    "warning": "gold",
+    "blocked": "danger",
+    "live": "green",
+    "reconnecting": "gold",
+    "failed": "danger"
+  }
+}

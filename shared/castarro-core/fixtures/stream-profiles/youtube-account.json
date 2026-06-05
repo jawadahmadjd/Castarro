@@ -1,0 +1,13 @@
+{
+  "id": "profile-youtube-account",
+  "channelId": "channel-inside-us",
+  "videoAssetId": "video-ready-1080p30",
+  "mode": "youtubeAccount",
+  "rtmpServerUrl": null,
+  "streamKeySecretRef": null,
+  "youtubeBroadcastId": "youtube-broadcast-placeholder",
+  "loopEnabled": false,
+  "restartOnExit": true,
+  "createdAt": "2026-06-04T00:00:00Z",
+  "updatedAt": "2026-06-04T00:00:00Z"
+}

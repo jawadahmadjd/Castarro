@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
 Automate release push flow for Castarro:
-1) Optional local release preflight check
+1) Optional local desktop + mobile release preflight checks
 2) Version bump in package.json (+ package-lock.json)
 3) Commit and push branch
 
 GitHub Actions workflow on main then:
 - checks whether tag v<version> exists
-- builds and publishes release when version is new
+- builds and publishes Windows installer + signed Android APK when version is new
 """
 
 from __future__ import annotations
@@ -176,9 +176,9 @@ def bump_version(
     return new_version
 
 
-def run_build_check(skip: bool) -> None:
+def run_desktop_build_check(skip: bool) -> None:
     if skip:
-        print("[info] Skipping release preflight check.")
+        print("[info] Skipping desktop release preflight check.")
         return
     cmd = ["npm.cmd" if os.name == "nt" else "npm", "run", "release:check"]
     env = None
@@ -202,6 +202,14 @@ def run_build_check(skip: bool) -> None:
                 f"Current value: {smoke_root}"
             ) from exc
     run(cmd, env=env)
+
+
+def run_mobile_build_check(skip: bool) -> None:
+    if skip:
+        print("[info] Skipping mobile release preflight check.")
+        return
+    cmd = ["npm.cmd" if os.name == "nt" else "npm", "run", "verify:mobile"]
+    run(cmd)
 
 
 def ensure_remote_tag_absent(remote: str, tag: str) -> None:
@@ -284,7 +292,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--no-build-check",
         action="store_true",
-        help="Skip running `npm run release:check` before push.",
+        help="Skip running desktop and mobile preflight checks before push.",
+    )
+    parser.add_argument(
+        "--no-mobile-check",
+        action="store_true",
+        help="Skip only the mobile preflight check (`npm run verify:mobile`).",
     )
     parser.add_argument(
         "--dry-run",
@@ -307,8 +320,10 @@ def main() -> int:
 
     stage_all = not args.no_stage_all
     run_check = not args.no_build_check and read_bool_env("PUSH_RUN_BUILD_CHECK", True)
+    run_mobile_check = run_check and not args.no_mobile_check and read_bool_env("PUSH_RUN_MOBILE_CHECK", True)
     if args.no_build_check:
         run_check = False
+        run_mobile_check = False
 
     if args.dry_run:
         target = resolve_target_version(
@@ -323,11 +338,14 @@ def main() -> int:
         print(f"  - remote: {args.remote}")
         print(f"  - version: {target}")
         print(f"  - stage_all: {stage_all}")
-        print(f"  - preflight_check: {run_check}")
-        print("  - tags: handled by GitHub Action on main push")
+        print(f"  - desktop_preflight_check: {run_check}")
+        print(f"  - mobile_preflight_check: {run_mobile_check}")
+        print("  - tags/assets: handled by GitHub Action on main push")
+        print("  - release assets: Windows installer + signed Android APK")
         return 0
 
-    run_build_check(skip=not run_check)
+    run_desktop_build_check(skip=not run_check)
+    run_mobile_build_check(skip=not run_mobile_check)
     new_version = bump_version(
         current_version=old_version,
         version=args.version,
@@ -350,7 +368,7 @@ def main() -> int:
     print(f"[success] Commit pushed to {args.remote}/{branch}")
     print(
         f"[info] GitHub Action on '{branch}' should build and publish {expected_tag} "
-        "if workflow checks pass."
+        "with Windows installer + signed Android APK if workflow checks pass."
     )
     return 0
 

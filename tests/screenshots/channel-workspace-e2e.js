@@ -195,6 +195,11 @@ function writeFixtureData(tempRoot) {
     fs.mkdirSync(rawDir, { recursive: true });
     fs.mkdirSync(goLiveDir, { recursive: true });
     fs.writeFileSync(path.join(rawDir, `video-${name.toLowerCase()}.mp4`), Buffer.from("fixture", "utf8"));
+    if (name === "B") {
+      for (let index = 1; index <= 24; index += 1) {
+        fs.writeFileSync(path.join(rawDir, `scroll-fixture-${String(index).padStart(2, "0")}.mp4`), Buffer.from("fixture", "utf8"));
+      }
+    }
   }
 }
 
@@ -260,9 +265,13 @@ async function captureScreenshots(page) {
   await page.waitForSelector("#settingsYoutubeView.active");
   await page.waitForTimeout(250);
   await page.screenshot({ path: path.join(OUT_DIR, "workspace-youtube.png"), fullPage: true });
+  await page.setViewportSize({ width: 390, height: 980 });
+  await page.waitForTimeout(250);
+  await page.screenshot({ path: path.join(OUT_DIR, "workspace-youtube-mobile.png"), fullPage: true });
+  await page.setViewportSize({ width: 1490, height: 900 });
 }
 
-async function runUiChecks(page) {
+async function runUiChecks(page, tempRoot) {
   await page.goto(URL, { waitUntil: "networkidle" });
   await page.waitForSelector("#channelWorkspaceRail:not(.hidden)");
 
@@ -271,6 +280,49 @@ async function runUiChecks(page) {
   const activeRailLabel = await page.locator("#channelWorkspaceRail .workspace-channel-item.active .channel-name").innerText();
   assert.equal(activeRailLabel.trim(), "B");
 
+  await page.locator("#railOpenFolders").click();
+  await page.waitForSelector("#settingsFoldersView.active");
+  const statusRoot = await page.evaluate(() => state.status.root);
+  assert.equal(
+    await page.locator('[data-default-field="raw_dir"]').inputValue(),
+    path.join(statusRoot || tempRoot, "Raw Videos")
+  );
+  assert.equal(
+    await page.locator('[data-default-field="normalized_dir"]').inputValue(),
+    path.join(statusRoot || tempRoot, "Go Live")
+  );
+  assert.equal(
+    await page.locator('[data-default-field="log_dir"]').inputValue(),
+    path.join(statusRoot || tempRoot, "logs")
+  );
+
+  await page.locator("#railOpenEncoder").click();
+  await page.waitForSelector("#settingsNormalizeView.active");
+  await page.locator('[data-normalize-field="video_encoder"]').selectOption("h264_nvenc");
+  await page.locator('[data-normalize-field="x264_preset"]').selectOption("p5");
+  await page.waitForTimeout(3000);
+  assert.equal(await page.locator('[data-normalize-field="x264_preset"]').inputValue(), "p5");
+  await page.locator("#workspacePageTitle").click();
+  await page.evaluate(() => refresh());
+  await page.waitForTimeout(250);
+  assert.equal(await page.locator('[data-normalize-field="x264_preset"]').inputValue(), "p5");
+
+  const rawList = page.locator("#normalizationChannels .file-picker .file-list");
+  await rawList.waitFor();
+  await page.waitForFunction((selector) => {
+    const node = document.querySelector(selector);
+    return node && node.scrollHeight > node.clientHeight;
+  }, "#normalizationChannels .file-picker .file-list");
+  const beforeScroll = await rawList.evaluate((node) => {
+    node.scrollTop = node.scrollHeight;
+    return node.scrollTop;
+  });
+  assert.ok(beforeScroll > 0);
+  await page.evaluate(() => renderSettingsForms());
+  await page.waitForTimeout(100);
+  const afterScroll = await rawList.evaluate((node) => node.scrollTop);
+  assert.ok(afterScroll >= beforeScroll - 2, `raw file list scroll should be preserved (${beforeScroll} -> ${afterScroll})`);
+
   await page.locator("#railOpenYoutube").click();
   await page.waitForSelector("#settingsYoutubeView.active");
   assert.equal(await page.locator("#youtubeAccountSlot").count(), 0);
@@ -278,6 +330,21 @@ async function runUiChecks(page) {
   assert.equal(await page.getByRole("button", { name: "Add Slot" }).count(), 0);
   assert.equal(await page.locator("#youtubeScheduleChannel").count(), 0);
   assert.equal(await page.locator("#youtubeScheduleThumbnail").count(), 1);
+  await page.getByRole("heading", { name: "Go Live" }).waitFor();
+  await page.getByRole("heading", { name: "YouTube Account" }).waitFor();
+  await page.getByRole("heading", { name: "Stream Settings" }).waitFor();
+  await page.getByRole("heading", { name: "Schedule Stream" }).waitFor();
+  await page.getByRole("heading", { name: "Videos" }).waitFor();
+  await page.getByRole("heading", { name: "Upcoming Streams" }).waitFor();
+  const youtubeHeadings = await page.locator("#youtubeSettingsPanel h3").evaluateAll((nodes) => (
+    nodes.map((node) => node.textContent.trim()).filter(Boolean)
+  ));
+  const liveFlowOrder = ["Go Live", "Stream Settings", "Videos", "Schedule Stream", "Upcoming Streams"];
+  const liveFlowIndexes = liveFlowOrder.map((label) => youtubeHeadings.indexOf(label));
+  assert.deepEqual(liveFlowIndexes, [...liveFlowIndexes].sort((a, b) => a - b));
+  assert.equal(liveFlowIndexes.every((index) => index >= 0), true);
+  assert.equal(await page.locator("#youtubeScheduleEnd").count(), 1);
+  assert.equal(await page.locator("#youtubeScheduleDuration").count(), 0);
   assert.equal(await page.locator(".youtube-connection-summary").count(), 1);
   assert.equal(await page.locator(".youtube-account-row").count(), 0);
   await page.evaluate(() => {
@@ -363,12 +430,28 @@ async function runUiChecks(page) {
 
   await page.evaluate(() => {
     setWorkspaceSelectedChannel("A");
+    state.youtubeKeyChecks = {
+      checks: [
+        {
+          channel: "A",
+          ok: true,
+          message: "Configured stream key matches the connected YouTube account.",
+          account_label: "Account A",
+          account_subscriber_count: 162000,
+          account_hidden_subscriber_count: false,
+          stream_key_suffix: "9145",
+          match_source: "youtube_stream_id",
+        },
+      ],
+    };
     renderYoutubeSettingsPanel(state.configData);
     renderChannelWorkspace(state.status);
   });
   await page.waitForTimeout(250);
   await page.screenshot({ path: path.join(OUT_DIR, "workspace-youtube-connected-state.png"), fullPage: true });
   await page.locator(".youtube-connection-summary .badge", { hasText: "Connected" }).waitFor();
+  await page.locator(".youtube-connection-summary .badge", { hasText: "Stream key matched" }).waitFor();
+  await page.locator(".youtube-connection-summary .badge", { hasText: "Key ends: 9145" }).waitFor();
   assert.equal(await page.getByRole("button", { name: "Disconnect", exact: true }).isEnabled(), true);
 
   await page.evaluate(() => {
@@ -384,7 +467,8 @@ async function runUiChecks(page) {
   assert.equal(await page.locator("#channelSettings .channel-settings").count(), 1);
   assert.equal(await page.locator("#channelSettings details.channel-settings").count(), 0);
   const selectedLiveCard = await page.locator("#channelSettings .selected-live-settings h3").first().innerText();
-  assert.equal(selectedLiveCard.trim(), "B");
+  assert.equal(selectedLiveCard.trim(), "Stream Settings");
+  assert.equal(await page.locator(".selected-live-videos").count(), 1);
 
   await page.locator("#railOpenDashboard").click();
   await page.waitForSelector("#viewControl.active");
@@ -437,7 +521,7 @@ async function runApiChecks() {
     const context = await browser.newContext({ viewport: { width: 1490, height: 900 } });
     const page = await context.newPage();
     await captureScreenshots(page);
-    await runUiChecks(page);
+    await runUiChecks(page, tempRoot);
     await runApiChecks();
     await browser.close();
     console.log("channel-workspace-e2e: PASS");

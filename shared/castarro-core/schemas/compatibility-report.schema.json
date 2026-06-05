@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://castarro.local/schemas/compatibility-report.schema.json",
+  "title": "CompatibilityReport",
+  "type": "object",
+  "required": [
+    "isReady",
+    "videoCodec",
+    "audioCodec",
+    "container",
+    "warnings",
+    "blockingIssues",
+    "recommendedFix",
+    "statusLabel"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "isReady": { "type": "boolean" },
+    "videoCodec": { "type": "string" },
+    "audioCodec": { "type": "string" },
+    "container": { "type": "string" },
+    "pixelFormat": { "type": ["string", "null"] },
+    "width": { "type": ["integer", "null"], "minimum": 0 },
+    "height": { "type": ["integer", "null"], "minimum": 0 },
+    "fps": { "type": ["number", "null"], "minimum": 0 },
+    "audioSampleRate": { "type": ["integer", "null"], "minimum": 0 },
+    "keyframeIntervalSeconds": { "type": ["number", "null"], "minimum": 0 },
+    "warnings": { "type": "array", "items": { "type": "string" } },
+    "blockingIssues": { "type": "array", "items": { "type": "string" } },
+    "recommendedFix": { "type": ["string", "null"] },
+    "statusLabel": { "type": "string", "enum": ["Ready", "Needs desktop prep"] }
+  }
+}

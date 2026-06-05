@@ -1,0 +1,762 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Castarro Mobile Skin</title>
+    <style>
+      :root {
+        --bg: #f4f0e8;
+        --surface: #fffaf0;
+        --surface-soft: #fbf2df;
+        --nav: #2f2414;
+        --nav-soft: #4b3821;
+        --ink: #2a241b;
+        --muted: #766b59;
+        --line: #e2d5bf;
+        --gold: #d99a32;
+        --gold-soft: #f4dfad;
+        --green: #2f7a55;
+        --teal: #1e3430;
+        --danger: #a9493d;
+        --warning: #c97926;
+        --radius: 8px;
+        --shadow: 0 20px 54px rgba(58, 43, 20, 0.16);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        background: var(--bg);
+        color: var(--ink);
+        font-family: "Segoe UI Variable Text", "Segoe UI", Arial, sans-serif;
+      }
+
+      .mock-page {
+        width: min(1180px, calc(100% - 32px));
+        margin: 28px auto;
+        display: grid;
+        gap: 24px;
+      }
+
+      .mock-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: end;
+        gap: 18px;
+      }
+
+      .mock-header h1 {
+        margin: 0 0 6px;
+        font-size: 30px;
+        letter-spacing: 0;
+      }
+
+      .mock-header p {
+        margin: 0;
+        color: var(--muted);
+        font-weight: 650;
+      }
+
+      .screen-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+        gap: 24px;
+        align-items: start;
+      }
+
+      .phone {
+        max-width: 360px;
+        width: 100%;
+        justify-self: center;
+        border: 1px solid rgba(47, 36, 20, 0.18);
+        border-radius: 28px;
+        padding: 10px;
+        background: #17130e;
+        box-shadow: var(--shadow);
+      }
+
+      .screen {
+        min-height: 720px;
+        border-radius: 20px;
+        overflow: hidden;
+        background: var(--bg);
+        display: grid;
+        grid-template-rows: auto minmax(0, 1fr) auto;
+      }
+
+      .app-top {
+        background: var(--nav);
+        color: #fff8ea;
+        padding: 18px 16px 14px;
+        display: grid;
+        gap: 12px;
+      }
+
+      .brand-row,
+      .channel-row,
+      .card-head,
+      .metric-row,
+      .bottom-nav {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+      }
+
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 22px;
+        font-weight: 900;
+      }
+
+      .brand-mark {
+        width: 30px;
+        height: 30px;
+        display: grid;
+        place-items: center;
+        border-radius: var(--radius);
+        background: var(--gold);
+        color: #241a0f;
+        font-weight: 950;
+      }
+
+      .chip {
+        min-height: 28px;
+        border-radius: var(--radius);
+        padding: 5px 9px;
+        background: rgba(244, 223, 173, 0.16);
+        color: #f8eacb;
+        font-size: 12px;
+        font-weight: 850;
+        white-space: nowrap;
+      }
+
+      .channel-pill {
+        width: 100%;
+        border: 1px solid rgba(244, 223, 173, 0.18);
+        border-radius: var(--radius);
+        background: var(--nav-soft);
+        color: #fff8ea;
+        padding: 10px;
+        display: grid;
+        grid-template-columns: 38px minmax(0, 1fr) auto;
+        gap: 10px;
+        align-items: center;
+        text-align: left;
+      }
+
+      .avatar {
+        width: 38px;
+        height: 38px;
+        border-radius: 999px;
+        display: grid;
+        place-items: center;
+        background: rgba(217, 154, 50, 0.22);
+        color: #ffe4a8;
+        border: 1px solid rgba(244, 223, 173, 0.26);
+        font-weight: 900;
+      }
+
+      .channel-title {
+        min-width: 0;
+      }
+
+      .channel-title strong,
+      .video-title strong {
+        display: block;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .channel-title span,
+      .video-title span,
+      .muted {
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 700;
+      }
+
+      .channel-pill .channel-title span {
+        color: var(--gold-soft);
+      }
+
+      .screen-body {
+        min-height: 0;
+        overflow: auto;
+        padding: 14px;
+        display: grid;
+        align-content: start;
+        gap: 12px;
+      }
+
+      .status-band {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        overflow: hidden;
+        background: var(--line);
+        gap: 1px;
+      }
+
+      .status-cell {
+        min-height: 66px;
+        padding: 10px;
+        background: var(--surface);
+        display: grid;
+        gap: 5px;
+      }
+
+      .label {
+        color: #0f6c5d;
+        font-size: 11px;
+        font-weight: 900;
+      }
+
+      .status-cell strong {
+        font-size: 13px;
+      }
+
+      .card {
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: var(--surface);
+        padding: 14px;
+        display: grid;
+        gap: 12px;
+      }
+
+      .card h2 {
+        margin: 0;
+        font-size: 16px;
+      }
+
+      .card p {
+        margin: 0;
+        color: var(--muted);
+        font-size: 13px;
+        font-weight: 650;
+      }
+
+      .preview {
+        position: relative;
+        min-height: 172px;
+        border-radius: var(--radius);
+        overflow: hidden;
+        background: var(--teal);
+        color: #fff8ea;
+      }
+
+      .preview::before {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background:
+          linear-gradient(135deg, rgba(217, 154, 50, 0.34), transparent 42%),
+          linear-gradient(0deg, rgba(0, 0, 0, 0.38), transparent 54%);
+      }
+
+      .preview-copy {
+        position: absolute;
+        inset: auto 14px 14px;
+        display: grid;
+        gap: 4px;
+      }
+
+      .preview-copy strong {
+        font-size: 16px;
+      }
+
+      .readiness {
+        display: grid;
+        gap: 8px;
+      }
+
+      .readiness-row {
+        min-height: 54px;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        padding: 9px 10px;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 8px;
+        align-items: center;
+        background: rgba(255, 255, 255, 0.54);
+      }
+
+      .badge {
+        min-height: 26px;
+        border-radius: var(--radius);
+        padding: 5px 8px;
+        background: #e8ddc9;
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 900;
+        white-space: nowrap;
+      }
+
+      .badge.good {
+        background: rgba(47, 122, 85, 0.14);
+        color: var(--green);
+      }
+
+      .badge.warn {
+        background: rgba(201, 121, 38, 0.16);
+        color: var(--warning);
+      }
+
+      .badge.bad {
+        background: rgba(169, 73, 61, 0.12);
+        color: var(--danger);
+      }
+
+      .action-bar {
+        padding: 12px 14px;
+        border-top: 1px solid var(--line);
+        background: rgba(255, 250, 240, 0.94);
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 10px;
+      }
+
+      .button {
+        border: 0;
+        border-radius: var(--radius);
+        min-height: 46px;
+        padding: 0 16px;
+        color: #fff;
+        font: inherit;
+        font-weight: 900;
+      }
+
+      .button.primary {
+        background: var(--green);
+      }
+
+      .button.gold {
+        background: var(--gold);
+        color: #251b10;
+      }
+
+      .button.danger {
+        background: var(--danger);
+      }
+
+      .button.ghost {
+        border: 1px solid var(--line);
+        background: transparent;
+        color: var(--ink);
+      }
+
+      .bottom-nav {
+        padding: 8px 10px 10px;
+        border-top: 1px solid var(--line);
+        background: var(--surface);
+      }
+
+      .nav-item {
+        min-width: 0;
+        min-height: 42px;
+        border: 0;
+        border-radius: var(--radius);
+        padding: 5px 8px;
+        background: transparent;
+        color: var(--muted);
+        font: inherit;
+        font-size: 12px;
+        font-weight: 850;
+      }
+
+      .nav-item.active {
+        background: rgba(217, 154, 50, 0.18);
+        color: var(--ink);
+      }
+
+      .video-row {
+        display: grid;
+        grid-template-columns: 74px minmax(0, 1fr) auto;
+        gap: 10px;
+        align-items: center;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        padding: 8px;
+        background: rgba(255, 255, 255, 0.54);
+      }
+
+      .thumb {
+        aspect-ratio: 16 / 9;
+        border-radius: 6px;
+        background:
+          linear-gradient(135deg, rgba(217, 154, 50, 0.7), rgba(30, 52, 48, 0.92)),
+          #263330;
+      }
+
+      .field {
+        display: grid;
+        gap: 6px;
+      }
+
+      .input {
+        min-height: 44px;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: rgba(255, 255, 255, 0.62);
+        color: var(--ink);
+        padding: 0 12px;
+        font: inherit;
+      }
+
+      .live-panel {
+        border-radius: var(--radius);
+        padding: 14px;
+        background: var(--teal);
+        color: #fff8ea;
+        display: grid;
+        gap: 12px;
+      }
+
+      .live-panel .muted {
+        color: #d4c9b4;
+      }
+
+      .meter {
+        height: 8px;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.16);
+        overflow: hidden;
+      }
+
+      .meter span {
+        display: block;
+        width: 42%;
+        height: 100%;
+        background: var(--gold);
+      }
+
+      .session-row {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 8px;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        padding: 11px;
+        background: rgba(255, 255, 255, 0.54);
+      }
+
+      @media (max-width: 720px) {
+        .mock-page {
+          width: min(100% - 18px, 390px);
+          margin: 16px auto;
+        }
+
+        .mock-header {
+          display: none;
+        }
+
+        .screen-grid {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="mock-page">
+      <header class="mock-header">
+        <div>
+          <h1>Castarro Mobile Skin</h1>
+          <p>Android-first, copy-mode, channel-focused mobile UI direction.</p>
+        </div>
+        <span class="chip">Based on desktop v1.1.1 shell</span>
+      </header>
+
+      <section class="screen-grid" aria-label="Mobile app screens">
+        <article class="phone" aria-label="Home screen">
+          <div class="screen">
+            <header class="app-top">
+              <div class="brand-row">
+                <div class="brand"><span class="brand-mark">C</span>Castarro</div>
+                <span class="chip">0 live</span>
+              </div>
+              <button class="channel-pill" type="button">
+                <span class="avatar">I</span>
+                <span class="channel-title">
+                  <strong>Inside Us</strong>
+                  <span>Ready to stream</span>
+                </span>
+                <span class="chip">Change</span>
+              </button>
+            </header>
+
+            <section class="screen-body">
+              <div class="status-band">
+                <div class="status-cell"><span class="label">Video</span><strong>Ready</strong></div>
+                <div class="status-cell"><span class="label">YouTube</span><strong>Connected</strong></div>
+                <div class="status-cell"><span class="label">Stream</span><strong>Idle</strong></div>
+              </div>
+
+              <section class="card">
+                <div class="card-head">
+                  <h2>Selected Video</h2>
+                  <span class="badge good">Copy mode</span>
+                </div>
+                <div class="preview">
+                  <div class="preview-copy">
+                    <strong>ready-1.mp4</strong>
+                    <span>1080p30 | H.264 | AAC | 42 min</span>
+                  </div>
+                </div>
+              </section>
+
+              <section class="card">
+                <h2>Readiness</h2>
+                <div class="readiness">
+                  <div class="readiness-row">
+                    <div class="video-title"><strong>Video file</strong><span>ready-1.mp4</span></div>
+                    <span class="badge good">Ready</span>
+                  </div>
+                  <div class="readiness-row">
+                    <div class="video-title"><strong>YouTube</strong><span>Inside Us Account</span></div>
+                    <span class="badge good">Linked</span>
+                  </div>
+                  <div class="readiness-row">
+                    <div class="video-title"><strong>Auto Start/Stop</strong><span>Confirmed in Studio</span></div>
+                    <span class="badge good">On</span>
+                  </div>
+                </div>
+              </section>
+            </section>
+
+            <footer>
+              <div class="action-bar">
+                <button class="button primary" type="button">Go Live</button>
+                <button class="button ghost" type="button">Verify</button>
+              </div>
+              <nav class="bottom-nav" aria-label="Primary">
+                <button class="nav-item active" type="button">Home</button>
+                <button class="nav-item" type="button">Video</button>
+                <button class="nav-item" type="button">YouTube</button>
+                <button class="nav-item" type="button">History</button>
+              </nav>
+            </footer>
+          </div>
+        </article>
+
+        <article class="phone" aria-label="Video screen">
+          <div class="screen">
+            <header class="app-top">
+              <div class="brand-row">
+                <div class="brand"><span class="brand-mark">C</span>Video</div>
+                <span class="chip">Inside Us</span>
+              </div>
+            </header>
+
+            <section class="screen-body">
+              <section class="card">
+                <div class="card-head">
+                  <h2>Phone Videos</h2>
+                  <button class="button gold" type="button">Select</button>
+                </div>
+                <div class="video-row">
+                  <div class="thumb"></div>
+                  <div class="video-title">
+                    <strong>ready-1.mp4</strong>
+                    <span>42 min | 1.8 GB</span>
+                  </div>
+                  <span class="badge good">Ready</span>
+                </div>
+                <div class="video-row">
+                  <div class="thumb"></div>
+                  <div class="video-title">
+                    <strong>travel-hevc.mov</strong>
+                    <span>HEVC | 4K</span>
+                  </div>
+                  <span class="badge warn">Prep</span>
+                </div>
+              </section>
+
+              <section class="card">
+                <h2>Compatibility</h2>
+                <div class="readiness">
+                  <div class="readiness-row">
+                    <div class="video-title"><strong>Video codec</strong><span>H.264</span></div>
+                    <span class="badge good">Pass</span>
+                  </div>
+                  <div class="readiness-row">
+                    <div class="video-title"><strong>Audio codec</strong><span>AAC stereo</span></div>
+                    <span class="badge good">Pass</span>
+                  </div>
+                  <div class="readiness-row">
+                    <div class="video-title"><strong>Live pacing</strong><span>Stable timestamps</span></div>
+                    <span class="badge good">Pass</span>
+                  </div>
+                </div>
+              </section>
+            </section>
+
+            <footer>
+              <nav class="bottom-nav" aria-label="Primary">
+                <button class="nav-item" type="button">Home</button>
+                <button class="nav-item active" type="button">Video</button>
+                <button class="nav-item" type="button">YouTube</button>
+                <button class="nav-item" type="button">History</button>
+              </nav>
+            </footer>
+          </div>
+        </article>
+
+        <article class="phone" aria-label="YouTube screen">
+          <div class="screen">
+            <header class="app-top">
+              <div class="brand-row">
+                <div class="brand"><span class="brand-mark">C</span>YouTube</div>
+                <span class="chip">Connected</span>
+              </div>
+            </header>
+
+            <section class="screen-body">
+              <section class="card">
+                <div class="card-head">
+                  <h2>Destination</h2>
+                  <span class="badge good">Linked</span>
+                </div>
+                <div class="channel-row">
+                  <span class="avatar">I</span>
+                  <span class="channel-title">
+                    <strong>Inside Us Account</strong>
+                    <span>Manual stream profile</span>
+                  </span>
+                </div>
+              </section>
+
+              <section class="card">
+                <h2>Manual Stream Key</h2>
+                <label class="field">
+                  <span class="label">RTMPS URL</span>
+                  <input class="input" value="rtmps://a.rtmps.youtube.com/live2" readonly>
+                </label>
+                <label class="field">
+                  <span class="label">Stream key</span>
+                  <input class="input" value="****-****-****-****" readonly>
+                </label>
+                <div class="metric-row">
+                  <button class="button ghost" type="button">Reveal</button>
+                  <button class="button gold" type="button">Paste</button>
+                </div>
+              </section>
+
+              <section class="card">
+                <h2>Studio Checks</h2>
+                <div class="readiness">
+                  <div class="readiness-row">
+                    <div class="video-title"><strong>Auto Start</strong><span>YouTube Studio</span></div>
+                    <span class="badge good">On</span>
+                  </div>
+                  <div class="readiness-row">
+                    <div class="video-title"><strong>Auto Stop</strong><span>YouTube Studio</span></div>
+                    <span class="badge good">On</span>
+                  </div>
+                </div>
+              </section>
+            </section>
+
+            <footer>
+              <nav class="bottom-nav" aria-label="Primary">
+                <button class="nav-item" type="button">Home</button>
+                <button class="nav-item" type="button">Video</button>
+                <button class="nav-item active" type="button">YouTube</button>
+                <button class="nav-item" type="button">History</button>
+              </nav>
+            </footer>
+          </div>
+        </article>
+
+        <article class="phone" aria-label="Live monitor screen">
+          <div class="screen">
+            <header class="app-top">
+              <div class="brand-row">
+                <div class="brand"><span class="brand-mark">C</span>Live</div>
+                <span class="chip">On air</span>
+              </div>
+              <button class="channel-pill" type="button">
+                <span class="avatar">I</span>
+                <span class="channel-title">
+                  <strong>Inside Us</strong>
+                  <span>Streaming to YouTube</span>
+                </span>
+                <span class="chip">Live</span>
+              </button>
+            </header>
+
+            <section class="screen-body">
+              <section class="live-panel">
+                <div class="metric-row">
+                  <span class="label">Elapsed</span>
+                  <strong>00:18:42</strong>
+                </div>
+                <div class="metric-row">
+                  <span class="muted">Upload</span>
+                  <strong>6.1 Mbps</strong>
+                </div>
+                <div class="meter"><span></span></div>
+                <span class="muted">ready-1.mp4 | 42% sent</span>
+              </section>
+
+              <section class="card">
+                <h2>Session</h2>
+                <div class="readiness">
+                  <div class="readiness-row">
+                    <div class="video-title"><strong>Destination</strong><span>YouTube Live</span></div>
+                    <span class="badge good">Stable</span>
+                  </div>
+                  <div class="readiness-row">
+                    <div class="video-title"><strong>Network</strong><span>Mobile data</span></div>
+                    <span class="badge good">Good</span>
+                  </div>
+                </div>
+              </section>
+
+              <section class="card">
+                <h2>History</h2>
+                <div class="session-row">
+                  <div class="video-title">
+                    <strong>Inside Us live</strong>
+                    <span>Today | ready-1.mp4</span>
+                  </div>
+                  <span class="badge good">Live</span>
+                </div>
+                <div class="session-row">
+                  <div class="video-title">
+                    <strong>Daily Tech</strong>
+                    <span>Yesterday | 58 min</span>
+                  </div>
+                  <span class="badge">Done</span>
+                </div>
+              </section>
+            </section>
+
+            <footer>
+              <div class="action-bar">
+                <button class="button danger" type="button">Stop</button>
+                <button class="button ghost" type="button">Details</button>
+              </div>
+              <nav class="bottom-nav" aria-label="Primary">
+                <button class="nav-item active" type="button">Home</button>
+                <button class="nav-item" type="button">Video</button>
+                <button class="nav-item" type="button">YouTube</button>
+                <button class="nav-item" type="button">History</button>
+              </nav>
+            </footer>
+          </div>
+        </article>
+      </section>
+    </main>
+  </body>
+</html>

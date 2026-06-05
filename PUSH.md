@@ -4,7 +4,7 @@ This repo now has a root-level script named `push` that automates release prepar
 
 ## What `python push` does
 
-1. Runs local release preflight (`npm run release:check`) unless skipped.
+1. Runs local desktop preflight (`npm run release:check`) and mobile preflight (`npm run verify:mobile`) unless skipped.
 2. Bumps `package.json` version (and `package-lock.json`).
 3. Commits and pushes the current branch.
 
@@ -13,8 +13,9 @@ After push to `main`, GitHub Actions (`.github/workflows/release-windows.yml`) t
 - checks if tag `v<version>` already exists
 - detects whether Windows signing secrets are configured
 - builds installer + `latest.yml`
+- builds signed Android release APK + SHA256 checksum
 - verifies installer Authenticode signature (when signing is enabled)
-- publishes GitHub release assets
+- publishes GitHub release assets for Windows and Android
 - users receive app update via auto-updater
 
 ## Important project-specific behavior
@@ -61,6 +62,12 @@ Skip preflight check:
 
 ```powershell
 python push --no-build-check
+```
+
+Skip only mobile preflight:
+
+```powershell
+python push --no-mobile-check
 ```
 
 Only stage version files:

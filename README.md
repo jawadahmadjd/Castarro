@@ -410,7 +410,7 @@ GitHub Actions now signs automatically only when those secrets are present. If s
 
 Castarro checks GitHub Releases for updates when the packaged app starts and then periodically while it is open. Updates are downloaded in the background and installed when the app quits, so users do not need to download a new installer manually.
 
-GitHub Actions publishes Windows releases from `main`. To ship an update:
+GitHub Actions publishes Windows + Android releases from `main`. To ship an update:
 
 ```powershell
 npm version patch --no-git-tag-version
@@ -419,7 +419,30 @@ git commit -m "Release 1.0.1"
 git push
 ```
 
-Use `minor` or `major` instead of `patch` when appropriate. The workflow creates a `vX.Y.Z` tag, builds the installer, uploads `latest.yml`, and publishes the GitHub release. If the version already has a release, the workflow skips publishing; bump the version before pushing another update.
+Use `minor` or `major` instead of `patch` when appropriate. The workflow creates a `vX.Y.Z` tag, builds the Windows installer, builds a signed Android release APK, uploads `latest.yml`, and publishes both installers as GitHub Release assets. If the version already has a release, the workflow skips publishing; bump the version before pushing another update.
+
+Android release APK shipment requires these repository secrets:
+
+```text
+CASTARRO_ANDROID_KEYSTORE_BASE64
+CASTARRO_ANDROID_KEYSTORE_PASSWORD
+CASTARRO_ANDROID_KEY_ALIAS
+CASTARRO_ANDROID_KEY_PASSWORD
+```
+
+Create the release keystore once and keep it private:
+
+```powershell
+& "$env:JAVA_HOME\bin\keytool.exe" -genkeypair -v -keystore castarro-release.jks -alias castarro -keyalg RSA -keysize 2048 -validity 10000
+```
+
+Create `CASTARRO_ANDROID_KEYSTORE_BASE64` from the release keystore file:
+
+```powershell
+[Convert]::ToBase64String([IO.File]::ReadAllBytes("castarro-release.jks"))
+```
+
+The release workflow fails before tagging if Android signing secrets are missing. This is intentional: release APKs must be signed with the same private key every time so users can install updates over existing Android installs. APK files are published as GitHub Release assets, not committed to git.
 
 Create a release manifest after a build:
 

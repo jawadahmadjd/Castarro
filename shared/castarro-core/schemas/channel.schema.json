@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://castarro.local/schemas/channel.schema.json",
+  "title": "CastarroChannel",
+  "type": "object",
+  "required": ["id", "displayName", "createdAt", "updatedAt"],
+  "additionalProperties": false,
+  "properties": {
+    "id": { "type": "string", "minLength": 1 },
+    "displayName": { "type": "string", "minLength": 1 },
+    "avatarUri": { "type": ["string", "null"] },
+    "defaultStreamProfileId": { "type": ["string", "null"] },
+    "youtubeAccountId": { "type": ["string", "null"] },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "updatedAt": { "type": "string", "format": "date-time" }
+  }
+}

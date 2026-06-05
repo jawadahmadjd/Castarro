@@ -1,11 +1,35 @@
 param(
     [string]$InstallerPath = "",
-    [switch]$ElevatedRelaunch
+    [switch]$ElevatedRelaunch,
+    [string]$SmokeLogPath = ""
 )
 
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Set-Location $Root
+
+$TranscriptStarted = $false
+if ($SmokeLogPath) {
+    try {
+        $SmokeLogDir = Split-Path -Parent $SmokeLogPath
+        if ($SmokeLogDir) {
+            New-Item -ItemType Directory -Force -Path $SmokeLogDir | Out-Null
+        }
+        Start-Transcript -Path $SmokeLogPath -Force | Out-Null
+        $TranscriptStarted = $true
+        Write-Host "Installer smoke log: $SmokeLogPath"
+    }
+    catch {
+        Write-Warning "Could not start installer smoke transcript at $SmokeLogPath. $($_.Exception.Message)"
+    }
+}
+
+trap {
+    if ($TranscriptStarted) {
+        try { Stop-Transcript | Out-Null } catch {}
+    }
+    break
+}
 
 $Package = Get-Content -Raw -LiteralPath (Join-Path $Root "package.json") | ConvertFrom-Json
 $ProductName = [string]$Package.build.productName
@@ -27,15 +51,37 @@ function Test-IsAdministrator {
     }
 }
 
+function Assert-NoRunningCastarro {
+    $Running = @(Get-Process -Name "Castarro" -ErrorAction SilentlyContinue)
+    if ($Running.Count -gt 0) {
+        $Ids = ($Running | ForEach-Object { $_.Id }) -join ", "
+        throw "Castarro is currently running (PID: $Ids). Stop active streams and close Castarro before running installer smoke."
+    }
+}
+
+Assert-NoRunningCastarro
+
 if (-not (Test-IsAdministrator)) {
     if ($ElevatedRelaunch) {
         throw "Installer smoke requires administrator privileges. Elevation was requested but was not granted."
     }
     Write-Host "Installer smoke requires administrator privileges. Requesting UAC elevation..."
+    if (-not $SmokeLogPath) {
+        $PreferredLogBase = if ($env:CASTARRO_INSTALLER_SMOKE_ROOT) { $env:CASTARRO_INSTALLER_SMOKE_ROOT } else { "C:\tmp" }
+        try {
+            New-Item -ItemType Directory -Force -Path $PreferredLogBase | Out-Null
+        }
+        catch {
+            $PreferredLogBase = [System.IO.Path]::GetTempPath()
+        }
+        $SmokeLogPath = Join-Path $PreferredLogBase "castarro-installer-smoke-elevated.log"
+    }
+    Remove-Item -LiteralPath $SmokeLogPath -Force -ErrorAction SilentlyContinue
     $ArgumentString = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" -ElevatedRelaunch"
     if ($InstallerPath) {
         $ArgumentString += " -InstallerPath `"$InstallerPath`""
     }
+    $ArgumentString += " -SmokeLogPath `"$SmokeLogPath`""
     try {
         $ElevatedProcess = Start-Process `
             -FilePath "powershell.exe" `
@@ -49,7 +95,14 @@ if (-not (Test-IsAdministrator)) {
         throw "Installer smoke requires elevation and could not start elevated. Run PowerShell as Administrator and retry. Original error: $($_.Exception.Message)"
     }
     if ($ElevatedProcess.ExitCode -ne 0) {
-        throw "Elevated installer smoke failed with exit code $($ElevatedProcess.ExitCode)."
+        if (Test-Path -LiteralPath $SmokeLogPath) {
+            Write-Host ""
+            Write-Host "Elevated installer smoke log:"
+            Write-Host "----------------------------------------"
+            Write-Host (Get-Content -Raw -LiteralPath $SmokeLogPath)
+            Write-Host "----------------------------------------"
+        }
+        throw "Elevated installer smoke failed with exit code $($ElevatedProcess.ExitCode). Log: $SmokeLogPath"
     }
     exit 0
 }
@@ -111,14 +164,6 @@ function Test-PathContainsWhitespace {
     return [bool]($Path -match "\s")
 }
 
-function Assert-NoRunningCastarro {
-    $Running = @(Get-Process -Name "Castarro" -ErrorAction SilentlyContinue)
-    if ($Running.Count -gt 0) {
-        $Ids = ($Running | ForEach-Object { $_.Id }) -join ", "
-        throw "Castarro is currently running (PID: $Ids). Stop active streams and close Castarro before running installer smoke."
-    }
-}
-
 $SmokeRootName = "castarro-installer-smoke"
 $SmokeBase = $null
 if ($env:CASTARRO_INSTALLER_SMOKE_ROOT) {
@@ -166,6 +211,8 @@ function Invoke-ProcessChecked {
     $StartInfo.WorkingDirectory = $WorkingDirectory
     $StartInfo.UseShellExecute = $false
     $StartInfo.CreateNoWindow = $true
+    $StartInfo.RedirectStandardOutput = $true
+    $StartInfo.RedirectStandardError = $true
     $StartInfo.Environment.Remove("ELECTRON_RUN_AS_NODE") | Out-Null
     foreach ($Key in $Environment.Keys) {
         $StartInfo.Environment[$Key] = [string]$Environment[$Key]
@@ -174,12 +221,24 @@ function Invoke-ProcessChecked {
     $Process = [System.Diagnostics.Process]::new()
     $Process.StartInfo = $StartInfo
     $Process.Start() | Out-Null
+    $OutTask = $Process.StandardOutput.ReadToEndAsync()
+    $ErrTask = $Process.StandardError.ReadToEndAsync()
     if (-not $Process.WaitForExit($TimeoutSeconds * 1000)) {
         try { $Process.Kill() } catch {}
+        try { $Process.WaitForExit() } catch {}
         throw "Process timed out: $FilePath $Arguments"
     }
+    $StdOut = ($OutTask.Result | Out-String).Trim()
+    $StdErr = ($ErrTask.Result | Out-String).Trim()
     if ($Process.ExitCode -ne 0) {
-        throw "Process failed with exit code $($Process.ExitCode): $FilePath $Arguments"
+        $Message = "Process failed with exit code $($Process.ExitCode): $FilePath $Arguments"
+        if ($StdOut) {
+            $Message += "`nstdout:`n$StdOut"
+        }
+        if ($StdErr) {
+            $Message += "`nstderr:`n$StdErr"
+        }
+        throw $Message
     }
 }
 
@@ -246,6 +305,7 @@ Remove-SmokeTree -Path $SmokeRoot
 New-Item -ItemType Directory -Force -Path $SmokeRoot | Out-Null
 
 $Uninstaller = Join-Path $InstallDir "Uninstall $ProductName.exe"
+$SmokeSucceeded = $false
 try {
     Assert-NoRunningCastarro
     Write-Host "Installing $ProductName silently to $InstallDir"
@@ -293,6 +353,7 @@ try {
     }
 
     Write-Host "Installer smoke test passed"
+    $SmokeSucceeded = $true
 }
 finally {
     if (Test-Path -LiteralPath $Uninstaller) {
@@ -305,10 +366,18 @@ finally {
             Write-Warning $_
         }
     }
-    try {
-        Remove-SmokeTree -Path $SmokeRoot
+    if ($SmokeSucceeded) {
+        try {
+            Remove-SmokeTree -Path $SmokeRoot
+        }
+        catch {
+            Write-Warning "Smoke-test cleanup could not remove $SmokeRoot. $($_.Exception.Message)"
+        }
     }
-    catch {
-        Write-Warning "Smoke-test cleanup could not remove $SmokeRoot. $($_.Exception.Message)"
+    else {
+        Write-Warning "Installer smoke failed; preserving smoke directory for inspection: $SmokeRoot"
+    }
+    if ($TranscriptStarted) {
+        try { Stop-Transcript | Out-Null } catch {}
     }
 }

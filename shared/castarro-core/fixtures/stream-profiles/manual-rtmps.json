@@ -1,0 +1,13 @@
+{
+  "id": "profile-manual-rtmps",
+  "channelId": "channel-inside-us",
+  "videoAssetId": "video-ready-1080p30",
+  "mode": "manualKey",
+  "rtmpServerUrl": "rtmps://a.rtmps.youtube.com/live2",
+  "streamKeySecretRef": "secret://stream-key/channel-inside-us/manual",
+  "youtubeBroadcastId": null,
+  "loopEnabled": false,
+  "restartOnExit": true,
+  "createdAt": "2026-06-04T00:00:00Z",
+  "updatedAt": "2026-06-04T00:00:00Z"
+}

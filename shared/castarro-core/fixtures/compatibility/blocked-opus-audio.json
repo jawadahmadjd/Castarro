@@ -1,0 +1,18 @@
+{
+  "isReady": false,
+  "videoCodec": "h264",
+  "audioCodec": "opus",
+  "container": "webm",
+  "pixelFormat": "yuv420p",
+  "width": 1280,
+  "height": 720,
+  "fps": 30,
+  "audioSampleRate": 48000,
+  "keyframeIntervalSeconds": 2,
+  "warnings": [],
+  "blockingIssues": [
+    "Opus audio cannot be sent with RTMP copy mode."
+  ],
+  "recommendedFix": "Open Castarro Desktop and normalize this video first.",
+  "statusLabel": "Needs desktop prep"
+}

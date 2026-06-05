@@ -1,0 +1,23 @@
+{
+  "name": "castarro-core",
+  "version": "0.1.0",
+  "schemaVersion": 1,
+  "product": "Castarro",
+  "supportedPlatforms": {
+    "desktop": true,
+    "android": true,
+    "ios": false
+  },
+  "contracts": [
+    "channel",
+    "video-asset",
+    "stream-profile",
+    "compatibility-report",
+    "youtube-profile",
+    "stream-session"
+  ],
+  "notes": [
+    "Shared contracts define behavior and data shape, not platform layout.",
+    "Mobile MVP is Android-first, prerecorded-file-only, and copy-mode-only."
+  ]
+}

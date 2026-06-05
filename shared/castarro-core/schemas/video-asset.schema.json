@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://castarro.local/schemas/video-asset.schema.json",
+  "title": "VideoAsset",
+  "type": "object",
+  "required": [
+    "id",
+    "displayName",
+    "sourceUri",
+    "durationMs",
+    "sizeBytes",
+    "videoCodec",
+    "audioCodec",
+    "compatibilityStatus",
+    "compatibilityMessage",
+    "createdAt",
+    "updatedAt"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "id": { "type": "string", "minLength": 1 },
+    "displayName": { "type": "string", "minLength": 1 },
+    "sourceUri": { "type": "string", "minLength": 1 },
+    "localPath": { "type": ["string", "null"] },
+    "durationMs": { "type": "integer", "minimum": 0 },
+    "sizeBytes": { "type": "integer", "minimum": 0 },
+    "videoCodec": { "type": "string" },
+    "audioCodec": { "type": "string" },
+    "container": { "type": "string" },
+    "width": { "type": ["integer", "null"], "minimum": 0 },
+    "height": { "type": ["integer", "null"], "minimum": 0 },
+    "fps": { "type": ["number", "null"], "minimum": 0 },
+    "audioSampleRate": { "type": ["integer", "null"], "minimum": 0 },
+    "compatibilityStatus": { "type": "string", "enum": ["ready", "needsDesktopPrep", "blocked", "unknown"] },
+    "compatibilityMessage": { "type": "string" },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "updatedAt": { "type": "string", "format": "date-time" }
+  }
+}

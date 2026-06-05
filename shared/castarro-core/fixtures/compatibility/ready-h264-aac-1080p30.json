@@ -1,0 +1,16 @@
+{
+  "isReady": true,
+  "videoCodec": "h264",
+  "audioCodec": "aac",
+  "container": "mp4",
+  "pixelFormat": "yuv420p",
+  "width": 1920,
+  "height": 1080,
+  "fps": 30,
+  "audioSampleRate": 48000,
+  "keyframeIntervalSeconds": 2,
+  "warnings": [],
+  "blockingIssues": [],
+  "recommendedFix": null,
+  "statusLabel": "Ready"
+}

@@ -40,6 +40,8 @@ def merge_settings(config: dict[str, Any], redirect_uri: str | None = None) -> d
     raw = config.get("youtube", {})
     if isinstance(raw, dict):
         merged.update(raw)
+    if redirect_uri is not None:
+        merged["redirect_uri"] = redirect_uri
 
     scopes = merged.get("scopes")
     if isinstance(scopes, str):
