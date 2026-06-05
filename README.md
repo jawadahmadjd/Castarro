@@ -419,7 +419,7 @@ git commit -m "Release 1.0.1"
 git push
 ```
 
-Use `minor` or `major` instead of `patch` when appropriate. The workflow creates a `vX.Y.Z` tag, builds the Windows installer, builds a signed Android release APK, uploads `latest.yml`, and publishes both installers as GitHub Release assets. If the version already has a release, the workflow skips publishing; bump the version before pushing another update.
+Use `minor` or `major` instead of `patch` when appropriate. The workflow creates a `vX.Y.Z` tag, builds the Windows installer, uploads `latest.yml`, and publishes GitHub Release assets. If Android signing secrets are configured, it also builds and publishes a signed Android release APK. If the version already has a release, the workflow skips publishing; bump the version before pushing another update.
 
 Android release APK shipment requires these repository secrets:
 
@@ -442,7 +442,7 @@ Create `CASTARRO_ANDROID_KEYSTORE_BASE64` from the release keystore file:
 [Convert]::ToBase64String([IO.File]::ReadAllBytes("castarro-release.jks"))
 ```
 
-The release workflow fails before tagging if Android signing secrets are missing. This is intentional: release APKs must be signed with the same private key every time so users can install updates over existing Android installs. APK files are published as GitHub Release assets, not committed to git.
+If Android signing secrets are missing, the release workflow skips Android APK publishing and still publishes the Windows release. Signed APKs must use the same private key every time so users can install updates over existing Android installs. APK files are published as GitHub Release assets, not committed to git.
 
 Create a release manifest after a build:
 

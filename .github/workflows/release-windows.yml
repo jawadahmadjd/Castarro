@@ -20,6 +20,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       android_version_code: ${{ steps.version.outputs.android_version_code }}
+      android_signing_enabled: ${{ steps.version.outputs.android_signing_enabled }}
       tag: ${{ steps.version.outputs.tag }}
       exists: ${{ steps.version.outputs.exists }}
     steps:
@@ -31,6 +32,11 @@ jobs:
       - name: Read package version
         id: version
         shell: pwsh
+        env:
+          CASTARRO_ANDROID_KEYSTORE_BASE64: ${{ secrets.CASTARRO_ANDROID_KEYSTORE_BASE64 }}
+          CASTARRO_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.CASTARRO_ANDROID_KEYSTORE_PASSWORD }}
+          CASTARRO_ANDROID_KEY_ALIAS: ${{ secrets.CASTARRO_ANDROID_KEY_ALIAS }}
+          CASTARRO_ANDROID_KEY_PASSWORD: ${{ secrets.CASTARRO_ANDROID_KEY_PASSWORD }}
         run: |
           $Package = Get-Content -Raw package.json | ConvertFrom-Json
           $Version = [string]$Package.version
@@ -45,20 +51,38 @@ jobs:
           $Tag = "v$Version"
           $Existing = git ls-remote --tags origin "refs/tags/$Tag"
           $Exists = if ([string]::IsNullOrWhiteSpace($Existing)) { "false" } else { "true" }
+          $AndroidSecretNames = @(
+            "CASTARRO_ANDROID_KEYSTORE_BASE64",
+            "CASTARRO_ANDROID_KEYSTORE_PASSWORD",
+            "CASTARRO_ANDROID_KEY_ALIAS",
+            "CASTARRO_ANDROID_KEY_PASSWORD"
+          )
+          $MissingAndroidSecrets = @(
+            foreach ($Name in $AndroidSecretNames) {
+              if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($Name))) {
+                $Name
+              }
+            }
+          )
+          $AndroidSigningEnabled = $MissingAndroidSecrets.Count -eq 0
 
           "version=$Version" >> $env:GITHUB_OUTPUT
           "android_version_code=$AndroidVersionCode" >> $env:GITHUB_OUTPUT
+          "android_signing_enabled=$($AndroidSigningEnabled.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
           "tag=$Tag" >> $env:GITHUB_OUTPUT
           "exists=$Exists" >> $env:GITHUB_OUTPUT
 
           if ($Exists -eq "true") {
             Write-Host "::notice::Release $Tag already exists. Bump package.json version to publish another auto-update."
           }
+          if (-not $AndroidSigningEnabled) {
+            Write-Host "::warning::Missing Android release signing secret(s): $($MissingAndroidSecrets -join ' '). Skipping Android APK for this release; Windows release can still publish."
+          }
 
   android-release-apk:
     name: Build signed Android release APK
     needs: prepare
-    if: needs.prepare.outputs.exists != 'true'
+    if: needs.prepare.outputs.exists != 'true' && needs.prepare.outputs.android_signing_enabled == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -156,11 +180,11 @@ jobs:
           retention-days: 7
 
   release:
-    name: Build and publish Windows + Android release
+    name: Build and publish release
     needs:
       - prepare
       - android-release-apk
-    if: needs.prepare.outputs.exists != 'true'
+    if: always() && needs.prepare.result == 'success' && needs.prepare.outputs.exists != 'true' && (needs.android-release-apk.result == 'success' || needs.android-release-apk.result == 'skipped')
     runs-on: windows-2022
     env:
       CSC_IDENTITY_AUTO_DISCOVERY: false
@@ -179,6 +203,7 @@ jobs:
         run: |
           "version=${{ needs.prepare.outputs.version }}" >> $env:GITHUB_OUTPUT
           "android_version_code=${{ needs.prepare.outputs.android_version_code }}" >> $env:GITHUB_OUTPUT
+          "android_signing_enabled=${{ needs.prepare.outputs.android_signing_enabled }}" >> $env:GITHUB_OUTPUT
           "tag=${{ needs.prepare.outputs.tag }}" >> $env:GITHUB_OUTPUT
           "exists=${{ needs.prepare.outputs.exists }}" >> $env:GITHUB_OUTPUT
 
@@ -333,7 +358,7 @@ jobs:
         run: npm run smoke:installer
 
       - name: Download Android release APK
-        if: steps.version.outputs.exists != 'true'
+        if: steps.version.outputs.exists != 'true' && steps.version.outputs.android_signing_enabled == 'true'
         uses: actions/download-artifact@v4
         with:
           name: castarro-android-release-apk
@@ -348,8 +373,8 @@ jobs:
           git tag -a "${{ steps.version.outputs.tag }}" -m "Castarro ${{ steps.version.outputs.version }}"
           git push origin "${{ steps.version.outputs.tag }}"
 
-      - name: Publish GitHub release
-        if: steps.version.outputs.exists != 'true'
+      - name: Publish GitHub release with Android APK
+        if: steps.version.outputs.exists != 'true' && steps.version.outputs.android_signing_enabled == 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.tag }}
@@ -372,3 +397,23 @@ jobs:
             dist/latest.yml
             dist/Castarro-Android-${{ steps.version.outputs.version }}.apk
             dist/Castarro-Android-${{ steps.version.outputs.version }}.apk.sha256
+
+      - name: Publish GitHub release without Android APK
+        if: steps.version.outputs.exists != 'true' && steps.version.outputs.android_signing_enabled != 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: Castarro ${{ steps.version.outputs.version }}
+          body: |
+            ## Downloads
+
+            - Windows desktop: `Castarro-Setup-${{ steps.version.outputs.version }}.exe`
+
+            Android APK publishing was skipped because Android release signing secrets are not configured yet.
+          generate_release_notes: true
+          make_latest: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/Castarro-Setup-${{ steps.version.outputs.version }}.exe
+            dist/Castarro-Setup-${{ steps.version.outputs.version }}.exe.blockmap
+            dist/latest.yml

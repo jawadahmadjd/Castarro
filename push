@@ -176,39 +176,51 @@ def bump_version(
     return new_version
 
 
-def run_desktop_build_check(skip: bool) -> None:
+def npm_cmd(*args: str) -> list[str]:
+    return ["npm.cmd" if os.name == "nt" else "npm", *args]
+
+
+def installer_smoke_env() -> dict[str, str] | None:
+    if os.name != "nt":
+        return None
+    env = os.environ.copy()
+    if not env.get("CASTARRO_INSTALLER_SMOKE_ROOT"):
+        env["CASTARRO_INSTALLER_SMOKE_ROOT"] = r"C:\tmp"
+        print("[info] Using CASTARRO_INSTALLER_SMOKE_ROOT=C:\\tmp for installer smoke.")
+    else:
+        print(f"[info] Using CASTARRO_INSTALLER_SMOKE_ROOT={env['CASTARRO_INSTALLER_SMOKE_ROOT']}")
+    smoke_root = Path(env["CASTARRO_INSTALLER_SMOKE_ROOT"]).expanduser()
+    try:
+        smoke_root.mkdir(parents=True, exist_ok=True)
+        probe = smoke_root / ".castarro-write-probe"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink(missing_ok=True)
+    except Exception as exc:
+        raise RuntimeError(
+            "Installer smoke root is not writable. "
+            "Set CASTARRO_INSTALLER_SMOKE_ROOT to a writable path, e.g. C:\\tmp. "
+            f"Current value: {smoke_root}"
+        ) from exc
+    return env
+
+
+def run_desktop_build_check(skip: bool, *, include_installer_smoke: bool) -> None:
     if skip:
         print("[info] Skipping desktop release preflight check.")
         return
-    cmd = ["npm.cmd" if os.name == "nt" else "npm", "run", "release:check"]
-    env = None
-    if os.name == "nt":
-        env = os.environ.copy()
-        if not env.get("CASTARRO_INSTALLER_SMOKE_ROOT"):
-            env["CASTARRO_INSTALLER_SMOKE_ROOT"] = r"C:\tmp"
-            print("[info] Using CASTARRO_INSTALLER_SMOKE_ROOT=C:\\tmp for installer smoke.")
-        else:
-            print(f"[info] Using CASTARRO_INSTALLER_SMOKE_ROOT={env['CASTARRO_INSTALLER_SMOKE_ROOT']}")
-        smoke_root = Path(env["CASTARRO_INSTALLER_SMOKE_ROOT"]).expanduser()
-        try:
-            smoke_root.mkdir(parents=True, exist_ok=True)
-            probe = smoke_root / ".castarro-write-probe"
-            probe.write_text("ok", encoding="utf-8")
-            probe.unlink(missing_ok=True)
-        except Exception as exc:
-            raise RuntimeError(
-                "Installer smoke root is not writable. "
-                "Set CASTARRO_INSTALLER_SMOKE_ROOT to a writable path, e.g. C:\\tmp. "
-                f"Current value: {smoke_root}"
-            ) from exc
-    run(cmd, env=env)
+    for script_name in ("icon", "bundle:runtime", "dist", "smoke:packaged"):
+        run(npm_cmd("run", script_name))
+    if include_installer_smoke:
+        run(npm_cmd("run", "smoke:installer"), env=installer_smoke_env())
+    else:
+        print("[info] Skipping installer smoke so the installed Castarro app is not touched.")
 
 
 def run_mobile_build_check(skip: bool) -> None:
     if skip:
         print("[info] Skipping mobile release preflight check.")
         return
-    cmd = ["npm.cmd" if os.name == "nt" else "npm", "run", "verify:mobile"]
+    cmd = npm_cmd("run", "verify:mobile")
     run(cmd)
 
 
@@ -300,6 +312,11 @@ def parse_args() -> argparse.Namespace:
         help="Skip only the mobile preflight check (`npm run verify:mobile`).",
     )
     parser.add_argument(
+        "--with-installer-smoke",
+        action="store_true",
+        help="Also run installer smoke during local preflight. This installs/uninstalls Castarro and requires the installed app to be closed.",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Show push plan and exit without changing anything.",
@@ -339,12 +356,13 @@ def main() -> int:
         print(f"  - version: {target}")
         print(f"  - stage_all: {stage_all}")
         print(f"  - desktop_preflight_check: {run_check}")
+        print(f"  - installer_smoke_check: {run_check and args.with_installer_smoke}")
         print(f"  - mobile_preflight_check: {run_mobile_check}")
         print("  - tags/assets: handled by GitHub Action on main push")
         print("  - release assets: Windows installer + signed Android APK")
         return 0
 
-    run_desktop_build_check(skip=not run_check)
+    run_desktop_build_check(skip=not run_check, include_installer_smoke=args.with_installer_smoke)
     run_mobile_build_check(skip=not run_mobile_check)
     new_version = bump_version(
         current_version=old_version,
