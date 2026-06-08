@@ -368,6 +368,13 @@ h3 {
   font-size: 0.78rem;
 }
 
+.pill.icon-only {
+  width: 34px;
+  min-width: 34px;
+  padding-inline: 0;
+  text-align: center;
+}
+
 .panel {
   border-radius: var(--radius-lg);
   padding: var(--space-4);
@@ -456,6 +463,21 @@ h3 {
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   background: rgba(255, 255, 255, 0.58);
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  width: 100%;
+}
+
+.live-history-row:hover {
+  border-color: rgba(31, 111, 98, 0.32);
+  background: rgba(255, 255, 255, 0.82);
+}
+
+.live-history-row:focus-visible {
+  outline: 3px solid rgba(31, 111, 98, 0.24);
+  outline-offset: 2px;
 }
 
 .live-history-row.current {
@@ -641,23 +663,6 @@ h3 {
   display: flex;
   gap: var(--space-2);
   align-items: center;
-}
-
-.activity-filters {
-  display: inline-flex;
-  gap: 6px;
-  align-items: center;
-}
-
-.activity-filters .pill {
-  min-height: 32px;
-  padding: 6px 10px;
-}
-
-.activity-filters .pill.active {
-  background: var(--accent);
-  color: #fff;
-  border-color: transparent;
 }
 
 .wrap {
@@ -1159,6 +1164,10 @@ details[open] > .channel-summary::after {
   border-color: rgba(179, 66, 56, 0.45);
 }
 
+.progress-card.stopped {
+  border-color: rgba(111, 101, 84, 0.45);
+}
+
 .progress-head {
   display: flex;
   justify-content: space-between;
@@ -1187,10 +1196,20 @@ details[open] > .channel-summary::after {
   background: var(--danger);
 }
 
+.progress-card.stopped .progress-fill {
+  background: var(--muted);
+}
+
 .progress-message {
   color: var(--muted);
   font-size: 0.84rem;
   overflow-wrap: anywhere;
+}
+
+.progress-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .file-list {
@@ -1212,11 +1231,37 @@ details[open] > .channel-summary::after {
   font-weight: 650;
 }
 
+.file-option > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .file-option input {
   width: 16px;
   min-height: 16px;
   padding: 0;
   accent-color: var(--accent);
+}
+
+.file-remove-button {
+  flex: 0 0 auto;
+  margin-left: auto;
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 1rem;
+  font-weight: 900;
+  line-height: 1;
+}
+
+.file-remove-button:hover {
+  background: rgba(179, 66, 56, 0.1);
+  color: var(--danger);
 }
 
 .live-videos-card {
@@ -1229,10 +1274,58 @@ details[open] > .channel-summary::after {
 
 .live-video-option {
   display: grid;
-  grid-template-columns: 16px 74px minmax(0, 1fr);
+  grid-template-columns: 24px 74px minmax(0, 1fr) 28px;
   align-items: center;
   gap: 10px;
   min-height: 58px;
+  position: relative;
+  border-radius: 8px;
+  touch-action: none;
+  will-change: transform;
+}
+
+.live-video-list.is-dragging .live-video-option:not(.is-dragging) {
+  transition: transform 140ms ease;
+}
+
+.live-video-option.is-dragging {
+  z-index: 3;
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 12px 26px rgba(52, 44, 33, 0.18);
+  cursor: grabbing;
+}
+
+.live-video-drag-handle {
+  width: 24px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  cursor: grab;
+  font-family: inherit;
+  font-size: 1rem;
+  font-weight: 900;
+  letter-spacing: 0;
+  line-height: 1;
+}
+
+.live-video-drag-handle:hover,
+.live-video-drag-handle:focus-visible {
+  background: rgba(45, 124, 112, 0.1);
+  color: var(--accent);
+  outline: none;
+}
+
+.live-video-drag-handle:active {
+  cursor: grabbing;
+}
+
+.live-video-drag-handle span {
+  transform: rotate(90deg);
 }
 
 .video-thumb {
@@ -1921,8 +2014,7 @@ pre {
 }
 
 #activeConfigLabel,
-#channelCount,
-#taskState {
+#channelCount {
   display: inline-flex;
   align-items: center;
   min-height: 28px;
@@ -3049,8 +3141,7 @@ textarea {
   border-radius: var(--ui-radius);
 }
 
-.tab.active,
-.activity-filters .pill.active {
+.tab.active {
   background: var(--ui-green);
 }
 
@@ -3083,9 +3174,12 @@ button:focus-visible {
     grid-template-columns: 260px minmax(0, 1fr);
   }
 
-  .workspace-overview-grid,
-  .workspace-status-band {
+  .workspace-overview-grid {
     grid-template-columns: 1fr;
+  }
+
+  .workspace-status-band {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .workspace-header {
@@ -3099,6 +3193,10 @@ button:focus-visible {
 }
 
 @media (max-width: 780px) {
+  .workspace-status-band {
+    grid-template-columns: 1fr;
+  }
+
   .app-shell {
     display: block;
   }

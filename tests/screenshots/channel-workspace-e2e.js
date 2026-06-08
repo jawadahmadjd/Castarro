@@ -157,7 +157,7 @@ function makeConfig() {
         enabled: true,
         stream_key_env: "YT_CHANNEL_B_KEY",
         raw_playlist: ["Raw Videos/B/video-b.mp4"],
-        playlist: [],
+        playlist: ["Go Live/B/0002-b.mp4", "Go Live/B/0001-b.mp4"],
         youtube_auto_start: true,
         youtube_auto_stop: true,
         youtube_account_id: "acct-b",
@@ -198,6 +198,9 @@ function writeFixtureData(tempRoot) {
     if (name === "B") {
       for (let index = 1; index <= 24; index += 1) {
         fs.writeFileSync(path.join(rawDir, `scroll-fixture-${String(index).padStart(2, "0")}.mp4`), Buffer.from("fixture", "utf8"));
+      }
+      for (let index = 1; index <= 3; index += 1) {
+        fs.writeFileSync(path.join(goLiveDir, `${String(index).padStart(4, "0")}-b.mp4`), Buffer.from("fixture", "utf8"));
       }
     }
   }
@@ -280,21 +283,7 @@ async function runUiChecks(page, tempRoot) {
   const activeRailLabel = await page.locator("#channelWorkspaceRail .workspace-channel-item.active .channel-name").innerText();
   assert.equal(activeRailLabel.trim(), "B");
 
-  await page.locator("#railOpenFolders").click();
-  await page.waitForSelector("#settingsFoldersView.active");
-  const statusRoot = await page.evaluate(() => state.status.root);
-  assert.equal(
-    await page.locator('[data-default-field="raw_dir"]').inputValue(),
-    path.join(statusRoot || tempRoot, "Raw Videos")
-  );
-  assert.equal(
-    await page.locator('[data-default-field="normalized_dir"]').inputValue(),
-    path.join(statusRoot || tempRoot, "Go Live")
-  );
-  assert.equal(
-    await page.locator('[data-default-field="log_dir"]').inputValue(),
-    path.join(statusRoot || tempRoot, "logs")
-  );
+  assert.equal(await page.locator("#railOpenFolders").count(), 0);
 
   await page.locator("#railOpenEncoder").click();
   await page.waitForSelector("#settingsNormalizeView.active");
@@ -305,6 +294,16 @@ async function runUiChecks(page, tempRoot) {
   await page.locator("#workspacePageTitle").click();
   await page.evaluate(() => refresh());
   await page.waitForTimeout(250);
+  await page.evaluate(() => {
+    setWorkspaceSelectedChannel("B");
+    syncActiveSettingsChannelFromWorkspace(true);
+    state.rawFilesByChannel.B = Array.from({ length: 25 }, (_item, index) => {
+      const number = String(index + 1).padStart(2, "0");
+      const name = index === 0 ? "video-b.mp4" : `scroll-fixture-${number}.mp4`;
+      return { name, path: `Raw Videos/B/${name}`, folder: "Raw Videos/B" };
+    });
+    renderSettingsForms();
+  });
   assert.equal(await page.locator('[data-normalize-field="x264_preset"]').inputValue(), "p5");
 
   const rawList = page.locator("#normalizationChannels .file-picker .file-list");
@@ -414,7 +413,7 @@ async function runUiChecks(page, tempRoot) {
       }
       return {};
     };
-    window.open = () => ({ closed: false });
+    window.open = () => ({ closed: false, location: { href: "" }, close() {} });
     state.youtubeSelectedAccountId = "acct-a";
     try {
       await connectYoutube();
@@ -469,6 +468,87 @@ async function runUiChecks(page, tempRoot) {
   const selectedLiveCard = await page.locator("#channelSettings .selected-live-settings h3").first().innerText();
   assert.equal(selectedLiveCard.trim(), "Stream Settings");
   assert.equal(await page.locator(".selected-live-videos").count(), 1);
+  await page.evaluate(async () => {
+    state.configData.channels[1].playlist = ["Go Live/B/0002-b.mp4", "Go Live/B/0001-b.mp4"];
+    state.normalizedFilesByChannel.B = [
+      { name: "0001-b.mp4", path: "Go Live/B/0001-b.mp4", folder: "Go Live/B", exists: true },
+      { name: "0002-b.mp4", path: "Go Live/B/0002-b.mp4", folder: "Go Live/B", exists: true },
+      { name: "0003-b.mp4", path: "Go Live/B/0003-b.mp4", folder: "Go Live/B", exists: true },
+    ];
+    renderYoutubeSettingsPanel(state.configData);
+  });
+  await page.locator(".selected-live-videos .live-video-option").first().waitFor();
+  assert.equal(await page.locator(".selected-live-videos .live-video-drag-handle").count(), 3);
+  assert.equal(await page.locator(".selected-live-videos .live-video-remove-button").count(), 3);
+  assert.equal(await page.locator(".selected-live-videos [data-live-file]").count(), 0);
+  assert.equal(await page.locator(".selected-live-videos").getByRole("button", { name: "Select All" }).count(), 0);
+  assert.equal(await page.locator(".selected-live-videos").getByRole("button", { name: "Clear" }).count(), 0);
+  assert.equal(await page.locator(".selected-live-videos").getByRole("button", { name: "Refresh" }).count(), 0);
+  const initialLiveOrder = await page.locator(".selected-live-videos .video-option-name").evaluateAll((nodes) => (
+    nodes.map((node) => node.textContent.trim())
+  ));
+  assert.deepEqual(initialLiveOrder.slice(0, 2), ["0002-b.mp4", "0001-b.mp4"]);
+
+  const firstHandleBox = await page.locator('[data-live-file-path="Go Live/B/0002-b.mp4"] .live-video-drag-handle').boundingBox();
+  const secondRowBox = await page.locator('[data-live-file-path="Go Live/B/0001-b.mp4"]').boundingBox();
+  const thirdRowBox = await page.locator('[data-live-file-path="Go Live/B/0003-b.mp4"]').boundingBox();
+  assert.ok(firstHandleBox);
+  assert.ok(secondRowBox);
+  assert.ok(thirdRowBox);
+  const dragX = firstHandleBox.x + firstHandleBox.width / 2;
+  const dragStartY = firstHandleBox.y + firstHandleBox.height / 2;
+  const dragEndY = thirdRowBox.y + thirdRowBox.height + 18;
+  const dragResult = await page.evaluate(({ x, startY, endY }) => {
+    const handle = document.querySelector('[data-live-file-path="Go Live/B/0002-b.mp4"] .live-video-drag-handle');
+    const eventBase = {
+      currentTarget: handle,
+      button: 0,
+      clientX: x,
+      clientY: startY,
+      preventDefault() {},
+      stopPropagation() {},
+    };
+    startLiveVideoDrag(eventBase, 1);
+    const started = Boolean(state.liveVideoDrag);
+    moveLiveVideoDrag({ ...eventBase, currentTarget: document.body, clientY: endY });
+    const currentIndex = state.liveVideoDrag?.currentIndex;
+    endLiveVideoDrag({ ...eventBase, currentTarget: document.body, clientY: endY });
+    return {
+      handle: Boolean(handle),
+      started,
+      currentIndex,
+      activeAfter: Boolean(state.liveVideoDrag),
+      order: Array.from(document.querySelectorAll(".selected-live-videos [data-live-video-option]")).map((item) => item.dataset.liveFilePath),
+      playlist: state.configData.channels[1].playlist,
+    };
+  }, { x: dragX, startY: dragStartY, endY: dragEndY });
+  assert.equal(dragResult.handle, true);
+  assert.equal(dragResult.started, true);
+  assert.equal(dragResult.currentIndex, 2);
+  assert.equal(dragResult.activeAfter, false);
+  assert.deepEqual(dragResult.order, ["Go Live/B/0001-b.mp4", "Go Live/B/0003-b.mp4", "Go Live/B/0002-b.mp4"]);
+  assert.deepEqual(dragResult.playlist, ["Go Live/B/0001-b.mp4", "Go Live/B/0003-b.mp4", "Go Live/B/0002-b.mp4"]);
+  await page.waitForTimeout(180);
+  const draggedPlaylist = await page.evaluate(() => state.configData.channels[1].playlist);
+  assert.deepEqual(draggedPlaylist, ["Go Live/B/0001-b.mp4", "Go Live/B/0003-b.mp4", "Go Live/B/0002-b.mp4"]);
+
+  await page.locator('[data-live-file-path="Go Live/B/0002-b.mp4"] .live-video-remove-button').click();
+  assert.equal(await page.locator('[data-live-file-path="Go Live/B/0002-b.mp4"]').count(), 0);
+  const removedPlaylist = await page.evaluate(() => state.configData.channels[1].playlist);
+  assert.deepEqual(removedPlaylist, ["Go Live/B/0001-b.mp4", "Go Live/B/0003-b.mp4"]);
+
+  await page.evaluate(() => {
+    state.status.tasks = [
+      {
+        name: "normalize",
+        channel: "B",
+        running: true,
+        progress: { channel: "B", message: "encode source-b.mp4 -> 0003-b.mp4" },
+      },
+    ];
+    renderYoutubeSettingsPanel(state.configData);
+  });
+  assert.equal(await page.locator('[data-live-file-path="Go Live/B/0003-b.mp4"]').count(), 0);
 
   await page.locator("#railOpenDashboard").click();
   await page.waitForSelector("#viewControl.active");

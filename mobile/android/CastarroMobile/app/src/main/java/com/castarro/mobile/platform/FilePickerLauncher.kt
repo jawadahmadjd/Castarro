@@ -5,7 +5,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.Composable
 
 @Composable
-fun rememberVideoFilePicker(onPicked: (android.net.Uri) -> Unit) =
-    rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri != null) onPicked(uri)
+fun rememberVideoFilePicker(onPicked: (List<android.net.Uri>) -> Unit) =
+    rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        if (uris.isNotEmpty()) onPicked(uris)
     }

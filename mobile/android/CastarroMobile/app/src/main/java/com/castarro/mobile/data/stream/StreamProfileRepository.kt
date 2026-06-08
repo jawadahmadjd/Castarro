@@ -51,6 +51,39 @@ class StreamProfileRepository(
         dao.upsert(entity)
         return entity.toDomain()
     }
+
+    suspend fun saveYoutubeProfile(
+        channelId: String,
+        videoAssetId: String?,
+        rtmpServerUrl: String,
+        streamKeySecretRef: String,
+        youtubeBroadcastId: String,
+        loopEnabled: Boolean,
+        restartOnExit: Boolean = true,
+    ): StreamProfile {
+        require(rtmpServerUrl.startsWith("rtmp://") || rtmpServerUrl.startsWith("rtmps://")) {
+            "YouTube profile requires an RTMP or RTMPS ingest URL."
+        }
+        require(streamKeySecretRef.isNotBlank()) { "YouTube stream key reference is missing." }
+        require(youtubeBroadcastId.isNotBlank()) { "YouTube broadcast id is missing." }
+
+        val now = Instant.now().toString()
+        val entity = StreamProfileEntity(
+            id = "profile-${UUID.randomUUID()}",
+            channelId = channelId,
+            videoAssetId = videoAssetId,
+            mode = StreamProfileMode.YoutubeAccount.name,
+            rtmpServerUrl = rtmpServerUrl.trimEnd('/'),
+            streamKeySecretRef = streamKeySecretRef,
+            youtubeBroadcastId = youtubeBroadcastId,
+            loopEnabled = loopEnabled,
+            restartOnExit = restartOnExit,
+            createdAt = now,
+            updatedAt = now,
+        )
+        dao.upsert(entity)
+        return entity.toDomain()
+    }
 }
 
 private fun StreamProfileEntity.toDomain() = StreamProfile(

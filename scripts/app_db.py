@@ -105,6 +105,7 @@ def init_db() -> None:
               log_path TEXT,
               status TEXT NOT NULL,
               returncode INTEGER,
+              transferred_bytes INTEGER NOT NULL DEFAULT 0,
               started_at TEXT NOT NULL,
               stopped_at TEXT
             );
@@ -139,6 +140,8 @@ def init_db() -> None:
         }
         if "live_title" not in columns:
             db.execute("ALTER TABLE stream_sessions ADD COLUMN live_title TEXT")
+        if "transferred_bytes" not in columns:
+            db.execute("ALTER TABLE stream_sessions ADD COLUMN transferred_bytes INTEGER NOT NULL DEFAULT 0")
 
 
 def relative_or_absolute(path: Path) -> str:
@@ -443,13 +446,19 @@ def record_stream_start(
         return int(cursor.lastrowid)
 
 
-def record_stream_stop(config_name: str, channel_name: str, returncode: int | None) -> None:
+def record_stream_stop(
+    config_name: str,
+    channel_name: str,
+    returncode: int | None,
+    transferred_bytes: int | None = None,
+) -> None:
     init_db()
+    safe_bytes = max(0, int(transferred_bytes or 0))
     with connect() as db:
         db.execute(
             """
             UPDATE stream_sessions
-            SET status = 'stopped', returncode = ?, stopped_at = ?
+            SET status = 'stopped', returncode = ?, transferred_bytes = ?, stopped_at = ?
             WHERE id = (
               SELECT id FROM stream_sessions
               WHERE config_name = ? AND channel_name = ? AND status = 'running'
@@ -457,8 +466,29 @@ def record_stream_stop(config_name: str, channel_name: str, returncode: int | No
               LIMIT 1
             )
             """,
-            (returncode, now(), config_name, channel_name),
+            (returncode, safe_bytes, now(), config_name, channel_name),
         )
+
+
+def stream_transfer_today_bytes(config_name: str | None = None) -> int:
+    init_db()
+    local_midnight = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+    utc_midnight = local_midnight.astimezone(timezone.utc).isoformat(timespec="seconds")
+    where = ["datetime(started_at) >= datetime(?)"]
+    params: list[Any] = [utc_midnight]
+    if config_name:
+        where.append("config_name = ?")
+        params.append(config_name)
+    with connect() as db:
+        row = db.execute(
+            f"""
+            SELECT COALESCE(SUM(transferred_bytes), 0) AS total
+            FROM stream_sessions
+            WHERE {' AND '.join(where)}
+            """,
+            params,
+        ).fetchone()
+    return int(row["total"] or 0) if row else 0
 
 
 def stream_sessions(
@@ -492,7 +522,7 @@ def stream_sessions(
     with connect() as db:
         rows = db.execute(
             f"""
-            SELECT id, config_name, channel_name, live_title, status, returncode, started_at, stopped_at
+            SELECT id, config_name, channel_name, live_title, status, returncode, transferred_bytes, started_at, stopped_at
             FROM stream_sessions
             {where_clause}
             ORDER BY datetime(started_at) DESC, id DESC
@@ -511,6 +541,7 @@ def stream_sessions(
                 "live_title": str(row["live_title"] or row["channel_name"] or "Untitled live"),
                 "status": str(row["status"] or ""),
                 "returncode": row["returncode"],
+                "transferred_bytes": int(row["transferred_bytes"] or 0),
                 "started_at": str(row["started_at"] or ""),
                 "stopped_at": str(row["stopped_at"] or ""),
             }

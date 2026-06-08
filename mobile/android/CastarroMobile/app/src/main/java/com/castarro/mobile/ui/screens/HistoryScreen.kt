@@ -12,19 +12,32 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.castarro.mobile.domain.model.StreamSession
+import com.castarro.mobile.domain.model.StreamSessionStatus
+import com.castarro.mobile.ui.MobileUiState
 import com.castarro.mobile.ui.components.ChannelHeader
 import com.castarro.mobile.ui.components.ReadinessRow
 import com.castarro.mobile.ui.components.SurfaceCard
 import com.castarro.mobile.ui.theme.CastarroColors as Colors
 
 @Composable
-fun HistoryScreen(modifier: Modifier = Modifier) {
+fun HistoryScreen(
+    state: MobileUiState,
+    onChannelHeaderClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
     Column(
         modifier = modifier
             .fillMaxSize()
             .background(Colors.Background),
     ) {
-        ChannelHeader("History", "Inside Us", "Saved")
+        ChannelHeader(
+            title = "History",
+            channelName = state.channel?.displayName ?: "Castarro",
+            status = "${state.sessions.size} saved",
+            logoUri = state.channel?.logoUri,
+            onChannelClick = onChannelHeaderClick,
+        )
         Column(
             modifier = Modifier
                 .verticalScroll(rememberScrollState())
@@ -32,11 +45,35 @@ fun HistoryScreen(modifier: Modifier = Modifier) {
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             SurfaceCard {
-                Text("Recent sessions", fontWeight = FontWeight.Bold)
-                ReadinessRow("Inside Us live", "Today | ready-1.mp4 | 42 min", "Done")
-                ReadinessRow("Daily Tech", "Yesterday | ready-1.mp4 | 58 min", "Done")
-                ReadinessRow("Travel replay", "Wrong stream key", "Failed", "bad")
+                Text("Stream sessions", fontWeight = FontWeight.Bold)
+                if (state.sessions.isEmpty()) {
+                    Text("No stream attempts have been recorded on this device.", color = Colors.Muted)
+                } else {
+                    state.sessions.forEach { session ->
+                        val videoName = state.videos.firstOrNull { it.id == session.videoAssetId }?.displayName
+                            ?: "Imported video"
+                        ReadinessRow(
+                            label = videoName,
+                            value = sessionSummary(session),
+                            badge = session.status.name,
+                            tone = sessionTone(session.status),
+                        )
+                    }
+                }
             }
         }
     }
 }
+
+private fun sessionSummary(session: StreamSession): String {
+    val finished = session.endedAt ?: "In progress"
+    val failure = session.failureReason?.let { " | $it" }.orEmpty()
+    return "${session.startedAt} -> $finished$failure"
+}
+
+private fun sessionTone(status: StreamSessionStatus): String =
+    when (status) {
+        StreamSessionStatus.Failed -> "bad"
+        StreamSessionStatus.Reconnecting -> "warn"
+        else -> "good"
+    }

@@ -1,8 +1,9 @@
 const { app, BrowserWindow, Menu, Tray, dialog, ipcMain, shell } = require("electron");
-const { spawn } = require("child_process");
+const { execFile, spawn } = require("child_process");
 const fs = require("fs");
 const http = require("http");
 const net = require("net");
+const os = require("os");
 const path = require("path");
 
 const HEALTHCHECK_TIMEOUT_MS = 30000;
@@ -28,6 +29,7 @@ let updateCheckTimer = null;
 let trayStatusTimer = null;
 let lastTrayTooltip = "";
 let lastTrayStatusLabel = "";
+const externalCpuSamples = new Map();
 const updateState = {
   status: "idle",
   version: null,
@@ -36,6 +38,100 @@ const updateState = {
   message: ""
 };
 let autoUpdater = null;
+
+function safeNumber(value, fallback = 0) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function memoryBytesFromElectronMetric(metric) {
+  const memory = metric && typeof metric.memory === "object" ? metric.memory : {};
+  const workingSet = safeNumber(memory.workingSetSize || memory.privateBytes || memory.peakWorkingSetSize, 0);
+  return Math.max(0, Math.round(workingSet * 1024));
+}
+
+function electronProcessMetrics() {
+  try {
+    return app.getAppMetrics().map((metric) => ({
+      pid: metric.pid,
+      name: metric.type || "Electron",
+      cpuPercent: Math.max(0, safeNumber(metric.cpu?.percentCPUUsage, 0)),
+      memoryBytes: memoryBytesFromElectronMetric(metric),
+    }));
+  } catch (error) {
+    diagnosticLog("electron app metrics failed", error);
+    return [];
+  }
+}
+
+function queryWindowsProcesses(pids) {
+  const ids = [...new Set((pids || []).map((pid) => Math.floor(Number(pid))).filter((pid) => pid > 0))];
+  if (!ids.length || process.platform !== "win32") return Promise.resolve([]);
+  const command = `$ids=@(${ids.join(",")}); Get-Process -Id $ids -ErrorAction SilentlyContinue | Select-Object Id,ProcessName,CPU,WorkingSet64 | ConvertTo-Json -Compress`;
+  return new Promise((resolve) => {
+    execFile(
+      "powershell.exe",
+      ["-NoProfile", "-Command", command],
+      { windowsHide: true, timeout: 2500, maxBuffer: 1024 * 1024 },
+      (error, stdout) => {
+        if (error || !String(stdout || "").trim()) {
+          if (error) diagnosticLog("windows process metrics failed", error);
+          resolve([]);
+          return;
+        }
+        try {
+          const parsed = JSON.parse(stdout);
+          const rows = Array.isArray(parsed) ? parsed : [parsed];
+          const nowMs = Date.now();
+          const cpuCount = Math.max(1, os.cpus()?.length || 1);
+          const metrics = rows.map((row) => {
+            const pid = Math.floor(safeNumber(row.Id, 0));
+            const cpuSeconds = safeNumber(row.CPU, 0);
+            const previous = externalCpuSamples.get(pid);
+            externalCpuSamples.set(pid, { cpuSeconds, sampledAt: nowMs });
+            let cpuPercent = 0;
+            if (previous && nowMs > previous.sampledAt && cpuSeconds >= previous.cpuSeconds) {
+              const cpuDelta = cpuSeconds - previous.cpuSeconds;
+              const wallDelta = (nowMs - previous.sampledAt) / 1000;
+              cpuPercent = (cpuDelta / wallDelta / cpuCount) * 100;
+            }
+            return {
+              pid,
+              name: String(row.ProcessName || "Process"),
+              cpuPercent: Math.max(0, cpuPercent),
+              memoryBytes: Math.max(0, Math.round(safeNumber(row.WorkingSet64, 0))),
+            };
+          });
+          resolve(metrics);
+        } catch (parseError) {
+          diagnosticLog("windows process metrics parse failed", parseError);
+          resolve([]);
+        }
+      },
+    );
+  });
+}
+
+async function collectUsageMetrics(payload = {}) {
+  const streamPids = Array.isArray(payload?.pids) ? payload.pids : [];
+  const backendPid = backend?.pid || readBackendInfo()?.pid || null;
+  const externalPids = [backendPid, ...streamPids].filter(Boolean);
+  const electronMetrics = electronProcessMetrics();
+  const externalMetrics = await queryWindowsProcesses(externalPids);
+  const processes = [...electronMetrics, ...externalMetrics].filter((item) => item.pid > 0);
+  const cpuPercent = processes.reduce((sum, item) => sum + safeNumber(item.cpuPercent, 0), 0);
+  const memoryBytes = processes.reduce((sum, item) => sum + safeNumber(item.memoryBytes, 0), 0);
+  return {
+    cpuPercent,
+    memoryBytes,
+    processes,
+    batteryToday: {
+      status: "unavailable",
+      label: "Unavailable",
+      detail: "Windows does not expose exact per-app battery consumption to a normal desktop app.",
+    },
+  };
+}
 
 function configureUserDataPath() {
   const configured = process.env.STREAM_DESKTOP_USER_DATA_DIR;
@@ -398,12 +494,16 @@ async function requestQuit(source = "unknown", mode = "ui-only", options = {}) {
 
 ipcMain.handle("desktop:get-update-status", () => ({ ...updateState }));
 ipcMain.handle("desktop:get-app-version", () => app.getVersion());
+ipcMain.handle("desktop:get-usage-metrics", async (_event, payload) => collectUsageMetrics(payload));
 ipcMain.handle("desktop:select-folder", async (_event, payload) => {
   const defaultPath = typeof payload?.defaultPath === "string" && payload.defaultPath.trim()
     ? payload.defaultPath.trim()
     : undefined;
+  const title = typeof payload?.title === "string" && payload.title.trim()
+    ? payload.title.trim()
+    : "Select folder";
   const result = await dialog.showOpenDialog(mainWindow || undefined, {
-    title: "Select folder",
+    title,
     defaultPath,
     properties: ["openDirectory", "createDirectory"],
   });
@@ -411,6 +511,34 @@ ipcMain.handle("desktop:select-folder", async (_event, payload) => {
     return { canceled: true, path: null };
   }
   return { canceled: false, path: result.filePaths[0] };
+});
+ipcMain.handle("desktop:open-external", async (_event, rawUrl) => {
+  const url = String(rawUrl || "").trim();
+  let parsed = null;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new Error("External URL is invalid.");
+  }
+  if (!["http:", "https:"].includes(parsed.protocol)) {
+    throw new Error("Only web URLs can be opened externally.");
+  }
+  await shell.openExternal(parsed.toString());
+  return { ok: true };
+});
+ipcMain.handle("desktop:export-text-downloads", async (_event, payload) => {
+  const rawName = String(payload?.filename || "castarro-activity-log.txt").trim();
+  const filename = rawName
+    .replace(/[<>:"/\\|?*\x00-\x1F]/g, "-")
+    .replace(/^\.+/, "")
+    .slice(0, 140) || "castarro-activity-log.txt";
+  const safeFilename = filename.toLowerCase().endsWith(".txt") ? filename : `${filename}.txt`;
+  const text = String(payload?.text || "");
+  const downloads = app.getPath("downloads");
+  mkdirp(downloads);
+  const target = path.join(downloads, safeFilename);
+  fs.writeFileSync(target, text, "utf8");
+  return { ok: true, path: target };
 });
 ipcMain.handle("desktop:request-quit", async () => {
   const ok = await requestQuit("renderer", "ui-only");

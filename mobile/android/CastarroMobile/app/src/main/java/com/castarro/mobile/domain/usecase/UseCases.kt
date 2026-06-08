@@ -11,6 +11,7 @@ import com.castarro.mobile.domain.model.VideoAsset
 import com.castarro.mobile.domain.model.YoutubeBroadcast
 import com.castarro.mobile.streaming.StreamCommandBuilder
 import com.castarro.mobile.streaming.VideoCompatibilityProbe
+import java.io.File
 
 class PickVideoUseCase {
     suspend operator fun invoke(uri: Uri): Uri = uri
@@ -25,9 +26,16 @@ class ValidateVideoUseCase(
 class StartStreamUseCase(
     private val commandBuilder: StreamCommandBuilder = StreamCommandBuilder(),
 ) {
-    operator fun invoke(profile: StreamProfile, videoPath: String, streamKey: String): List<String> {
-        require(profile.mode == StreamProfileMode.ManualKey) { "Only manual RTMPS mode is enabled for MVP." }
-        return commandBuilder.copyModeCommand(profile, videoPath, streamKey)
+    operator fun invoke(
+        profile: StreamProfile,
+        videoPaths: List<String>,
+        streamKey: String,
+        playlistFile: File,
+    ): List<String> {
+        require(profile.mode == StreamProfileMode.ManualKey || profile.mode == StreamProfileMode.YoutubeAccount) {
+            "This stream profile mode is not supported on mobile."
+        }
+        return commandBuilder.copyModeCommand(profile, videoPaths, streamKey, playlistFile)
     }
 }
 
@@ -38,8 +46,8 @@ class StopStreamUseCase {
 class CreateYoutubeBroadcastUseCase(
     private val youtubeRepository: YoutubeRepository,
 ) {
-    suspend operator fun invoke(request: CreateBroadcastRequest): YoutubeBroadcast =
-        youtubeRepository.createBroadcast(request)
+    suspend operator fun invoke(accessToken: String, request: CreateBroadcastRequest): YoutubeBroadcast =
+        youtubeRepository.createBroadcast(accessToken, request)
 }
 
 class SaveStreamProfileUseCase(

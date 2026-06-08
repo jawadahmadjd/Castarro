@@ -26,8 +26,8 @@
       "fixture": "fixtures/stream-profiles/youtube-account.json"
     }
   ],
-  "futureAndroidTask": {
+  "androidFixtureCoverage": {
     "path": "mobile/android/CastarroMobile/app/src/test/java/com/castarro/mobile/SharedCoreFixtureTest.kt",
-    "description": "Load these same fixtures in Kotlin tests once the Android Gradle environment is available."
+    "description": "Android unit tests verify the shared core fixtures and feature flags remain available to the mobile app."
   }
 }

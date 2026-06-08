@@ -38,6 +38,8 @@ THUMBNAIL_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".bmp"}
 THUMBNAIL_MAX_BYTES = 2 * 1024 * 1024
 YOUTUBE_CHANNEL_NAME_MATCH_THRESHOLD = 0.80
 UI_PORT = int(os.environ.get("STREAM_UI_PORT", "8765"))
+MEDIA_READY_CACHE: dict[tuple[str, int, int, str], bool] = {}
+FFMPEG_SIZE_PATTERN = re.compile(r"size=\s*([0-9]+(?:\.[0-9]+)?)\s*([KMGT]?i?B|[kmgt]?B)", re.IGNORECASE)
 
 
 def windows_creation_flags(*, new_process_group: bool = False) -> int:
@@ -70,6 +72,26 @@ def mask_secret(value: Any) -> str:
     return f"********{text[-3:]}"
 
 
+def parse_ffmpeg_size_bytes(text: str) -> int:
+    multipliers = {
+        "b": 1,
+        "kb": 1024,
+        "kib": 1024,
+        "mb": 1024 ** 2,
+        "mib": 1024 ** 2,
+        "gb": 1024 ** 3,
+        "gib": 1024 ** 3,
+        "tb": 1024 ** 4,
+        "tib": 1024 ** 4,
+    }
+    latest = 0
+    for match in FFMPEG_SIZE_PATTERN.finditer(text or ""):
+        value = float(match.group(1))
+        unit = match.group(2).lower()
+        latest = int(value * multipliers.get(unit, 1))
+    return max(0, latest)
+
+
 def task_progress(
     action: str,
     channel_name: str | None,
@@ -81,6 +103,7 @@ def task_progress(
         "action": action,
         "channel": channel_name,
         "percent": 0,
+        "file_percent": 0,
         "current": 0,
         "total": 0,
         "status": "running" if running else "success" if returncode == 0 else "failed",
@@ -105,8 +128,8 @@ def task_progress(
             progress["total"] = int(file_match.group(2))
             progress["message"] = file_match.group(3)
             file_percent = 0
-            if progress["total"]:
-                progress["percent"] = int(((progress["current"] - 1) / progress["total"]) * 100)
+            progress["file_percent"] = file_percent
+            progress["percent"] = file_percent
             continue
 
         progress_match = re.search(r"^PROGRESS file=(\d+) total=(\d+) percent=(\d+)", line)
@@ -116,11 +139,13 @@ def task_progress(
             file_percent = int(progress_match.group(3))
             progress["current"] = current
             progress["total"] = total
-            progress["percent"] = int((((current - 1) + (file_percent / 100)) / total) * 100) if total else file_percent
+            progress["file_percent"] = file_percent
+            progress["percent"] = file_percent
             continue
 
     if not running:
         progress["percent"] = 100 if returncode == 0 else progress["percent"]
+        progress["file_percent"] = progress["percent"]
         if returncode == 0:
             progress["message"] = "Finished"
         elif lines:
@@ -139,6 +164,7 @@ class Task:
         self.started_at = time.time()
         self.finished_at: float | None = None
         self.returncode: int | None = None
+        self.stopped_by_user = False
         self.lines: deque[str] = deque(maxlen=300)
         app_db.record_task_start(
             self.id,
@@ -166,14 +192,25 @@ class Task:
         self.returncode = self.process.wait()
         self.finished_at = time.time()
         app_db.record_task_finish(self.id, self.returncode, "\n".join(list(self.lines)[-80:]))
-        if self.name == "normalize" and self.returncode == 0:
+        if self.name == "normalize":
             config, _error = load_config_or_none(self.config_name)
             if config:
+                removed = cleanup_encoding_outputs(config, self.channel_name)
+                if removed:
+                    self.lines.append(f"Discarded {removed} incomplete encoding file(s).")
+                    app_db.record_event(
+                        "normalize_incomplete_outputs_discarded",
+                        self.config_name,
+                        self.channel_name,
+                        {"removed": removed},
+                    )
+            if config and self.returncode == 0:
                 app_db.sync_config(self.config_name, config)
 
     def stop(self) -> None:
         if self.process.poll() is not None:
             return
+        self.stopped_by_user = True
         self.lines.append("Stop requested.")
         if os.name == "nt":
             subprocess.run(
@@ -198,6 +235,7 @@ class Task:
             "returncode": returncode,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
+            "stopped_by_user": self.stopped_by_user,
             "lines": lines,
             "progress": task_progress(self.name, self.channel_name, lines, running, returncode),
         }
@@ -210,10 +248,15 @@ class StreamState:
         self.started_at = time.time()
         self.log_path = Path(running.log_handle.name)
 
+    def transferred_bytes(self) -> int:
+        return parse_ffmpeg_size_bytes(tail_file(self.log_path, max_chars=20000))
+
     def as_dict(self) -> dict[str, Any]:
         process = self.running.process
         channel_name = str(self.running.channel.get("name") or "")
         preview_manifest = self.running.preview_manifest
+        log_tail = tail_file(self.log_path)
+        transferred_bytes = parse_ffmpeg_size_bytes(log_tail)
         return {
             "name": channel_name,
             "pid": process.pid,
@@ -221,7 +264,8 @@ class StreamState:
             "returncode": process.returncode,
             "started_at": self.started_at,
             "log_path": str(self.log_path),
-            "log_tail": tail_file(self.log_path),
+            "log_tail": log_tail,
+            "transferred_bytes": transferred_bytes,
             "preview_url": f"/preview/{quote(channel_name, safe='')}/index.m3u8" if preview_manifest else None,
             "preview_ready": bool(preview_manifest and preview_manifest.exists()),
             "preview_warning": self.running.preview_warning,
@@ -1664,6 +1708,85 @@ def relative_or_absolute(path: Path) -> str:
         return str(path.resolve())
 
 
+def executable_or_project_path(value: Any, fallback: str) -> str:
+    text = str(value or fallback).strip() or fallback
+    path = Path(text)
+    if path.is_absolute():
+        return str(path)
+    if any(part in text for part in ("/", "\\")):
+        return str(resolve_project_path(text))
+    return text
+
+
+def cleanup_encoding_outputs(config: dict[str, Any], channel_name: str | None = None) -> int:
+    defaults = config.get("defaults", {})
+    go_live_dir = resolve_project_path(defaults.get("normalized_dir", "Go Live"))
+    roots: list[Path] = []
+    if channel_name:
+        roots.append(go_live_dir / channel_name)
+    else:
+        roots.append(go_live_dir)
+
+    removed = 0
+    for root in roots:
+        if not root.exists():
+            continue
+        for path in root.rglob("*.encoding.*"):
+            if not path.is_file():
+                continue
+            path.unlink(missing_ok=True)
+            removed += 1
+    return removed
+
+
+def normalized_media_is_ready(config: dict[str, Any], path: Path) -> bool:
+    if not path.exists() or not path.is_file() or path.suffix.lower() not in VIDEO_EXTENSIONS:
+        return False
+    if ".encoding." in path.name:
+        return False
+
+    try:
+        stat = path.stat()
+    except OSError:
+        return False
+    if stat.st_size <= 0:
+        return False
+
+    ffprobe_path = executable_or_project_path(config.get("defaults", {}).get("ffprobe_path"), "ffprobe")
+    cache_key = (str(path.resolve()), stat.st_mtime_ns, stat.st_size, ffprobe_path)
+    cached = MEDIA_READY_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    command = [
+        ffprobe_path,
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        str(path),
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=str(ROOT),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=10,
+            creationflags=windows_creation_flags(),
+            check=False,
+        )
+        ready = completed.returncode == 0 and float((completed.stdout or "0").strip() or "0") > 0
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        ready = False
+
+    MEDIA_READY_CACHE[cache_key] = ready
+    return ready
+
+
 def raw_video_files(config_name: str, channel_name: str | None) -> list[dict[str, str]]:
     config, error = load_config_or_none(config_name)
     if not config:
@@ -1676,7 +1799,7 @@ def raw_video_files(config_name: str, channel_name: str | None) -> list[dict[str
     if search_root.exists():
         for path in sorted(
             path for path in search_root.rglob("*")
-            if path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS
+            if normalized_media_is_ready(config, path)
         ):
             files_by_path[relative_or_absolute(path)] = path
 
@@ -1731,7 +1854,7 @@ def normalized_video_files(config_name: str, channel_name: str | None) -> list[d
                     if not isinstance(item, str):
                         continue
                     path = resolve_project_path(item)
-                    if path.suffix.lower() in VIDEO_EXTENSIONS:
+                    if normalized_media_is_ready(config, path):
                         files_by_path[relative_or_absolute(path)] = path
             break
 
@@ -1825,7 +1948,7 @@ def normalized_video_count(config: dict[str, Any], channel_name: str) -> int:
     return sum(
         1
         for path in channel_dir.iterdir()
-        if path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS
+        if normalized_media_is_ready(config, path)
     )
 
 
@@ -1942,7 +2065,13 @@ def available_configs() -> list[str]:
     return sorted(path.name for path in ROOT.glob("*.json") if path.is_file())
 
 
-def task_command(action: str, config_name: str, channel: str | None, force: bool) -> list[str]:
+def task_command(
+    action: str,
+    config_name: str,
+    channel: str | None,
+    force: bool,
+    start_index: int = 1,
+) -> list[str]:
     python = sys.executable
     if action == "validate":
         command = [python, str(CODE_ROOT / "scripts" / "validate_media.py"), "--config", config_name]
@@ -1950,6 +2079,8 @@ def task_command(action: str, config_name: str, channel: str | None, force: bool
         command = [python, str(CODE_ROOT / "scripts" / "normalize_media.py"), "--config", config_name]
         if force:
             command.append("--force")
+        if start_index > 1:
+            command += ["--start-index", str(start_index)]
     elif action == "test-stream":
         if not channel:
             raise ValueError("Test stream requires a channel.")
@@ -1962,8 +2093,14 @@ def task_command(action: str, config_name: str, channel: str | None, force: bool
     return command
 
 
-def start_task(action: str, config_name: str, channel: str | None, force: bool) -> Task:
-    task = Task(action, task_command(action, config_name, channel, force), config_name, channel)
+def start_task(
+    action: str,
+    config_name: str,
+    channel: str | None,
+    force: bool,
+    start_index: int = 1,
+) -> Task:
+    task = Task(action, task_command(action, config_name, channel, force, start_index), config_name, channel)
     with STATE.lock:
         STATE.tasks.appendleft(task)
     return task
@@ -2056,8 +2193,14 @@ def stop_stream(channel_name: str | None) -> list[str]:
             stream_manager.stop_stream(state.running)
             if state.running.preview_manifest:
                 stream_manager.clear_directory(state.running.preview_manifest.parent)
-            app_db.record_stream_stop(state.config_name, name, state.running.process.returncode)
-            app_db.record_event("stream_stopped", state.config_name, name, {"returncode": state.running.process.returncode})
+            transferred_bytes = state.transferred_bytes()
+            app_db.record_stream_stop(state.config_name, name, state.running.process.returncode, transferred_bytes)
+            app_db.record_event(
+                "stream_stopped",
+                state.config_name,
+                name,
+                {"returncode": state.running.process.returncode, "transferred_bytes": transferred_bytes},
+            )
             stopped.append(name)
     return stopped
 
@@ -2087,6 +2230,7 @@ def status_payload(config_name: str) -> dict[str, Any]:
         for name, stream in streams.items()
         if stream.get("running")
     }
+    active_transfer_bytes = sum(int(stream.get("transferred_bytes") or 0) for stream in streams.values())
     stream_history = app_db.recent_stream_sessions(config_name, limit=12)
     for session in stream_history:
         session["is_active"] = (
@@ -2124,6 +2268,15 @@ def status_payload(config_name: str) -> dict[str, Any]:
         "binaries": runtime_paths.runtime_binary_status(),
         "streams": streams,
         "stream_history": stream_history,
+        "usage": {
+            "stream_transfer_today_bytes": app_db.stream_transfer_today_bytes(config_name) + active_transfer_bytes,
+            "active_stream_transfer_bytes": active_transfer_bytes,
+            "battery_today": {
+                "status": "unavailable",
+                "label": "Unavailable",
+                "detail": "Exact per-app battery usage is not exposed to this desktop app by the operating system.",
+            },
+        },
         "tasks": tasks,
         "activity_events": app_db.recent_app_events(config_name, limit=60),
     }
@@ -2432,7 +2585,8 @@ class Handler(BaseHTTPRequestHandler):
                 action = str(body.get("action", ""))
                 channel = body.get("channel") or None
                 update_request_trace(self, channel_name=channel, task_action=action)
-                task = start_task(action, config_name, channel, bool(body.get("force")))
+                start_index = max(1, int(body.get("start_index") or 1))
+                task = start_task(action, config_name, channel, bool(body.get("force")), start_index)
                 json_response(self, {"ok": True, "task": task.as_dict()})
                 return
 

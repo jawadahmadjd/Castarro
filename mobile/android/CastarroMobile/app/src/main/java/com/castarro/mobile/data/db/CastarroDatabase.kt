@@ -4,12 +4,15 @@ import androidx.room.Database
 import androidx.room.Entity
 import androidx.room.PrimaryKey
 import androidx.room.RoomDatabase
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 
 @Entity(tableName = "channels")
 data class ChannelEntity(
     @PrimaryKey val id: String,
     val displayName: String,
     val youtubeAccountId: String?,
+    val logoUri: String?,
 )
 
 @Entity(tableName = "video_assets")
@@ -68,7 +71,7 @@ data class StreamSessionEntity(
         StreamProfileEntity::class,
         StreamSessionEntity::class,
     ],
-    version = 1,
+    version = 2,
     exportSchema = true,
 )
 abstract class CastarroDatabase : RoomDatabase() {
@@ -76,4 +79,12 @@ abstract class CastarroDatabase : RoomDatabase() {
     abstract fun videoAssetDao(): VideoAssetDao
     abstract fun streamProfileDao(): StreamProfileDao
     abstract fun streamSessionDao(): StreamSessionDao
+
+    companion object {
+        val MIGRATION_1_2 = object : Migration(1, 2) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE channels ADD COLUMN logoUri TEXT")
+            }
+        }
+    }
 }

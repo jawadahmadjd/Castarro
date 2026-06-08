@@ -39,9 +39,9 @@
       "id": "youtube_account_mode",
       "scope": "shared",
       "desktop": true,
-      "android": false,
+      "android": true,
       "ios": false,
-      "status": "future"
+      "status": "active"
     }
   ]
 }

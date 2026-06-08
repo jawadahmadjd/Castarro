@@ -8,8 +8,8 @@ Native Android MVP scaffold for Castarro's mobile copy-mode streaming app.
 - Prerecorded video files only.
 - No camera permission.
 - No microphone permission.
-- Manual RTMPS stream profile first.
-- YouTube account/OAuth mode remains a later feature.
+- Manual RTMPS stream profiles.
+- YouTube account/OAuth mode for creating Live events directly on mobile.
 - Copy-mode promise mirrors desktop: `-re -i video.mp4 -c copy -f flv rtmps://...`.
 
 ## Project Stack
@@ -20,17 +20,18 @@ Native Android MVP scaffold for Castarro's mobile copy-mode streaming app.
 - Room.
 - DataStore.
 - AndroidX Security Crypto for stream-key references.
+- Google Play Services Authorization for YouTube account consent.
 - Foreground service boundary for active streaming.
 
 ## Product Decisions Still Required
 
-- Google OAuth verification scope, consent copy, and account-mode release timing.
+- Google OAuth consent-screen verification and production publishing review.
 
 ## Product Decisions Made
 
 - MVP scope is Android-first, prerecorded-file-only, and copy/remux-only.
 - MVP excludes camera, microphone, and live capture.
-- First release uses manual RTMP/RTMPS keys only; YouTube OAuth remains a later mode.
+- Mobile YouTube account mode creates a Live broadcast and stream, binds them, and stores the generated stream name encrypted on device.
 - Mobile streaming backend targets an LGPL-compatible Android FFmpeg executable or native wrapper. See `docs/FFMPEG_BACKEND_DECISION.md`.
 
 ## Shared Core

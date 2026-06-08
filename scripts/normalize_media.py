@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -217,7 +218,7 @@ def run_ffmpeg_with_progress(command: list[str], duration_seconds: float | None,
                 last_percent = file_percent
         elif line.startswith("progress=end"):
             print(f"PROGRESS file={file_index} total={total_files} percent=100", flush=True)
-        elif not line.startswith(("frame=", "fps=", "stream_", "bitrate=", "total_size=", "out_time=", "dup_frames=", "drop_frames=", "speed=", "progress=")):
+        elif not line.startswith(("frame=", "fps=", "stream_", "bitrate=", "total_size=", "out_time=", "out_time_ms=", "out_time_us=", "dup_frames=", "drop_frames=", "speed=", "progress=")):
             print(line, flush=True)
     return process.wait()
 
@@ -250,6 +251,31 @@ def next_versioned_output(path: Path) -> Path:
         counter += 1
 
 
+def existing_versioned_output(path: Path) -> Path | None:
+    candidates: list[tuple[int, Path]] = []
+    if path.exists():
+        candidates.append((1, path))
+
+    pattern = f"{path.stem}-v*{path.suffix}"
+    for candidate in path.parent.glob(pattern):
+        match = re.search(r"-v(\d+)$", candidate.stem)
+        if match:
+            candidates.append((int(match.group(1)), candidate))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: item[0])[1]
+
+
+def encoding_output_path(path: Path) -> Path:
+    return path.with_name(f"{path.stem}.encoding{path.suffix}")
+
+
+def remove_stale_encoding_outputs(channel_dir: Path) -> None:
+    for path in channel_dir.glob("*.encoding.*"):
+        if path.is_file():
+            path.unlink(missing_ok=True)
+
+
 def relative_or_absolute(config_dir: Path, path: Path) -> str:
     try:
         return path.resolve().relative_to(config_dir).as_posix()
@@ -263,6 +289,7 @@ def normalize_channel(
     channel: dict[str, Any],
     force: bool,
     dry_run: bool,
+    start_index: int = 1,
 ) -> tuple[dict[str, Any], list[Path]]:
     defaults = config.get("defaults", {})
     ffmpeg_path = str(defaults.get("ffmpeg_path", "ffmpeg"))
@@ -270,6 +297,7 @@ def normalize_channel(
     normalized_root = resolve_path(config_dir, defaults.get("normalized_dir", "Go Live"))
     channel_dir = normalized_root / str(channel["name"])
     channel_dir.mkdir(parents=True, exist_ok=True)
+    remove_stale_encoding_outputs(channel_dir)
     selected_profile = profile(config, channel)
 
     normalized_files: list[Path] = []
@@ -284,6 +312,15 @@ def normalize_channel(
             raise SystemExit(f"Source file does not exist: {source}")
 
         default_output = channel_dir / f"{index:04d}-{source.stem}.mp4"
+        if index < start_index:
+            existing_output = existing_versioned_output(default_output)
+            if not existing_output:
+                raise SystemExit(f"Cannot resume before missing normalized video: {default_output.name}")
+            normalized_files.append(existing_output)
+            print(f"FILE {index}/{len(sources)} skip {source.name} -> {existing_output.name}", flush=True)
+            print(f"PROGRESS file={index} total={len(sources)} percent=100", flush=True)
+            continue
+
         output = default_output
         if default_output.exists() and not force:
             output = next_versioned_output(default_output)
@@ -291,9 +328,11 @@ def normalize_channel(
                 f"HEADS-UP existing normalized video: {default_output.name}; creating {output.name}",
                 flush=True,
             )
+        temp_output = encoding_output_path(output)
+        temp_output.unlink(missing_ok=True)
         normalized_files.append(output)
 
-        command = build_ffmpeg_command(ffmpeg_path, source, output, selected_profile)
+        command = build_ffmpeg_command(ffmpeg_path, source, temp_output, selected_profile)
         action = "replace" if default_output.exists() and force and output == default_output else "encode"
         print(f"FILE {index}/{len(sources)} {action} {source.name} -> {output.name}", flush=True)
         if dry_run:
@@ -304,7 +343,9 @@ def normalize_channel(
         duration_seconds = probe_duration(ffprobe_path, source)
         returncode = run_ffmpeg_with_progress(command, duration_seconds, index, len(sources))
         if returncode != 0:
+            temp_output.unlink(missing_ok=True)
             raise SystemExit(f"FFmpeg failed for {source} with exit code {returncode}")
+        temp_output.replace(output)
 
     ready_channel = dict(channel)
     ready_channel["playlist"] = [
@@ -358,6 +399,12 @@ def main() -> int:
         action="store_true",
         help="Normalize disabled channels too.",
     )
+    parser.add_argument(
+        "--start-index",
+        type=int,
+        default=1,
+        help="Resume by reusing normalized outputs before this 1-based source index.",
+    )
     args = parser.parse_args()
 
     config_path = Path(args.config).resolve()
@@ -375,8 +422,9 @@ def main() -> int:
         raise SystemExit("No channels selected for normalization.")
 
     ready_channels: list[dict[str, Any]] = []
+    start_index = max(1, int(args.start_index or 1))
     for channel in channels:
-        ready_channel, _files = normalize_channel(config, config_dir, channel, args.force, args.dry_run)
+        ready_channel, _files = normalize_channel(config, config_dir, channel, args.force, args.dry_run, start_index)
         ready_channels.append(ready_channel)
 
     if not args.dry_run:

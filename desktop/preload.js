@@ -16,8 +16,17 @@ contextBridge.exposeInMainWorld("desktopShell", {
   getAppVersion() {
     return ipcRenderer.invoke("desktop:get-app-version");
   },
+  getUsageMetrics(payload = {}) {
+    return ipcRenderer.invoke("desktop:get-usage-metrics", payload);
+  },
   selectFolder(options = {}) {
     return ipcRenderer.invoke("desktop:select-folder", options);
+  },
+  openExternal(url) {
+    return ipcRenderer.invoke("desktop:open-external", url);
+  },
+  exportTextToDownloads(payload = {}) {
+    return ipcRenderer.invoke("desktop:export-text-downloads", payload);
   },
   requestQuit() {
     return ipcRenderer.invoke("desktop:request-quit");

@@ -17,14 +17,20 @@ const state = {
     loading: { channelSwitch: false, module: null },
   },
   activeTab: "control",
-  settingsTab: "folders",
+  settingsTab: "normalize",
   rawFilesByChannel: {},
   normalizedFilesByChannel: {},
   rawFilesAutoRefreshBusy: false,
   rawFilesAutoRefreshLastAt: 0,
   settingsRenderPausedUntil: 0,
+  settingsAutosaveTimer: null,
+  settingsAutosaveBusy: false,
+  settingsAutosaveQueued: false,
+  settingsAutosaveLastSignature: "",
+  settingsAutosaveLastAt: 0,
   normalizeFileListScroll: {},
   activeSettingsChannelIndex: 0,
+  liveVideoDrag: null,
   channelDeleteDialog: { index: -1, name: "" },
   removedChannelUndo: null,
   hadRunningSettingsTask: false,
@@ -34,9 +40,13 @@ const state = {
   previewHls: null,
   appVersion: null,
   updateStatus: null,
+  usageMetrics: null,
   youtubeStatus: null,
   youtubeBroadcasts: [],
   youtubeKeyChecks: null,
+  youtubeAutoVerifyInFlightKey: "",
+  youtubeAutoVerifyLastKey: "",
+  youtubeAutoVerifyLastAt: 0,
   youtubeStatusLoading: false,
   youtubeBroadcastsLoading: false,
   youtubeBroadcastsLoadedKey: "",
@@ -49,9 +59,9 @@ const state = {
   youtubeSelectedAccountId: "",
   youtubeImportedBroadcastId: "",
   youtubeScheduleDraft: null,
-  activityFilter: "all",
   localActivityEvents: [],
   activityRenderedItems: [],
+  activityExportedSignature: "",
   settingsLiveHistory: {
     sessions: [],
     filter: "last_28",
@@ -71,14 +81,75 @@ const ACTIVITY_STREAM_SPLIT_KEY = "castarro.activityStreamSplitRatio.v1";
 const WORKSPACE_SELECTED_CHANNEL_KEY = "castarro.workspace.selectedChannel.v1";
 const DASHBOARD_CACHE_KEY = "castarro.dashboard.frontPage.v1";
 const YOUTUBE_STATUS_CACHE_KEY = "castarro.youtube.status.v1";
-const WORKSPACE_ROUTES = ["overview", "folders", "encoder", "youtube", "history", "troubleshoot"];
+const WORKSPACE_ROUTES = ["overview", "encoder", "youtube", "history", "troubleshoot"];
 const routeToSettingsTab = {
-  folders: "folders",
   encoder: "normalize",
   youtube: "youtube",
   history: "liveHistory",
   troubleshoot: "troubleshooting",
 };
+
+function formatBytes(value) {
+  const bytes = Math.max(0, Number(value) || 0);
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let amount = bytes;
+  let unitIndex = 0;
+  while (amount >= 1024 && unitIndex < units.length - 1) {
+    amount /= 1024;
+    unitIndex += 1;
+  }
+  if (unitIndex === 0) return `${Math.round(amount)} ${units[unitIndex]}`;
+  return `${amount >= 10 ? amount.toFixed(1) : amount.toFixed(2)} ${units[unitIndex]}`;
+}
+
+function formatCpuUsage(value) {
+  const percent = Math.max(0, Number(value) || 0);
+  return `${percent >= 10 ? percent.toFixed(0) : percent.toFixed(1)}%`;
+}
+
+function usageProcessPids(payload) {
+  return Object.values(payload?.streams || {})
+    .map((stream) => Number(stream?.pid))
+    .filter((pid) => Number.isFinite(pid) && pid > 0);
+}
+
+function renderUsageMetrics(payload = state.status) {
+  const cpuNode = $("workspaceUsageCpu");
+  const ramNode = $("workspaceUsageRam");
+  const dataNode = $("workspaceUsageData");
+  const batteryNode = $("workspaceUsageBattery");
+  const metrics = state.usageMetrics || {};
+  const usage = payload?.usage || {};
+  if (cpuNode) {
+    cpuNode.textContent = Number.isFinite(Number(metrics.cpuPercent)) ? formatCpuUsage(metrics.cpuPercent) : "Unavailable";
+  }
+  if (ramNode) {
+    ramNode.textContent = Number.isFinite(Number(metrics.memoryBytes)) ? formatBytes(metrics.memoryBytes) : "Unavailable";
+  }
+  if (dataNode) {
+    dataNode.textContent = formatBytes(usage.stream_transfer_today_bytes || 0);
+  }
+  if (batteryNode) {
+    const battery = metrics.batteryToday || usage.battery_today || {};
+    batteryNode.textContent = battery.label || "Unavailable";
+    batteryNode.title = battery.detail || "";
+  }
+}
+
+async function refreshUsageMetrics(payload) {
+  const bridge = desktopBridge();
+  if (!bridge || typeof bridge.getUsageMetrics !== "function") {
+    state.usageMetrics = null;
+    renderUsageMetrics(payload);
+    return;
+  }
+  try {
+    state.usageMetrics = await bridge.getUsageMetrics({ pids: usageProcessPids(payload) });
+  } catch {
+    state.usageMetrics = null;
+  }
+  renderUsageMetrics(payload);
+}
 
 const defaultLiveProfile = () => ({
   mode: "copy",
@@ -532,6 +603,8 @@ async function refresh() {
   renderStatus(visiblePayload);
   renderChannels(visiblePayload);
   renderChannelWorkspace(visiblePayload);
+  renderUsageMetrics(visiblePayload);
+  refreshUsageMetrics(visiblePayload).catch(() => {});
   renderPreview(visiblePayload.streams);
   renderLiveHistory(visiblePayload.stream_history || []);
   renderTasks(visiblePayload.tasks, visiblePayload.activity_events || []);
@@ -539,6 +612,11 @@ async function refresh() {
   const runningSettingsTask = visiblePayload.tasks.some((task) => ["normalize", "validate", "test-stream"].includes(task.name) && task.running);
   if (state.activeTab === "settings" && (runningSettingsTask || state.hadRunningSettingsTask)) {
     renderSettingsFormsUnlessPaused();
+  }
+  if (!runningSettingsTask && state.hadRunningSettingsTask) {
+    loadNormalizedFiles()
+      .then(() => renderYoutubeSettingsPanel(state.configData || defaultConfigData()))
+      .catch((error) => toast(error.message));
   }
   state.hadRunningSettingsTask = runningSettingsTask;
   renderUpdateBanner();
@@ -789,7 +867,6 @@ function renderConfigSelect(configs) {
 
 function renderStatus(payload) {
   const running = Object.values(payload.streams).filter((stream) => stream.running).length;
-  const taskRunning = payload.tasks.some((task) => task.running);
 
   $("serverState").textContent = payload.config_exists ? `${running} live stream${running === 1 ? "" : "s"}` : "Config needed";
   const startAllButton = $("startAll");
@@ -800,7 +877,6 @@ function renderStatus(payload) {
     startAllButton.classList.toggle("danger", anyRunning);
     startAllButton.setAttribute("aria-label", anyRunning ? "Stop all streams" : "Start All Streams");
   }
-  $("taskState").textContent = taskRunning ? "Working" : "Idle";
   $("channelCount").textContent = `${payload.channels.length} channel${payload.channels.length === 1 ? "" : "s"}`;
   const activeConfigLabel = $("activeConfigLabel");
   if (activeConfigLabel) {
@@ -820,12 +896,12 @@ function renderStatus(payload) {
   if (verifyNode) {
     const checks = Array.isArray(state.youtubeKeyChecks?.checks) ? state.youtubeKeyChecks.checks : [];
     if (!checks.length) {
-      verifyNode.textContent = "Global verify summary: not run yet.";
+      verifyNode.textContent = "YouTube key check: pending.";
       verifyNode.className = "badge";
     } else {
       const enforceable = checks.filter((item) => String(item?.status || "") !== "missing_account");
       const matched = enforceable.filter((item) => Boolean(item?.ok)).length;
-      verifyNode.textContent = `Global verify: ${matched}/${enforceable.length || 0} mapped channels matched`;
+      verifyNode.textContent = `YouTube key check: ${matched}/${enforceable.length || 0} mapped channels matched`;
       verifyNode.className = enforceable.length && matched === enforceable.length ? "badge live" : "badge warn";
     }
   }
@@ -864,6 +940,9 @@ function renderChannels(payload) {
     const autoReady = channel.youtube_auto_start && channel.youtube_auto_stop;
     const autoText = autoReady ? "YouTube auto on" : "YouTube auto needs check";
     const studio = channel.youtube_studio_url ? `<a class="studio-link" href="${escapeHtml(channel.youtube_studio_url)}" target="_blank">Open Studio</a>` : "";
+    const streamAction = live ? "stopStream" : "startStream";
+    const streamButtonClass = live ? "pill danger" : "pill success";
+    const streamButtonLabel = live ? "Stop" : "Start";
     return `
       <article class="card">
         <div class="card-head">
@@ -876,9 +955,8 @@ function renderChannels(payload) {
           ${studio}
         </div>
         <div class="mini-actions">
-          <button class="pill success" onclick="startStream('${escapeJs(channel.name)}')">Start</button>
+          <button class="${streamButtonClass}" onclick="${streamAction}('${escapeJs(channel.name)}')">${streamButtonLabel}</button>
           <button class="pill" onclick="startTask('test-stream', '${escapeJs(channel.name)}', false)">Test Stream</button>
-          <button class="pill danger" onclick="stopStream('${escapeJs(channel.name)}')">Stop</button>
           <button class="pill ghost" onclick="showTab('settings')">Settings</button>
         </div>
       </article>
@@ -891,6 +969,7 @@ function normalizeWorkspaceRoute(routeName) {
   const aliases = {
     control: "overview",
     dashboard: "overview",
+    folders: "encoder",
     normalize: "encoder",
     live: "youtube",
     liveHistory: "history",
@@ -903,7 +982,6 @@ function normalizeWorkspaceRoute(routeName) {
 function workspaceRouteLabel(routeName) {
   return {
     overview: "Overview",
-    folders: "Folders",
     encoder: "Encoder",
     youtube: "YouTube",
     history: "History",
@@ -943,7 +1021,6 @@ function getChannelHealthViewModel(channel, payload) {
 
 function getChannelReadinessViewModel(channel, payload) {
   const health = getChannelHealthViewModel(channel, payload);
-  const defaults = state.configData?.defaults || {};
   return [
     {
       label: "YouTube account",
@@ -965,13 +1042,6 @@ function getChannelReadinessViewModel(channel, payload) {
       status: "Ready",
       tone: "",
       routeTarget: "encoder",
-    },
-    {
-      label: "Folders",
-      value: `${defaults.raw_dir || "Raw Videos"} -> ${defaults.normalized_dir || "Go Live"}`,
-      status: "Configured",
-      tone: "",
-      routeTarget: "folders",
     },
   ];
 }
@@ -1357,7 +1427,6 @@ function renderWorkspaceHeader(payload, channel) {
   const breadcrumb = channel ? `Channel / ${channelName}` : "Channel / None";
   const subtitles = {
     overview: "Controls and status for this channel only.",
-    folders: "Folder paths used by this selected channel.",
     encoder: "Source videos and encoder profile for this channel.",
     youtube: "Go live, schedule broadcasts, manage stream keys, and choose videos for this channel.",
     history: "Recorded live sessions for this channel.",
@@ -1378,12 +1447,13 @@ function renderWorkspaceHeader(payload, channel) {
     return;
   }
   const escapedName = escapeJs(channel.name);
-  const saveButton = route === "overview" ? "" : `<button class="pill primary" type="button" onclick="saveSettings().catch((error) => toast(error.message))">Save settings</button>`;
+  const stream = payload?.streams?.[channel.name] || null;
+  const streamRunning = Boolean(stream?.running);
+  const streamAction = streamRunning ? "stopStream" : "startStream";
+  const streamButtonClass = streamRunning ? "pill danger" : "pill success";
+  const streamButtonLabel = streamRunning ? "Stop Stream" : "Start Stream";
   actionsNode.innerHTML = `
-    <button class="pill ghost" type="button" onclick="verifyYoutubeChannelKeys('${escapedName}').catch((error) => toast(error.message))">Verify channel</button>
-    <button class="pill success" type="button" onclick="startStream('${escapedName}').catch((error) => toast(error.message))">Start Stream</button>
-    <button class="pill danger" type="button" onclick="stopStream('${escapedName}').catch((error) => toast(error.message))">Stop Stream</button>
-    ${saveButton}
+    <button class="${streamButtonClass}" type="button" onclick="${streamAction}('${escapedName}').catch((error) => toast(error.message))">${streamButtonLabel}</button>
   `;
 }
 
@@ -1422,10 +1492,8 @@ function renderChannelTools() {
 
 function renderOverviewPanels(payload, channel) {
   const readinessNode = $("workspaceReadinessPanel");
-  const activityNode = $("workspaceRecentActivityPanel");
   if (!channel) {
     if (readinessNode) readinessNode.innerHTML = `<div class="notice warn">Select a channel to see readiness.</div>`;
-    if (activityNode) activityNode.innerHTML = `<div class="live-history-empty">Select a channel to view activity.</div>`;
     return;
   }
   if (readinessNode) {
@@ -1450,17 +1518,6 @@ function renderOverviewPanels(payload, channel) {
       </div>
     `;
   }
-  if (activityNode) {
-    const items = getRecentActivityViewModel(channel.name, payload);
-    activityNode.innerHTML = items.length
-      ? items.map((item) => `
-        <div class="activity-preview-row">
-          <strong>${escapeHtml(item.title)}</strong>
-          <span>${escapeHtml(item.detail)}</span>
-        </div>
-      `).join("")
-      : `<div class="live-history-empty">No recent activity for ${escapeHtml(channel.name)} yet.</div>`;
-  }
 }
 
 function applyLegacyTabView(tab) {
@@ -1472,12 +1529,10 @@ function applyLegacyTabView(tab) {
 }
 
 function applySettingsSection(tab) {
-  $("settingsFoldersTab")?.classList.toggle("active", tab === "folders");
   $("settingsNormalizeTab")?.classList.toggle("active", tab === "normalize");
   $("settingsYoutubeTab")?.classList.toggle("active", tab === "youtube");
   $("settingsLiveHistoryTab")?.classList.toggle("active", tab === "liveHistory");
   $("settingsTroubleshootingTab")?.classList.toggle("active", tab === "troubleshooting");
-  $("settingsFoldersView")?.classList.toggle("active", tab === "folders");
   $("settingsNormalizeView")?.classList.toggle("active", tab === "normalize");
   $("settingsYoutubeView")?.classList.toggle("active", tab === "youtube");
   $("settingsLiveHistoryView")?.classList.toggle("active", tab === "liveHistory");
@@ -1495,7 +1550,7 @@ function renderWorkspaceRoute(payload, routeName) {
     renderPreview(payload?.streams || {});
     return;
   }
-  const settingsTab = routeToSettingsTab[route] || "folders";
+  const settingsTab = routeToSettingsTab[route] || "normalize";
   applyLegacyTabView("settings");
   state.settingsTab = settingsTab;
   applySettingsSection(settingsTab);
@@ -1558,7 +1613,7 @@ async function refreshChannelContext(channelName) {
       refreshYoutubeStatus(),
     ]);
     if (state.youtubeStatus?.connected) {
-      await verifyYoutubeChannelKeys(channel.name, { silent: true });
+      await autoVerifySelectedYoutubeChannel({ channelName: channel.name });
       await refreshYoutubeBroadcasts(true, { silent: true });
     }
   } catch (error) {
@@ -1607,7 +1662,6 @@ function openSettingsForWorkspace(tabName, channelName = "") {
     syncYoutubeSelectedAccountFromChannel(config);
   }
   const route = {
-    folders: "folders",
     normalize: "encoder",
     youtube: "youtube",
     liveHistory: "history",
@@ -1651,7 +1705,7 @@ function runRouteSideEffects(routeName) {
         }
         const selectedChannel = String(state.workspace.selectedChannelName || "").trim();
         return refreshYoutubeBroadcasts(Boolean(selectedChannel), { silent: true })
-          .then(() => verifyYoutubeChannelKeys(selectedChannel, { silent: true }));
+          .then(() => autoVerifySelectedYoutubeChannel({ channelName: selectedChannel }));
       })
       .catch((error) => toast(error.message));
   }
@@ -1709,13 +1763,63 @@ function renderTasks(tasks, events = []) {
 
   const taskList = (Array.isArray(tasks) ? tasks : [])
     .filter((task) => selectedChannel && taskChannelName(task) === selectedChannel);
+  const runOrder = buildRunOrder(taskList);
+  const items = buildActivityItems(selectedChannel, tasks, events);
+
+  updateActivityExportButton(items);
+  if (!selectedChannel) {
+    container.innerHTML = `<div class="task">Select a channel to view troubleshooting activity.</div>`;
+    state.activityRenderedItems = [];
+    return;
+  }
+  if (!items.length) {
+    container.innerHTML = `<div class="task">No activity yet for ${escapeHtml(selectedChannel)}. Normalize, validate, schedule, or connect YouTube to see output here.</div>`;
+    state.activityRenderedItems = [];
+    return;
+  }
+
+  container.innerHTML = `
+    <article class="task activity-unified">
+      <div class="activity-unified-head">
+        <div class="task-title-main">
+          <span>Execution Timeline</span>
+        </div>
+        <div class="row wrap">
+          <span class="badge">${escapeHtml(`${items.length} shown`)}</span>
+        </div>
+      </div>
+      <div class="task-meta">
+        <span>${escapeHtml(`${items.length} ${selectedChannel} entries`)}</span>
+        <span>Newest to oldest</span>
+      </div>
+      <div class="activity-stream">
+        ${items.map((item) => item.kind === "task"
+      ? taskActivityEntryMarkup(item.task, runOrder)
+      : appEventEntryMarkup(item.event)).join("")}
+      </div>
+    </article>
+  `;
+
+  restoreLogScrolls("#tasks pre[data-log-id]", scrollState);
+  state.activityRenderedItems = items;
+  if (hadExisting && panelScroll.topPinned) {
+    container.scrollTop = 0;
+  } else {
+    container.scrollTop = panelScroll.top;
+    container.scrollLeft = panelScroll.left;
+  }
+}
+
+function buildActivityItems(channelName, tasks = state.status?.tasks || [], events = state.status?.activity_events || []) {
+  const selectedChannel = String(channelName || "").trim();
+  const taskList = (Array.isArray(tasks) ? tasks : [])
+    .filter((task) => selectedChannel && taskChannelName(task) === selectedChannel);
   const backendEvents = Array.isArray(events) ? events : [];
   const localEvents = Array.isArray(state.localActivityEvents) ? state.localActivityEvents : [];
   const eventList = [...localEvents, ...backendEvents]
     .filter((event) => selectedChannel && eventChannelName(event) === selectedChannel);
 
-  const runOrder = buildRunOrder(taskList);
-  const items = [
+  return [
     ...taskList.map((task) => ({
       kind: "task",
       ts: Number(task.started_at) || 0,
@@ -1728,60 +1832,6 @@ function renderTasks(tasks, events = []) {
     if (a.ts !== b.ts) return b.ts - a.ts;
     return a.kind === b.kind ? 0 : a.kind === "task" ? -1 : 1;
   });
-
-  const counts = {
-    all: items.length,
-    tasks: items.filter((item) => item.category === "tasks").length,
-    api: items.filter((item) => item.category === "api").length,
-    errors: items.filter((item) => item.failed).length,
-  };
-  renderActivityFilterChips(counts);
-
-  const filtered = items.filter((item) => activityItemVisible(item));
-  if (!selectedChannel) {
-    container.innerHTML = `<div class="task">Select a channel to view troubleshooting activity.</div>`;
-    state.activityRenderedItems = [];
-    return;
-  }
-  if (!items.length) {
-    container.innerHTML = `<div class="task">No activity yet for ${escapeHtml(selectedChannel)}. Normalize, validate, schedule, or verify this channel to see output here.</div>`;
-    state.activityRenderedItems = [];
-    return;
-  }
-
-  container.innerHTML = `
-    <article class="task activity-unified">
-      <div class="activity-unified-head">
-        <div class="task-title-main">
-          <span>Execution Timeline</span>
-          <span class="task-subtitle">${escapeHtml(selectedChannel)} | ${escapeHtml(activityFilterLabel())}</span>
-        </div>
-        <div class="row wrap">
-          <span class="badge">${escapeHtml(`${filtered.length} shown`)}</span>
-        </div>
-      </div>
-      <div class="task-meta">
-        <span>${escapeHtml(`${counts.all} ${selectedChannel} entries`)}</span>
-        <span>Newest to oldest</span>
-      </div>
-      <div class="activity-stream">
-        ${filtered.length
-    ? filtered.map((item) => item.kind === "task"
-      ? taskActivityEntryMarkup(item.task, runOrder)
-      : appEventEntryMarkup(item.event)).join("")
-    : `<div class="task-summary">No entries match this filter.</div>`}
-      </div>
-    </article>
-  `;
-
-  restoreLogScrolls("#tasks pre[data-log-id]", scrollState);
-  state.activityRenderedItems = filtered;
-  if (hadExisting && panelScroll.topPinned) {
-    container.scrollTop = 0;
-  } else {
-    container.scrollTop = panelScroll.top;
-    container.scrollLeft = panelScroll.left;
-  }
 }
 
 function classifyActivityEvent(event) {
@@ -1803,41 +1853,44 @@ function classifyActivityEvent(event) {
   };
 }
 
-function activityItemVisible(item) {
-  const filter = String(state.activityFilter || "all");
-  if (filter === "tasks") return item.category === "tasks";
-  if (filter === "api") return item.category === "api";
-  if (filter === "errors") return item.failed;
-  return true;
+function activityExportSignature(items) {
+  return JSON.stringify((Array.isArray(items) ? items : []).map((item) => {
+    if (item.kind === "task") {
+      const task = item.task || {};
+      return [
+        "task",
+        task.id,
+        task.name,
+        taskChannelName(task),
+        task.running,
+        task.returncode,
+        task.started_at,
+        task.finished_at,
+        task.progress?.message || "",
+        Array.isArray(task.lines) ? task.lines.join("\n") : "",
+      ];
+    }
+    const event = item.event || {};
+    return [
+      "event",
+      event.id,
+      event.event_type,
+      eventChannelName(event),
+      event.created_at,
+      JSON.stringify(event.details || {}),
+    ];
+  }));
 }
 
-function setActivityFilter(filter) {
-  const next = ["all", "tasks", "api", "errors"].includes(filter) ? filter : "all";
-  state.activityFilter = next;
-  renderTasks(state.status?.tasks || [], state.status?.activity_events || []);
-}
-
-function activityFilterLabel() {
-  const filter = String(state.activityFilter || "all");
-  if (filter === "tasks") return "Tasks only";
-  if (filter === "api") return "API requests only";
-  if (filter === "errors") return "Errors only";
-  return "All entries";
-}
-
-function renderActivityFilterChips(counts) {
-  const entries = [
-    { id: "activityFilterAll", key: "all", label: "All" },
-    { id: "activityFilterTasks", key: "tasks", label: "Tasks" },
-    { id: "activityFilterApi", key: "api", label: "API" },
-    { id: "activityFilterErrors", key: "errors", label: "Errors" },
-  ];
-  entries.forEach((entry) => {
-    const node = $(entry.id);
-    if (!node) return;
-    node.classList.toggle("active", state.activityFilter === entry.key);
-    node.textContent = `${entry.label} (${Number(counts?.[entry.key] || 0)})`;
-  });
+function updateActivityExportButton(items = buildActivityItems(selectedWorkspaceChannelName())) {
+  const button = $("exportActivityLogsButton");
+  if (!button) return;
+  const signature = activityExportSignature(items);
+  const exported = Boolean(signature && state.activityExportedSignature === signature);
+  button.classList.toggle("success", exported);
+  button.classList.toggle("ghost", !exported);
+  button.title = exported ? "Activity Logs Exported" : "Export Activity Logs";
+  button.setAttribute("aria-label", button.title);
 }
 
 function taskActivityEntryMarkup(task, runOrder) {
@@ -2104,8 +2157,14 @@ function renderLiveHistory(sessions) {
 
   const selectedChannel = selectedWorkspaceChannelName();
   const items = (Array.isArray(sessions) ? sessions : [])
-    .filter((session) => !selectedChannel || String(session?.channel_name || "") === selectedChannel);
-  count.textContent = `${items.length} session${items.length === 1 ? "" : "s"}`;
+    .filter((session) => !selectedChannel || String(session?.channel_name || "") === selectedChannel)
+    .sort((a, b) => {
+      const aTime = parseIsoDate(a?.started_at)?.getTime() || 0;
+      const bTime = parseIsoDate(b?.started_at)?.getTime() || 0;
+      return bTime - aTime;
+    });
+  const previewItems = items.slice(0, 5);
+  count.textContent = `${previewItems.length} session${previewItems.length === 1 ? "" : "s"}`;
 
   if (!selectedChannel) {
     total.textContent = "Total 0s";
@@ -2113,17 +2172,17 @@ function renderLiveHistory(sessions) {
     return;
   }
 
-  if (!items.length) {
+  if (!previewItems.length) {
     total.textContent = "Total 0s";
     list.innerHTML = `<div class="live-history-empty">No live sessions recorded for ${escapeHtml(selectedChannel)} yet.</div>`;
     return;
   }
 
   const nowMs = Date.now();
-  const totalSeconds = items.reduce((sum, item) => sum + sessionDurationSeconds(item, nowMs), 0);
+  const totalSeconds = previewItems.reduce((sum, item) => sum + sessionDurationSeconds(item, nowMs), 0);
   total.textContent = `Total ${durationText(totalSeconds)}`;
 
-  const rows = items.map((session) => {
+  const rows = previewItems.map((session) => {
     const isLive = Boolean(session?.is_active);
     const started = formatSessionDateParts(session?.started_at);
     const stopped = isLive
@@ -2135,7 +2194,7 @@ function renderLiveHistory(sessions) {
     const title = String(session?.live_title || session?.channel_name || "Untitled live");
     const channelName = String(session?.channel_name || "Unknown channel");
     return `
-      <div class="live-history-row ${isLive ? "current" : ""}">
+      <button class="live-history-row ${isLive ? "current" : ""}" type="button" onclick="setWorkspaceRoute('history')" aria-label="Open History for ${escapeAttr(title)}">
         <div class="live-history-title">
           <strong>${escapeHtml(title)}</strong>
           <span>${escapeHtml(channelName)}</span>
@@ -2149,7 +2208,7 @@ function renderLiveHistory(sessions) {
           ${stopped.time ? `<span>${escapeHtml(stopped.time)}</span>` : ""}
         </div>
         ${durationChip(durationSeconds, isLive)}
-      </div>
+      </button>
     `;
   }).join("");
 
@@ -2867,7 +2926,6 @@ async function copyActivityLogs() {
   const lines = [];
   lines.push(`Activity export (${new Date().toLocaleString()})`);
   lines.push(`Channel: ${selectedChannel || "none"}`);
-  lines.push(`Filter: ${activityFilterLabel()}`);
   lines.push("");
   items.forEach((item, index) => {
     if (item.kind === "task") {
@@ -2878,6 +2936,71 @@ async function copyActivityLogs() {
   });
   await copyText(lines.join("\n"));
   toast(`Copied ${items.length} activity entries.`);
+}
+
+function activityExportText(items, selectedChannel) {
+  const lines = [];
+  const tasks = items.filter((item) => item.kind === "task").map((item) => item.task);
+  const runOrder = buildRunOrder(tasks);
+  lines.push(`Castarro activity export (${new Date().toLocaleString()})`);
+  lines.push(`Config: ${state.config}`);
+  lines.push(`Channel: ${selectedChannel || "none"}`);
+  lines.push(`Entries: ${items.length}`);
+  lines.push("");
+  items.forEach((item, index) => {
+    if (item.kind === "task") {
+      lines.push(formatTaskForExport(item.task, index + 1, runOrder));
+      return;
+    }
+    lines.push(formatEventForExport(item.event, index + 1));
+  });
+  return lines.join("\n");
+}
+
+function activityExportFilename(channelName) {
+  const channelPart = String(channelName || "all-channels")
+    .trim()
+    .replace(/[^A-Za-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    || "channel";
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  return `castarro-activity-${channelPart}-${stamp}.txt`;
+}
+
+async function exportActivityLogs() {
+  const selectedChannel = selectedWorkspaceChannelName();
+  if (!selectedChannel) {
+    toast("Select a channel to export activity logs.");
+    return;
+  }
+  const items = buildActivityItems(selectedChannel);
+  if (!items.length) {
+    toast(`No activity logs to export for ${selectedChannel}.`);
+    return;
+  }
+  const text = activityExportText(items, selectedChannel);
+  const filename = activityExportFilename(selectedChannel);
+  const bridge = desktopBridge();
+  if (bridge && typeof bridge.exportTextToDownloads === "function") {
+    const result = await bridge.exportTextToDownloads({ filename, text });
+    state.activityExportedSignature = activityExportSignature(items);
+    updateActivityExportButton(items);
+    toast(`Exported ${items.length} activity entries to ${result?.path || "Downloads"}.`);
+    return;
+  }
+
+  const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+  state.activityExportedSignature = activityExportSignature(items);
+  updateActivityExportButton(items);
+  toast(`Exported ${items.length} activity entries.`);
 }
 
 async function clearActivityLogs() {
@@ -2981,6 +3104,7 @@ async function loadConfigText() {
     $("configEditor").value = text;
     state.configData = text ? JSON.parse(text) : defaultConfigData();
     normalizeConfigShape();
+    state.settingsAutosaveLastSignature = JSON.stringify(state.configData);
     renderSettingsForms();
     renderWorkspaceChannelList(state.status || {});
     await loadRawFiles();
@@ -3158,7 +3282,9 @@ function renderSettingsForms() {
     $("removeChannelNormalize").disabled = !config.channels.length;
   }
   renderRemovedChannelUndo();
-  $("folderSettingsFields").innerHTML = folderSettingsMarkup(config.defaults);
+  if ($("folderSettingsFields")) {
+    $("folderSettingsFields").innerHTML = folderSettingsMarkup(config.defaults);
+  }
 
   const activeNormalizeIndex = selectedSettingsChannelIndex(config);
   $("normalizationChannels").innerHTML = activeNormalizeIndex >= 0
@@ -3279,7 +3405,7 @@ function folderSettingCard(fieldName, title, value, helper) {
         </label>
         <button class="pill ghost" type="button" onclick="browseDefaultFolder('${escapeJs(fieldName)}').catch((error) => toast(error.message))" ${canBrowse ? "" : "disabled"}>Browse</button>
       </div>
-      <div class="meta">${canBrowse ? "Pick any local folder. Save settings to apply." : "Desktop folder picker is unavailable in this browser. Enter the path manually and save settings."}</div>
+      <div class="meta">${canBrowse ? "Pick any local folder. Changes save automatically." : "Desktop folder picker is unavailable in this browser. Enter the path manually; changes save automatically."}</div>
     </article>
   `;
 }
@@ -3301,8 +3427,27 @@ async function browseDefaultFolder(fieldName) {
   if (!picked || picked.canceled || !picked.path) return;
   input.value = picked.path;
   syncDefaultControlToState(input);
+  scheduleSettingsAutosave(200);
   pauseSettingsRender(1000);
-  toast("Folder selected. Save settings to apply.");
+  toast("Folder selected. Settings will save automatically.");
+}
+
+async function chooseEncodeOutputFolder(config) {
+  const bridge = desktopBridge();
+  const defaults = config.defaults || {};
+  const current = resolvedFolderPath(defaults.normalized_dir || "Go Live");
+  if (!bridge || typeof bridge.selectFolder !== "function") {
+    toast(`Encoded videos will be saved to ${current || "Go Live"}.`);
+    return current || defaults.normalized_dir || "Go Live";
+  }
+  const picked = await bridge.selectFolder({
+    title: "Choose encoded videos output folder",
+    defaultPath: current || undefined,
+  });
+  if (!picked || picked.canceled || !picked.path) {
+    return "";
+  }
+  return String(picked.path || "").trim();
 }
 
 function hasYoutubeCredentialsConfigured(youtube) {
@@ -3624,6 +3769,11 @@ function renderYoutubeSettingsPanel(config) {
   const videosMarkup = activeLiveIndex >= 0
     ? liveVideosCard(config.channels[activeLiveIndex], activeLiveIndex)
     : `<div class="nested-card">No channels yet. Click <strong>Add Channel</strong> to create one.</div>`;
+  const selectedStream = selectedChannelName ? state.status?.streams?.[selectedChannelName] : null;
+  const selectedStreamRunning = Boolean(selectedStream?.running);
+  const selectedStreamAction = selectedStreamRunning ? "stopStream" : "startStream";
+  const selectedStreamButtonClass = selectedStreamRunning ? "pill danger" : "pill success";
+  const selectedStreamButtonLabel = selectedStreamRunning ? "Stop Stream" : "Start Stream";
 
   container.innerHTML = `
     <div class="youtube-page-stack">
@@ -3658,7 +3808,7 @@ function renderYoutubeSettingsPanel(config) {
             <h3>Go Live</h3>
             <p class="helper">Broadcast details used when you go live now or schedule a YouTube broadcast.</p>
           </div>
-          <button class="pill success" type="button" onclick="startStream('${escapeJs(selectedChannelName)}').catch((error) => toast(error.message))" ${selectedChannelName ? "" : "disabled"}>Start Stream</button>
+          <button class="${selectedStreamButtonClass}" type="button" onclick="${selectedStreamAction}('${escapeJs(selectedChannelName)}').catch((error) => toast(error.message))" ${selectedChannelName ? "" : "disabled"}>${selectedStreamButtonLabel}</button>
         </div>
         <div class="form-grid youtube-go-live-form">
           <label>
@@ -3839,6 +3989,14 @@ async function refreshYoutubeStatus() {
     if (state.status) {
       renderChannelWorkspace(state.status);
     }
+    autoVerifySelectedYoutubeChannel().catch((error) => {
+      logLocalActivityEvent(
+        "youtube_verify_auto",
+        error.message || "Automatic YouTube stream-key verification failed.",
+        { channel: state.workspace.selectedChannelName || "" },
+        "error"
+      );
+    });
   }
 }
 
@@ -3942,46 +4100,121 @@ async function refreshYoutubeBroadcasts(useLinkedChannel = false, options = {}) 
   }
 }
 
+async function waitForYoutubeExternalAuth(accountId = "") {
+  const normalizedAccountId = normalizeAccountId(accountId || "");
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < 120000) {
+    await new Promise((resolve) => window.setTimeout(resolve, 2000));
+    await loadConfigText();
+    await refreshYoutubeStatus();
+    const accounts = Array.isArray(state.youtubeStatus?.accounts) ? state.youtubeStatus.accounts : [];
+    const account = accounts.find((item) => normalizeAccountId(item?.id || "") === normalizedAccountId) || null;
+    if (!normalizedAccountId && state.youtubeStatus?.connected) {
+      await refresh();
+      await refreshYoutubeBroadcasts(true, { silent: true });
+      setYoutubeAction("success", "YouTube account connected.");
+      return true;
+    }
+    if (account?.connected || account?.wrong_account) {
+      await refresh();
+      await refreshYoutubeBroadcasts(true, { silent: true });
+      if (account.wrong_account) {
+        setYoutubeAction("error", account.message || "Connected YouTube account does not match this Castarro channel.");
+      } else {
+        const subscriberText = youtubeSubscriberText(account);
+        const connectedName = account.channel_title
+          ? `Connected to ${account.channel_title}${subscriberText ? ` (${subscriberText})` : ""}.`
+          : "YouTube account connected.";
+        setYoutubeAction("success", connectedName);
+        toast(connectedName);
+      }
+      return true;
+    }
+  }
+  return false;
+}
+
 async function connectYoutube() {
+  const bridge = desktopBridge();
+  const openExternal = bridge && typeof bridge.openExternal === "function" ? bridge.openExternal.bind(bridge) : null;
+  const popup = openExternal ? null : window.open("about:blank", "youtubeConnect", "popup=yes,width=780,height=840");
+  if (!openExternal) {
+    if (!popup) {
+      throw new Error("Popup blocked. Please allow popups and try again.");
+    }
+    try {
+      popup.document.title = "YouTube Connection";
+      popup.document.body.innerHTML = `
+        <main style="font-family: Segoe UI, Tahoma, sans-serif; padding: 24px;">
+          <h1 style="font-size: 18px; margin: 0 0 8px;">Opening YouTube sign-in...</h1>
+          <p style="margin: 0; color: #555;">You can continue in this window once Google sign-in loads.</p>
+        </main>
+      `;
+    } catch {
+      // Some browsers restrict about:blank document writes; navigation below still works.
+    }
+  }
   const data = collectSettingsData();
-  await saveConfigData(data);
-  const accounts = normalizedYoutubeAccounts(data);
-  const channelName = String(
-    state.workspace.selectedChannelName
-    || ""
-  ).trim();
-  const selectedChannel = (data.channels || []).find((item) => String(item?.name || "").trim() === channelName) || null;
-  const reusableForChannel = findReusableYoutubeAccountForChannel(accounts, channelName);
-  let accountId = "";
-  if (channelName) {
-    accountId = normalizeAccountId(selectedChannel?.youtube_account_id || reusableForChannel?.id || "");
-  } else {
-    accountId = normalizeAccountId(state.youtubeSelectedAccountId || data.youtube?.default_account_id || accounts[0]?.id || "");
+  try {
+    await saveConfigData(data);
+    const accounts = normalizedYoutubeAccounts(data);
+    const channelName = String(
+      state.workspace.selectedChannelName
+      || ""
+    ).trim();
+    const selectedChannel = (data.channels || []).find((item) => String(item?.name || "").trim() === channelName) || null;
+    const reusableForChannel = findReusableYoutubeAccountForChannel(accounts, channelName);
+    let accountId = "";
+    if (channelName) {
+      accountId = normalizeAccountId(selectedChannel?.youtube_account_id || reusableForChannel?.id || "");
+    } else {
+      accountId = normalizeAccountId(state.youtubeSelectedAccountId || data.youtube?.default_account_id || accounts[0]?.id || "");
+    }
+    let selectedAccount = accountId ? (accounts.find((item) => item.id === accountId) || null) : null;
+    if (!channelName && !selectedAccount) {
+      selectedAccount = accounts[0] || null;
+      accountId = normalizeAccountId(selectedAccount?.id || "");
+    }
+    const query = new URLSearchParams({ config: state.config });
+    if (accountId) {
+      query.set("account", accountId);
+    }
+    if (channelName) {
+      query.set("channel", channelName);
+    }
+    if (selectedAccount?.label || selectedChannel?.name) {
+      query.set("label", selectedChannel?.name || selectedAccount?.label || "");
+    }
+    const payload = await api(`/api/youtube/auth/start?${query.toString()}`, { action: "youtube.connect.start" });
+    if (payload?.account_id) {
+      state.youtubeSelectedAccountId = normalizeAccountId(payload.account_id);
+    }
+    if (openExternal) {
+      await openExternal(payload.url);
+      setYoutubeAction("loading", "Complete Google sign-in in your browser, then return to Castarro.", "connect");
+      waitForYoutubeExternalAuth(payload.account_id || accountId).then((completed) => {
+        if (!completed) {
+          setYoutubeAction("idle", "");
+          toast("YouTube sign-in is still pending. Return here after completing it in your browser.");
+        }
+      }).catch((error) => {
+        setYoutubeAction("error", error.message || "YouTube connection refresh failed.");
+        toast(error.message || "YouTube connection refresh failed.");
+      });
+    } else {
+      popup.location.href = payload.url;
+    }
+  } catch (error) {
+    if (popup) {
+      try {
+        popup.close();
+      } catch {
+        // Ignore popup close failures.
+      }
+    }
+    throw error;
   }
-  let selectedAccount = accountId ? (accounts.find((item) => item.id === accountId) || null) : null;
-  if (!channelName && !selectedAccount) {
-    selectedAccount = accounts[0] || null;
-    accountId = normalizeAccountId(selectedAccount?.id || "");
-  }
-  const query = new URLSearchParams({ config: state.config });
-  if (accountId) {
-    query.set("account", accountId);
-  }
-  if (channelName) {
-    query.set("channel", channelName);
-  }
-  if (selectedAccount?.label || selectedChannel?.name) {
-    query.set("label", selectedChannel?.name || selectedAccount?.label || "");
-  }
-  const payload = await api(`/api/youtube/auth/start?${query.toString()}`, { action: "youtube.connect.start" });
-  if (payload?.account_id) {
-    state.youtubeSelectedAccountId = normalizeAccountId(payload.account_id);
-  }
-  const popup = window.open(payload.url, "youtubeConnect", "popup=yes,width=780,height=840");
-  if (!popup) {
-    throw new Error("Popup blocked. Please allow popups and try again.");
-  }
-  toast("Complete the Google sign-in in the popup window.");
+  toast(openExternal ? "Complete the Google sign-in in your browser." : "Complete the Google sign-in in the popup window.");
 }
 
 async function disconnectYoutube() {
@@ -4048,6 +4281,55 @@ async function verifyYoutubeChannelKeys(channelName = "", options = {}) {
       setYoutubeAction("error", error.message || "Verification failed.");
     }
     throw error;
+  }
+}
+
+function youtubeAutoVerifySignature(channelName, channel, linkedAccount) {
+  return [
+    state.config,
+    channelName,
+    normalizeAccountId(channel?.youtube_account_id || ""),
+    String(channel?.stream_key || "").trim(),
+    String(channel?.stream_key_env || "").trim(),
+    String(channel?.youtube_stream_id || "").trim(),
+    String(channel?.youtube_broadcast_id || "").trim(),
+    String(linkedAccount?.expires_at || ""),
+  ].join("|");
+}
+
+function hasYoutubeKeyCheckForChannel(channelName) {
+  const checks = Array.isArray(state.youtubeKeyChecks?.checks) ? state.youtubeKeyChecks.checks : [];
+  return checks.some((item) => String(item?.channel || "") === String(channelName || ""));
+}
+
+async function autoVerifySelectedYoutubeChannel(options = {}) {
+  const force = Boolean(options.force);
+  const channelName = String(options.channelName || state.workspace.selectedChannelName || "").trim();
+  if (!channelName) return false;
+  const config = state.configData || defaultConfigData();
+  const channel = (config.channels || []).find((item) => String(item?.name || "").trim() === channelName);
+  if (!channel) return false;
+
+  const linkedAccountId = normalizeAccountId(channel.youtube_account_id || "");
+  if (!linkedAccountId) return false;
+  const accounts = Array.isArray(state.youtubeStatus?.accounts) ? state.youtubeStatus.accounts : [];
+  const linkedAccount = accounts.find((item) => normalizeAccountId(item?.id || "") === linkedAccountId);
+  if (!linkedAccount?.connected) return false;
+
+  const signature = youtubeAutoVerifySignature(channelName, channel, linkedAccount);
+  if (state.youtubeAutoVerifyInFlightKey === signature) return false;
+  if (!force && state.youtubeAutoVerifyLastKey === signature && hasYoutubeKeyCheckForChannel(channelName)) return false;
+
+  state.youtubeAutoVerifyInFlightKey = signature;
+  try {
+    await verifyYoutubeChannelKeys(channelName, { silent: true });
+    state.youtubeAutoVerifyLastKey = signature;
+    state.youtubeAutoVerifyLastAt = Date.now();
+    return true;
+  } finally {
+    if (state.youtubeAutoVerifyInFlightKey === signature) {
+      state.youtubeAutoVerifyInFlightKey = "";
+    }
   }
 }
 
@@ -4158,7 +4440,7 @@ async function scheduleYoutubeBroadcast() {
     await loadConfigText();
     await refreshYoutubeStatus();
     await refreshYoutubeBroadcasts(true, { silent: true });
-    await verifyYoutubeChannelKeys(channelName, { silent: true });
+    await autoVerifySelectedYoutubeChannel({ channelName, force: true });
     setYoutubeAction(
       "success",
       streamName
@@ -4215,7 +4497,7 @@ async function useExistingYoutubeBroadcast() {
     await loadConfigText();
     await refreshYoutubeStatus();
     await refreshYoutubeBroadcasts(true, { silent: true });
-    await verifyYoutubeChannelKeys(channelName, { silent: true });
+    await autoVerifySelectedYoutubeChannel({ channelName, force: true });
     setYoutubeAction(
       "success",
       `Existing broadcast linked on ${payload?.account_label || linkedAccountId}; key ends with ${payload?.stream_key_suffix || maskSecret(importedBroadcast.stream_name).slice(-4)}.`
@@ -4258,6 +4540,7 @@ function normalizationCard(channel, index) {
   const files = state.rawFilesByChannel[channel.name] || [];
   const selectedSet = new Set(selected);
   const task = taskForChannel(channel.name);
+  const completedCount = completedRawFileCount(selected, task);
   const normalizeProfile = { ...defaultConfigData().normalize_profile, ...(channel.normalize_profile || {}) };
   const encoder = normalizeProfile.video_encoder || "libx264";
   const rateControl = normalizeProfile.rate_control === "cbr" ? "cbr" : "vbr";
@@ -4271,6 +4554,7 @@ function normalizationCard(channel, index) {
         <label class="file-option">
           <input type="checkbox" data-raw-file="${escapeAttr(file.path)}" ${selectedSet.has(file.path) ? "checked" : ""} onchange="syncRawSelection(${index})">
           <span>${escapeHtml(file.path)}</span>
+          ${selectedSet.has(file.path) ? `<button class="file-remove-button" type="button" title="Remove from encoding" aria-label="Remove ${escapeAttr(file.path)} from encoding" onclick="event.preventDefault(); event.stopPropagation(); removeRawSelection(${index}, '${escapeJs(file.path)}')">x</button>` : ""}
         </label>
       `).join("")
     : `<div class="meta">No videos found yet in Raw Videos/${escapeHtml(channel.name || "")}. Add videos here or copy files into that folder; the list updates automatically when you return to this view.</div>`;
@@ -4289,7 +4573,7 @@ function normalizationCard(channel, index) {
         <button class="pill primary" type="button" onclick="document.getElementById('upload-${index}').click()">Add Videos</button>
         <button class="pill success" type="button" onclick="startSettingsTask('normalize', ${index})">Encode</button>
       </div>
-      ${task ? taskProgressMarkup(task) : ""}
+      ${task ? taskProgressMarkup(task, index, completedCount) : ""}
       <div class="file-picker">
         <div class="file-list">${fileOptions}</div>
         <div class="meta">If an encoded file name already exists, a new version like <code>-v2</code> is created and a heads-up appears in Activity.</div>
@@ -4308,7 +4592,6 @@ function normalizationCard(channel, index) {
           ${normalizeInput(index, "audio_bitrate", "Audio bitrate", normalizeProfile.audio_bitrate || "160k")}
           ${normalizeInput(index, "audio_sample_rate", "Audio sample rate", normalizeProfile.audio_sample_rate ?? 48000, "number")}
         </div>
-        <p class="setting-note normalize-encoder-note">Video encoder is the processing engine your PC uses; encoding preset is how hard that engine works: faster uses less PC power, slower gives better picture quality.</p>
         <div class="normalize-rate-panels">
           <section class="normalize-rate-panel ${isCbr ? "" : "active"}" data-normalize-rate-panel="vbr">
             <h4>VBR Controls</h4>
@@ -4316,10 +4599,6 @@ function normalizationCard(channel, index) {
               ${normalizeInput(index, "video_minrate", "Min video bitrate", normalizeProfile.video_minrate || "4500k")}
               ${normalizeInput(index, "video_maxrate", "Max video bitrate", normalizeProfile.video_maxrate || "6800k")}
             </div>
-          </section>
-          <section class="normalize-rate-panel ${isCbr ? "active" : ""}" data-normalize-rate-panel="cbr">
-            <h4>CBR Controls</h4>
-            <p class="setting-note">CBR uses one constant bitrate: <code>video_bitrate</code>. Min and max are forced to the same value automatically.</p>
           </section>
         </div>
         <div class="meta" data-normalize-rate-status>${isCbr ? "CBR mode is enabled for this channel." : "VBR mode is enabled for this channel."}</div>
@@ -4340,17 +4619,36 @@ function taskForChannel(channelName) {
   ));
 }
 
-function taskProgressMarkup(task) {
+function completedRawFileCount(selected, task) {
+  if (!task || task.name !== "normalize" || !selected.length) return 0;
+
+  const progress = task.progress || {};
+  const current = Math.max(0, Number(progress.current) || 0);
+  const percent = Math.max(0, Math.min(100, Number(progress.percent) || 0));
+  return task.returncode === 0 && !task.running
+    ? selected.length
+    : Math.max(0, Math.min(selected.length, current - (percent >= 100 ? 0 : 1)));
+}
+
+function completedRawFileSet(channel, task) {
+  const selected = Array.isArray(channel?.raw_playlist) ? channel.raw_playlist : [];
+  return new Set(selected.slice(0, completedRawFileCount(selected, task)));
+}
+
+function taskProgressMarkup(task, index = -1, completedCount = 0) {
   const progress = task.progress || {};
   const percent = Math.max(0, Math.min(100, Number(progress.percent) || 0));
   const action = task.name === "normalize" ? "Encoding" : task.name === "validate" ? "Validating" : "Testing stream";
-  const status = task.running ? action : task.returncode === 0 ? "Finished" : "Failed";
+  const stopped = Boolean(task.stopped_by_user);
+  const status = task.running ? action : task.returncode === 0 ? "Finished" : stopped ? "Stopped" : "Failed";
   const total = Number(progress.total) || 0;
   const current = Number(progress.current) || 0;
   const countText = total ? `${Math.min(current || 1, total)} of ${total}` : "Starting";
-  const message = progress.message || "Starting...";
+  const message = stopped ? "Stopped" : progress.message || "Starting...";
+  const canResume = stopped && task.name === "normalize" && index >= 0 && total && completedCount < total;
+  const cardState = task.running ? "running" : task.returncode === 0 ? "done" : stopped ? "stopped" : "failed";
   return `
-    <div class="progress-card ${task.running ? "running" : task.returncode === 0 ? "done" : "failed"}">
+    <div class="progress-card ${cardState}">
       <div class="progress-head">
         <span>${escapeHtml(status)}</span>
         <span>${escapeHtml(countText)} - ${percent}%</span>
@@ -4359,9 +4657,17 @@ function taskProgressMarkup(task) {
         <div class="progress-fill" style="width: ${percent}%"></div>
       </div>
       <div class="progress-message">${escapeHtml(message)}</div>
-      ${task.running ? `<button class="pill danger small" type="button" onclick="stopTask('${escapeJs(task.id)}')">Stop ${escapeHtml(task.name)}</button>` : ""}
+      <div class="progress-actions">
+        ${task.running ? `<button class="pill danger small" type="button" onclick="stopTask('${escapeJs(task.id)}')">${escapeHtml(stopTaskLabel(task.name))}</button>` : ""}
+        ${canResume ? `<button class="pill success small" type="button" onclick="resumeSettingsTask('normalize', ${index}, ${completedCount + 1})">Resume</button>` : ""}
+      </div>
     </div>
   `;
+}
+
+function stopTaskLabel(name) {
+  if (name === "normalize") return "Stop Encoding";
+  return `Stop ${name}`;
 }
 
 function normalizeInput(index, name, label, value, type = "text") {
@@ -4520,6 +4826,15 @@ function syncDefaultControlToState(control) {
   syncConfigEditor();
 }
 
+function syncProfileControlToState(control) {
+  if (!control?.dataset?.profileField) return;
+  const config = state.configData || defaultConfigData();
+  config.normalize_profile = config.normalize_profile || {};
+  config.normalize_profile[control.dataset.profileField] = coerceValue(control.value, control.type);
+  state.configData = config;
+  syncConfigEditor();
+}
+
 function streamSettingsCard(channel, index) {
   return `
     <section class="nested-card youtube-stream-settings-card channel-settings selected-live-settings" data-index="${index}" data-channel-name="${escapeAttr(channel.name || "")}">
@@ -4557,31 +4872,25 @@ function streamSettingsCard(channel, index) {
 }
 
 function liveVideosCard(channel, index) {
-  const selected = Array.isArray(channel.playlist) ? channel.playlist : [];
-  const files = state.normalizedFilesByChannel[channel.name] || [];
-  const selectedSet = new Set(selected);
+  const files = orderedLiveFilesForDisplay(channel, state.normalizedFilesByChannel[channel.name] || [])
+    .filter((file) => !isActiveEncodingOutput(channel.name || "", file));
   const fileOptions = files.length
-    ? files.map((file) => liveVideoOption(file, index, channel.name || "", selectedSet)).join("")
-    : `<div class="meta">No normalized videos found yet in Go Live/${escapeHtml(channel.name || "")}. Normalize videos first, then click Refresh.</div>`;
+    ? files.map((file) => liveVideoOption(file, index, channel.name || "")).join("")
+    : `<div class="meta">No normalized videos found yet in Go Live/${escapeHtml(channel.name || "")}. Normalize videos first.</div>`;
   return `
     <section class="nested-card live-videos-card channel-settings selected-live-videos" data-index="${index}" data-channel-name="${escapeAttr(channel.name || "")}">
         <div class="section-head compact">
           <div>
             <h3>Videos</h3>
-            <p class="helper">Choose the exact normalized videos to go live with. Clear all to use the whole channel folder.</p>
-          </div>
-          <div class="row wrap">
-            <button class="pill ghost small" type="button" onclick="selectAllLiveFiles(${index})">Select All</button>
-            <button class="pill ghost small" type="button" onclick="clearLiveFiles(${index})">Clear</button>
-            <button class="pill ghost small" type="button" onclick="refreshLiveFiles(${index}).catch((error) => toast(error.message))">Refresh</button>
+            <p class="helper">Drag normalized videos into the live order. Remove anything you do not want to stream.</p>
           </div>
         </div>
-        <div class="file-list live-video-list">${fileOptions}</div>
+        <div class="file-list live-video-list" data-live-video-list>${fileOptions}</div>
     </section>
   `;
 }
 
-function liveVideoOption(file, index, channelName, selectedSet) {
+function liveVideoOption(file, index, channelName) {
   const path = String(file?.path || "");
   const name = String(file?.name || path.split(/[\\/]/).pop() || path);
   const thumbnailQuery = new URLSearchParams({
@@ -4590,15 +4899,66 @@ function liveVideoOption(file, index, channelName, selectedSet) {
     path,
   });
   return `
-    <label class="file-option live-video-option">
-      <input type="checkbox" data-live-file="${escapeAttr(path)}" ${selectedSet.has(path) ? "checked" : ""} onchange="syncLiveSelection(${index})">
+    <div class="file-option live-video-option" data-live-video-option data-live-file-path="${escapeAttr(path)}">
+      <button class="live-video-drag-handle" type="button" title="Drag to reorder" aria-label="Drag ${escapeAttr(name)} to reorder" onpointerdown="startLiveVideoDrag(event, ${index})" onmousedown="startLiveVideoDrag(event, ${index})">
+        <span aria-hidden="true">::</span>
+      </button>
       <img class="video-thumb" src="/api/video-thumbnail?${thumbnailQuery.toString()}" alt="" loading="lazy" onerror="this.classList.add('missing')">
       <span class="video-option-text">
         <span class="video-option-name">${escapeHtml(name)}</span>
         <span class="video-option-path">${escapeHtml(path)}</span>
       </span>
-    </label>
+      <button class="file-remove-button live-video-remove-button" type="button" title="Remove from Videos list" aria-label="Remove ${escapeAttr(name)} from Videos list" onclick="event.preventDefault(); event.stopPropagation(); removeLiveVideoEntry(${index}, '${escapeJs(path)}')">x</button>
+    </div>
   `;
+}
+
+function orderedLiveFilesForDisplay(channel, files) {
+  const playlist = Array.isArray(channel?.playlist)
+    ? channel.playlist.map((item) => String(item || "")).filter(Boolean)
+    : [];
+  if (!playlist.length) return files;
+
+  const byPath = new Map();
+  files.forEach((file) => {
+    const path = String(file?.path || "");
+    if (path && !byPath.has(path)) byPath.set(path, file);
+  });
+
+  const ordered = [];
+  const seen = new Set();
+  playlist.forEach((path) => {
+    if (seen.has(path)) return;
+    seen.add(path);
+    ordered.push(byPath.get(path) || {
+      name: path.split(/[\\/]/).pop() || path,
+      path,
+      folder: path.split(/[\\/]/).slice(0, -1).join("/") || "",
+      exists: false,
+    });
+  });
+  files.forEach((file) => {
+    const path = String(file?.path || "");
+    if (!path || seen.has(path)) return;
+    seen.add(path);
+    ordered.push(file);
+  });
+  return ordered;
+}
+
+function isActiveEncodingOutput(channelName, file) {
+  const path = String(file?.path || "");
+  const name = String(file?.name || path.split(/[\\/]/).pop() || "");
+  if (!path && !name) return false;
+  const tasks = state.status?.tasks || [];
+  return tasks.some((task) => {
+    if (!task?.running || task.name !== "normalize") return false;
+    const taskChannel = String(task.channel || task.progress?.channel || "");
+    if (taskChannel !== String(channelName || "")) return false;
+    const message = String(task.progress?.message || "");
+    const outputName = message.includes(" -> ") ? message.split(" -> ").pop().trim() : "";
+    return outputName && (outputName === name || path.endsWith(`/${outputName}`) || path.endsWith(`\\${outputName}`));
+  });
 }
 
 function channelInput(name, label, value, type = "text", hint = "") {
@@ -4658,16 +5018,220 @@ function syncRawSelection(index) {
   }
 }
 
+function removeRawSelection(index, rawFile) {
+  const config = state.configData || defaultConfigData();
+  if (!config.channels?.[index]) return;
+  const selected = Array.isArray(config.channels[index].raw_playlist) ? config.channels[index].raw_playlist : [];
+  config.channels[index].raw_playlist = selected.filter((item) => item !== rawFile);
+  const channelName = String(config.channels[index].name || "");
+  if (channelName && Array.isArray(state.rawFilesByChannel[channelName])) {
+    state.rawFilesByChannel[channelName] = state.rawFilesByChannel[channelName].filter((file) => file?.path !== rawFile);
+  }
+  state.configData = config;
+  $("configEditor").value = JSON.stringify(config, null, 2) + "\n";
+  renderSettingsForms();
+}
+
 function syncLiveSelection(index) {
-  const card = document.querySelector(`#channelSettings [data-index="${index}"]`);
+  const card = liveVideosCardForIndex(index);
   if (!card) return;
-  const selected = Array.from(card.querySelectorAll("[data-live-file]:checked")).map((input) => input.dataset.liveFile);
+  const selected = liveVideoPathsFromCard(card);
   const config = state.configData || defaultConfigData();
   if (config.channels?.[index]) {
     config.channels[index].playlist = selected;
     state.configData = config;
     $("configEditor").value = JSON.stringify(config, null, 2) + "\n";
   }
+}
+
+function liveVideosCardForIndex(index) {
+  return document.querySelector(`#channelSettings .selected-live-videos[data-index="${index}"]`);
+}
+
+function liveVideoPathsFromCard(card) {
+  return Array.from(card?.querySelectorAll("[data-live-video-option]") || [])
+    .map((item) => item.dataset.liveFilePath)
+    .filter(Boolean);
+}
+
+function removeLiveVideoEntry(index, liveFile) {
+  const config = state.configData || defaultConfigData();
+  if (!config.channels?.[index]) return;
+  const channelName = String(config.channels[index].name || "");
+  const visiblePaths = liveVideoPathsFromCard(liveVideosCardForIndex(index));
+  const fallbackPaths = Array.isArray(state.normalizedFilesByChannel[channelName])
+    ? state.normalizedFilesByChannel[channelName].map((file) => String(file?.path || "")).filter(Boolean)
+    : [];
+  const currentPaths = (visiblePaths.length ? visiblePaths : fallbackPaths);
+  config.channels[index].playlist = currentPaths.filter((item) => item !== liveFile);
+  if (channelName && Array.isArray(state.normalizedFilesByChannel[channelName])) {
+    state.normalizedFilesByChannel[channelName] = state.normalizedFilesByChannel[channelName]
+      .filter((file) => file?.path !== liveFile);
+  }
+  state.configData = config;
+  $("configEditor").value = JSON.stringify(config, null, 2) + "\n";
+  scheduleSettingsAutosave?.(200);
+  renderSettingsForms();
+}
+
+function startLiveVideoDrag(event, index) {
+  if (state.liveVideoDrag) return;
+  if (event.button !== undefined && event.button !== 0) return;
+  const item = event.currentTarget?.closest("[data-live-video-option]");
+  const list = item?.closest("[data-live-video-list]");
+  if (!item || !list) return;
+
+  event.preventDefault();
+  event.stopPropagation();
+
+  const items = Array.from(list.querySelectorAll("[data-live-video-option]"));
+  const originalIndex = items.indexOf(item);
+  if (originalIndex < 0) return;
+
+  const rects = items.map((node) => node.getBoundingClientRect());
+  const draggedRect = rects[originalIndex];
+  const nextRect = rects[originalIndex + 1];
+  const previousRect = rects[originalIndex - 1];
+  const gapAfter = nextRect ? Math.max(0, nextRect.top - draggedRect.bottom) : 0;
+  const gapBefore = previousRect ? Math.max(0, draggedRect.top - previousRect.bottom) : 0;
+
+  state.liveVideoDrag = {
+    index,
+    pointerId: liveVideoDragPointerId(event),
+    list,
+    item,
+    items,
+    rects,
+    originalIndex,
+    currentIndex: originalIndex,
+    startY: event.clientY,
+    shiftDistance: draggedRect.height + Math.max(gapAfter, gapBefore, 8),
+  };
+
+  list.classList.add("is-dragging");
+  item.classList.add("is-dragging");
+  item.style.transform = "translateY(0px)";
+  if (typeof event.pointerId === "number") {
+    item.setPointerCapture?.(event.pointerId);
+  }
+  window.addEventListener("pointermove", moveLiveVideoDrag);
+  window.addEventListener("pointerup", endLiveVideoDrag);
+  window.addEventListener("pointercancel", cancelLiveVideoDrag);
+  window.addEventListener("mousemove", moveLiveVideoDrag);
+  window.addEventListener("mouseup", endLiveVideoDrag);
+}
+
+function moveLiveVideoDrag(event) {
+  const drag = state.liveVideoDrag;
+  if (!drag || !liveVideoDragEventMatches(drag, event)) return;
+  event.preventDefault();
+  updateLiveVideoDragPosition(drag, event.clientY);
+}
+
+function updateLiveVideoDragPosition(drag, clientY) {
+  const deltaY = clientY - drag.startY;
+  let targetIndex = drag.originalIndex;
+  drag.rects.forEach((rect, rectIndex) => {
+    if (rectIndex === drag.originalIndex) return;
+    if (deltaY > 0 && rectIndex > drag.originalIndex && clientY > rect.top) {
+      targetIndex = rectIndex;
+    } else if (deltaY < 0 && rectIndex < drag.originalIndex && clientY < rect.bottom) {
+      targetIndex = rectIndex;
+    }
+  });
+
+  drag.currentIndex = Math.max(0, Math.min(drag.items.length - 1, targetIndex));
+  drag.item.style.transform = `translateY(${deltaY}px)`;
+  drag.items.forEach((node, nodeIndex) => {
+    if (node === drag.item) return;
+    let offset = 0;
+    if (drag.currentIndex > drag.originalIndex && nodeIndex > drag.originalIndex && nodeIndex <= drag.currentIndex) {
+      offset = -drag.shiftDistance;
+    } else if (drag.currentIndex < drag.originalIndex && nodeIndex >= drag.currentIndex && nodeIndex < drag.originalIndex) {
+      offset = drag.shiftDistance;
+    }
+    node.style.transform = offset ? `translateY(${offset}px)` : "";
+  });
+}
+
+function endLiveVideoDrag(event) {
+  const drag = state.liveVideoDrag;
+  if (!drag || !liveVideoDragEventMatches(drag, event)) return;
+  updateLiveVideoDragPosition(drag, event.clientY);
+  finishLiveVideoDrag(true);
+}
+
+function cancelLiveVideoDrag(event) {
+  const drag = state.liveVideoDrag;
+  if (!drag || !liveVideoDragEventMatches(drag, event)) return;
+  finishLiveVideoDrag(false);
+}
+
+function liveVideoDragPointerId(event) {
+  return event.pointerId ?? "mouse";
+}
+
+function liveVideoDragEventMatches(drag, event) {
+  const eventId = liveVideoDragPointerId(event);
+  return drag.pointerId === eventId || (eventId === "mouse" && typeof drag.pointerId === "number");
+}
+
+function finishLiveVideoDrag(applyOrder) {
+  const drag = state.liveVideoDrag;
+  if (!drag) return;
+
+  window.removeEventListener("pointermove", moveLiveVideoDrag);
+  window.removeEventListener("pointerup", endLiveVideoDrag);
+  window.removeEventListener("pointercancel", cancelLiveVideoDrag);
+  window.removeEventListener("mousemove", moveLiveVideoDrag);
+  window.removeEventListener("mouseup", endLiveVideoDrag);
+
+  const orderedItems = drag.items.slice();
+  if (applyOrder && drag.currentIndex !== drag.originalIndex) {
+    const [moved] = orderedItems.splice(drag.originalIndex, 1);
+    orderedItems.splice(drag.currentIndex, 0, moved);
+    orderedItems.forEach((node) => drag.list.appendChild(node));
+  }
+
+  drag.items.forEach((node) => {
+    node.style.transform = "";
+    node.classList.remove("is-dragging");
+  });
+  drag.list.classList.remove("is-dragging");
+  state.liveVideoDrag = null;
+
+  if (applyOrder) {
+    syncLiveVideoOrder(drag.index, orderedItems);
+  }
+}
+
+function syncLiveVideoOrder(index, orderedItems = null) {
+  const card = liveVideosCardForIndex(index);
+  if (!card && !Array.isArray(orderedItems)) return;
+  const optionItems = Array.isArray(orderedItems)
+    ? orderedItems
+    : Array.from(card.querySelectorAll("[data-live-video-option]"));
+  const orderedPaths = optionItems
+    .map((item) => item.dataset.liveFilePath)
+    .filter(Boolean);
+  const config = state.configData || defaultConfigData();
+  if (!config.channels?.[index]) return;
+  const channelName = String(config.channels[index].name || "");
+
+  config.channels[index].playlist = orderedPaths;
+  if (channelName && Array.isArray(state.normalizedFilesByChannel[channelName])) {
+    const byPath = new Map(state.normalizedFilesByChannel[channelName].map((file) => [String(file?.path || ""), file]));
+    const reordered = orderedPaths.map((path) => byPath.get(path)).filter(Boolean);
+    state.normalizedFilesByChannel[channelName].forEach((file) => {
+      const path = String(file?.path || "");
+      if (path && !orderedPaths.includes(path)) reordered.push(file);
+    });
+    state.normalizedFilesByChannel[channelName] = reordered;
+  }
+
+  state.configData = config;
+  $("configEditor").value = JSON.stringify(config, null, 2) + "\n";
+  scheduleSettingsAutosave?.(200);
 }
 
 function syncLiveMode(index, modeValue) {
@@ -4698,7 +5262,7 @@ function syncLiveMode(index, modeValue) {
 }
 
 function selectAllLiveFiles(index) {
-  const card = document.querySelector(`#channelSettings [data-index="${index}"]`);
+  const card = liveVideosCardForIndex(index);
   if (!card) return;
   card.querySelectorAll("[data-live-file]").forEach((input) => {
     input.checked = true;
@@ -4707,7 +5271,7 @@ function selectAllLiveFiles(index) {
 }
 
 function clearLiveFiles(index) {
-  const card = document.querySelector(`#channelSettings [data-index="${index}"]`);
+  const card = liveVideosCardForIndex(index);
   if (!card) return;
   card.querySelectorAll("[data-live-file]").forEach((input) => {
     input.checked = false;
@@ -4782,6 +5346,10 @@ function collectSettingsData() {
 
   document.querySelectorAll("[data-default-field]").forEach((input) => {
     config.defaults[input.dataset.defaultField] = coerceValue(input.value, input.type);
+  });
+
+  document.querySelectorAll("[data-profile-field]").forEach((input) => {
+    config.normalize_profile[input.dataset.profileField] = coerceValue(input.value, input.type);
   });
 
   document.querySelectorAll("[data-youtube-field]").forEach((input) => {
@@ -4954,10 +5522,81 @@ async function createConfig() {
 async function saveSettings() {
   const data = collectSettingsData();
   await saveConfigData(data);
+  await refreshYoutubeStatus();
+  await autoVerifySelectedYoutubeChannel({ force: true });
   toast("Settings saved.");
 }
 
-async function saveConfigData(data) {
+function settingsAutosaveTargetChanged(target) {
+  if (!(target instanceof HTMLInputElement || target instanceof HTMLSelectElement || target instanceof HTMLTextAreaElement)) return false;
+  if (!target.closest("#viewSettings")) return false;
+  if (target.type === "file") return false;
+  return Boolean(target.matches([
+    "[data-default-field]",
+    "[data-profile-field]",
+    "[data-youtube-field]",
+    "[data-normalize-index][data-normalize-field]",
+    "[data-channel-field]",
+    "[data-live-profile-field]",
+    "[data-youtube-channel-index][data-youtube-channel-field]",
+    "[data-raw-file]",
+    "[data-live-file]",
+  ].join(",")));
+}
+
+function scheduleSettingsAutosave(delayMs = 900) {
+  window.clearTimeout(state.settingsAutosaveTimer);
+  state.settingsAutosaveTimer = window.setTimeout(() => {
+    autosaveSettings().catch((error) => {
+      toast(`Autosave failed: ${error.message}`);
+    });
+  }, delayMs);
+}
+
+async function autosaveSettings() {
+  if (state.settingsAutosaveBusy) {
+    state.settingsAutosaveQueued = true;
+    return;
+  }
+  const data = collectSettingsData();
+  const signature = JSON.stringify(data);
+  if (signature === state.settingsAutosaveLastSignature) return;
+
+  state.settingsAutosaveBusy = true;
+  state.settingsAutosaveQueued = false;
+  try {
+    await saveConfigData(data, { render: false, refresh: false, reloadFiles: false });
+    state.settingsAutosaveLastSignature = JSON.stringify(state.configData || data);
+    state.settingsAutosaveLastAt = Date.now();
+    await autoVerifySelectedYoutubeChannel({ force: true });
+    toast("Settings saved automatically.");
+  } finally {
+    state.settingsAutosaveBusy = false;
+    if (state.settingsAutosaveQueued) {
+      scheduleSettingsAutosave(250);
+    }
+  }
+}
+
+async function flushSettingsAutosave() {
+  if (state.settingsAutosaveTimer) {
+    window.clearTimeout(state.settingsAutosaveTimer);
+    state.settingsAutosaveTimer = null;
+    await autosaveSettings();
+  }
+  while (state.settingsAutosaveBusy) {
+    await new Promise((resolve) => window.setTimeout(resolve, 50));
+  }
+  if (state.settingsAutosaveQueued) {
+    state.settingsAutosaveQueued = false;
+    await autosaveSettings();
+  }
+}
+
+async function saveConfigData(data, options = {}) {
+  const render = options.render !== false;
+  const refreshStatus = options.refresh !== false;
+  const reloadFiles = options.reloadFiles !== false;
   trimStreamKeyFields(data);
   validateConfigData(data);
   await api("/api/config/save", {
@@ -4967,11 +5606,20 @@ async function saveConfigData(data) {
   });
   state.configData = data;
   normalizeConfigShape();
+  state.settingsAutosaveLastSignature = JSON.stringify(state.configData);
   $("configEditor").value = JSON.stringify(state.configData, null, 2) + "\n";
-  renderSettingsForms();
-  await refresh();
-  await loadRawFiles();
-  await loadNormalizedFiles();
+  if (render) {
+    renderSettingsForms();
+  } else {
+    renderSettingsFormsUnlessPaused();
+  }
+  if (refreshStatus) {
+    await refresh();
+  }
+  if (reloadFiles) {
+    await loadRawFiles();
+    await loadNormalizedFiles();
+  }
 }
 
 function clonePlain(value) {
@@ -5142,7 +5790,7 @@ function removeActiveSettingsChannel() {
   removeChannel(selectedSettingsChannelIndex(config));
 }
 
-async function startSettingsTask(action, index) {
+async function startSettingsTask(action, index, { startIndex = 1, chooseOutputFolder = true } = {}) {
   const data = collectSettingsData();
   const channel = data.channels?.[index];
   if (!channel?.name) {
@@ -5151,14 +5799,37 @@ async function startSettingsTask(action, index) {
   }
 
   state.activeSettingsChannelIndex = index;
+  if (action === "normalize" && chooseOutputFolder) {
+    const outputFolder = await chooseEncodeOutputFolder(data);
+    if (!outputFolder) {
+      toast("Encoding canceled.");
+      return;
+    }
+    data.defaults = data.defaults || {};
+    data.defaults.normalized_dir = outputFolder;
+    state.configData = data;
+    syncConfigEditor();
+  }
   await saveConfigData(data);
-  await startTask(action, channel.name, false);
+  await startTask(action, channel.name, false, startIndex);
 }
 
-async function startTask(action, channel = null, showControl = true) {
+async function resumeSettingsTask(action, index, startIndex) {
+  await startSettingsTask(action, index, {
+    startIndex: Math.max(1, Number(startIndex) || 1),
+    chooseOutputFolder: false,
+  });
+}
+
+async function startTask(action, channel = null, showControl = true, startIndex = 1) {
+  await flushSettingsAutosave();
+  const body = { config: state.config, action, channel };
+  if (startIndex > 1) {
+    body.start_index = startIndex;
+  }
   await api("/api/task/start", {
     method: "POST",
-    body: JSON.stringify({ config: state.config, action, channel }),
+    body: JSON.stringify(body),
     action: `task.start.${action || "unknown"}`,
   });
   if (showControl) {
@@ -5177,6 +5848,7 @@ async function stopTask(taskId) {
 }
 
 async function startStream(channel = null) {
+  await flushSettingsAutosave();
   await api("/api/stream/start", {
     method: "POST",
     body: JSON.stringify({ config: state.config, channel }),
@@ -5201,7 +5873,7 @@ function showTab(tab) {
     state.workspace.activeRoute = "overview";
   } else if (tab === "settings" && state.workspace.activeRoute === "overview") {
     state.workspace.activeRoute = normalizeWorkspaceRoute(Object.entries(routeToSettingsTab)
-      .find((entry) => entry[1] === state.settingsTab)?.[0] || "folders");
+      .find((entry) => entry[1] === state.settingsTab)?.[0] || "encoder");
   }
   if (tab === "settings") {
     syncActiveSettingsChannelFromWorkspace(true);
@@ -5241,7 +5913,7 @@ function showSettingsTab(tab) {
         }
         const selectedChannel = String(state.workspace.selectedChannelName || "").trim();
         return refreshYoutubeBroadcasts(Boolean(selectedChannel), { silent: true })
-          .then(() => verifyYoutubeChannelKeys(selectedChannel, { silent: true }));
+          .then(() => autoVerifySelectedYoutubeChannel({ channelName: selectedChannel }));
       })
       .catch((error) => toast(error.message));
   }
@@ -5270,7 +5942,6 @@ function escapeJs(value) {
 
 $("tabControl").addEventListener("click", () => showTab("control"));
 $("tabSettings").addEventListener("click", () => showTab("settings"));
-$("settingsFoldersTab").addEventListener("click", () => showSettingsTab("folders"));
 $("settingsNormalizeTab").addEventListener("click", () => showSettingsTab("normalize"));
 if ($("settingsLiveHistoryTab")) {
   $("settingsLiveHistoryTab").addEventListener("click", () => showSettingsTab("liveHistory"));
@@ -5278,10 +5949,6 @@ if ($("settingsLiveHistoryTab")) {
 if ($("settingsTroubleshootingTab")) {
   $("settingsTroubleshootingTab").addEventListener("click", () => showSettingsTab("troubleshooting"));
 }
-if ($("activityFilterAll")) $("activityFilterAll").addEventListener("click", () => setActivityFilter("all"));
-if ($("activityFilterTasks")) $("activityFilterTasks").addEventListener("click", () => setActivityFilter("tasks"));
-if ($("activityFilterApi")) $("activityFilterApi").addEventListener("click", () => setActivityFilter("api"));
-if ($("activityFilterErrors")) $("activityFilterErrors").addEventListener("click", () => setActivityFilter("errors"));
 if ($("settingsYoutubeTab")) {
   $("settingsYoutubeTab").addEventListener("click", () => showSettingsTab("youtube"));
 }
@@ -5325,6 +5992,11 @@ document.addEventListener("input", (event) => {
     syncNormalizeControlToState(target);
   } else if (target.matches("[data-default-field]")) {
     syncDefaultControlToState(target);
+  } else if (target.matches("[data-profile-field]")) {
+    syncProfileControlToState(target);
+  }
+  if (settingsAutosaveTargetChanged(target)) {
+    scheduleSettingsAutosave(900);
   }
 });
 document.addEventListener("change", (event) => {
@@ -5336,6 +6008,11 @@ document.addEventListener("change", (event) => {
     syncNormalizeControlToState(target);
   } else if (target.matches("[data-default-field]")) {
     syncDefaultControlToState(target);
+  } else if (target.matches("[data-profile-field]")) {
+    syncProfileControlToState(target);
+  }
+  if (settingsAutosaveTargetChanged(target)) {
+    scheduleSettingsAutosave(200);
   }
 });
 document.addEventListener("pointermove", moveWorkspaceChannelPictureDrag);
@@ -5371,7 +6048,9 @@ if ($("createConfig")) {
 if ($("reload")) {
   $("reload").addEventListener("click", () => refresh().then(loadConfigText).catch((error) => toast(error.message)));
 }
-$("saveSettings").addEventListener("click", () => saveSettings().catch((error) => toast(error.message)));
+if ($("saveSettings")) {
+  $("saveSettings").addEventListener("click", () => saveSettings().catch((error) => toast(error.message)));
+}
 if ($("addChannelRail")) {
   $("addChannelRail").addEventListener("click", addChannel);
 }
@@ -5442,11 +6121,6 @@ if ($("startAll")) {
 }
 if ($("stopAll")) {
   $("stopAll").addEventListener("click", () => stopStream().catch((error) => toast(error.message)));
-}
-if ($("workspaceVerifyAll")) {
-  $("workspaceVerifyAll").addEventListener("click", () => {
-    verifyYoutubeChannelKeys().catch((error) => toast(error.message));
-  });
 }
 if ($("railOpenDashboard")) {
   $("railOpenDashboard").addEventListener("click", () => openWorkspaceRoute("control"));

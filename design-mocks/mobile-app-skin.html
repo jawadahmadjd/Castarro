@@ -176,6 +176,13 @@
         white-space: nowrap;
       }
 
+      .video-title span {
+        display: block;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
       .channel-title span,
       .video-title span,
       .muted {
@@ -624,44 +631,60 @@
             <section class="screen-body">
               <section class="card">
                 <div class="card-head">
-                  <h2>Destination</h2>
+                  <h2>YouTube account</h2>
                   <span class="badge good">Linked</span>
                 </div>
                 <div class="channel-row">
                   <span class="avatar">I</span>
                   <span class="channel-title">
                     <strong>Inside Us Account</strong>
-                    <span>Manual stream profile</span>
+                    <span>inside-us@example.com</span>
                   </span>
                 </div>
-              </section>
-
-              <section class="card">
-                <h2>Manual Stream Key</h2>
-                <label class="field">
-                  <span class="label">RTMPS URL</span>
-                  <input class="input" value="rtmps://a.rtmps.youtube.com/live2" readonly>
-                </label>
-                <label class="field">
-                  <span class="label">Stream key</span>
-                  <input class="input" value="****-****-****-****" readonly>
-                </label>
                 <div class="metric-row">
-                  <button class="button ghost" type="button">Reveal</button>
-                  <button class="button gold" type="button">Paste</button>
+                  <button class="button ghost" type="button">Switch</button>
+                  <button class="button ghost" type="button">Disconnect</button>
                 </div>
               </section>
 
               <section class="card">
-                <h2>Studio Checks</h2>
+                <h2>YouTube Live profile</h2>
+                <label class="field">
+                  <span class="label">Broadcast title</span>
+                  <input class="input" value="Mobile stream" readonly>
+                </label>
+                <div class="metric-row">
+                  <span class="badge">Private</span>
+                  <span class="badge good">Unlisted</span>
+                  <span class="badge">Public</span>
+                </div>
+                <button class="button primary" type="button">Create live stream</button>
                 <div class="readiness">
                   <div class="readiness-row">
-                    <div class="video-title"><strong>Auto Start</strong><span>YouTube Studio</span></div>
-                    <span class="badge good">On</span>
+                    <div class="video-title"><strong>Broadcast</strong><span>youtube-broadcast-id</span></div>
+                    <span class="badge good">Ready</span>
                   </div>
                   <div class="readiness-row">
-                    <div class="video-title"><strong>Auto Stop</strong><span>YouTube Studio</span></div>
-                    <span class="badge good">On</span>
+                    <div class="video-title"><strong>Ingest</strong><span>rtmps://a.rtmps.youtube.com/live2</span></div>
+                    <span class="badge good">RTMPS</span>
+                  </div>
+                  <div class="readiness-row">
+                    <div class="video-title"><strong>Stream name</strong><span>Stored encrypted on this device</span></div>
+                    <span class="badge good">Ready</span>
+                  </div>
+                </div>
+              </section>
+
+              <section class="card">
+                <h2>Manual RTMPS fallback</h2>
+                <div class="readiness">
+                  <div class="readiness-row">
+                    <div class="video-title"><strong>Server</strong><span>rtmps://a.rtmps.youtube.com/live2</span></div>
+                    <span class="badge">Saved</span>
+                  </div>
+                  <div class="readiness-row">
+                    <div class="video-title"><strong>Stream key</strong><span>Stored encrypted on this device</span></div>
+                    <span class="badge">Saved</span>
                   </div>
                 </div>
               </section>

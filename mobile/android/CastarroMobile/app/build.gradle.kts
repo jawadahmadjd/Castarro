@@ -92,8 +92,11 @@ dependencies {
     implementation("androidx.datastore:datastore-preferences:1.1.1")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
+    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
     implementation("androidx.room:room-ktx:2.6.1")
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
+    implementation("com.google.android.gms:play-services-auth:21.6.0")
+    implementation("com.moizhassan.ffmpeg:ffmpeg-kit-16kb:6.1.1")
     ksp("androidx.room:room-compiler:2.6.1")
 
     testImplementation("junit:junit:4.13.2")
