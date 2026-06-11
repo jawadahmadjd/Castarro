@@ -1,0 +1,11 @@
+{
+  "id": "google-drive-main",
+  "type": "googleDrive",
+  "displayName": "Google Drive",
+  "authMode": "oauth",
+  "status": "connected",
+  "accountEmail": "owner@example.com",
+  "tokensFile": ".runtime/google_drive_tokens.json",
+  "createdAt": "2026-06-08T00:00:00Z",
+  "updatedAt": "2026-06-08T00:00:00Z"
+}

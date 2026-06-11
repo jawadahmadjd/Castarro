@@ -59,9 +59,41 @@ def init_db() -> None:
               normalize_profile_json TEXT,
               raw_playlist_json TEXT,
               playlist_json TEXT,
+              cloud_playlist_json TEXT,
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL,
               UNIQUE(config_name, name)
+            );
+
+            CREATE TABLE IF NOT EXISTS storage_providers (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              config_name TEXT NOT NULL,
+              provider_id TEXT NOT NULL,
+              provider_type TEXT NOT NULL,
+              display_name TEXT NOT NULL,
+              auth_mode TEXT NOT NULL,
+              status TEXT NOT NULL,
+              tokens_file TEXT,
+              account_email TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              UNIQUE(config_name, provider_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS cloud_videos (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              config_name TEXT NOT NULL,
+              channel_name TEXT NOT NULL,
+              provider_id TEXT NOT NULL,
+              provider_file_id TEXT NOT NULL,
+              display_name TEXT NOT NULL,
+              source_uri TEXT,
+              compatibility_status TEXT NOT NULL,
+              compatibility_message TEXT,
+              selected INTEGER NOT NULL DEFAULT 1,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              UNIQUE(config_name, channel_name, provider_id, provider_file_id)
             );
 
             CREATE TABLE IF NOT EXISTS videos (
@@ -142,6 +174,12 @@ def init_db() -> None:
             db.execute("ALTER TABLE stream_sessions ADD COLUMN live_title TEXT")
         if "transferred_bytes" not in columns:
             db.execute("ALTER TABLE stream_sessions ADD COLUMN transferred_bytes INTEGER NOT NULL DEFAULT 0")
+        channel_columns = {
+            str(row["name"])
+            for row in db.execute("PRAGMA table_info(channels)").fetchall()
+        }
+        if "cloud_playlist_json" not in channel_columns:
+            db.execute("ALTER TABLE channels ADD COLUMN cloud_playlist_json TEXT")
 
 
 def relative_or_absolute(path: Path) -> str:
@@ -213,10 +251,10 @@ def upsert_channel(config_name: str, channel: dict[str, Any], db: sqlite3.Connec
             INSERT INTO channels(
               config_name, name, enabled, stream_key_env, has_inline_key,
               youtube_auto_start, youtube_auto_stop, youtube_studio_url,
-              normalize_profile_json, raw_playlist_json, playlist_json,
+              normalize_profile_json, raw_playlist_json, playlist_json, cloud_playlist_json,
               created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(config_name, name) DO UPDATE SET
               enabled=excluded.enabled,
               stream_key_env=excluded.stream_key_env,
@@ -227,6 +265,7 @@ def upsert_channel(config_name: str, channel: dict[str, Any], db: sqlite3.Connec
               normalize_profile_json=excluded.normalize_profile_json,
               raw_playlist_json=excluded.raw_playlist_json,
               playlist_json=excluded.playlist_json,
+              cloud_playlist_json=excluded.cloud_playlist_json,
               updated_at=excluded.updated_at
             """,
             (
@@ -241,6 +280,7 @@ def upsert_channel(config_name: str, channel: dict[str, Any], db: sqlite3.Connec
                 json.dumps(channel.get("normalize_profile", {}), sort_keys=True),
                 json.dumps(channel.get("raw_playlist", []), sort_keys=True),
                 json.dumps(channel.get("playlist", []), sort_keys=True),
+                json.dumps(channel.get("cloud_playlist", []), sort_keys=True),
                 timestamp,
                 timestamp,
             ),
@@ -308,6 +348,104 @@ def upsert_video(
             db.close()
 
 
+def upsert_storage_provider(config_name: str, provider: dict[str, Any], db: sqlite3.Connection | None = None) -> None:
+    provider_id = str(provider.get("id") or "").strip()
+    if not provider_id:
+        return
+    timestamp = now()
+    owns_connection = db is None
+    if db is None:
+        db = connect()
+    try:
+        db.execute(
+            """
+            INSERT INTO storage_providers(
+              config_name, provider_id, provider_type, display_name, auth_mode,
+              status, tokens_file, account_email, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(config_name, provider_id) DO UPDATE SET
+              provider_type=excluded.provider_type,
+              display_name=excluded.display_name,
+              auth_mode=excluded.auth_mode,
+              status=excluded.status,
+              tokens_file=excluded.tokens_file,
+              account_email=excluded.account_email,
+              updated_at=excluded.updated_at
+            """,
+            (
+                config_name,
+                provider_id,
+                str(provider.get("type") or ""),
+                str(provider.get("display_name") or provider.get("displayName") or provider_id),
+                str(provider.get("auth_mode") or provider.get("authMode") or ""),
+                str(provider.get("status") or ""),
+                str(provider.get("tokens_file") or ""),
+                str(provider.get("account_email") or provider.get("accountEmail") or ""),
+                timestamp,
+                timestamp,
+            ),
+        )
+        if owns_connection:
+            db.commit()
+    finally:
+        if owns_connection:
+            db.close()
+
+
+def upsert_cloud_video(
+    config_name: str,
+    channel_name: str,
+    item: dict[str, Any],
+    db: sqlite3.Connection | None = None,
+) -> None:
+    provider_id = str(item.get("provider_id") or item.get("providerId") or "").strip()
+    file_id = str(item.get("file_id") or item.get("provider_file_id") or item.get("providerFileId") or "").strip()
+    if not channel_name or not provider_id or not file_id:
+        return
+    display_name = str(item.get("display_name") or item.get("displayName") or file_id).strip() or file_id
+    timestamp = now()
+    owns_connection = db is None
+    if db is None:
+        db = connect()
+    try:
+        db.execute(
+            """
+            INSERT INTO cloud_videos(
+              config_name, channel_name, provider_id, provider_file_id, display_name,
+              source_uri, compatibility_status, compatibility_message, selected,
+              created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(config_name, channel_name, provider_id, provider_file_id) DO UPDATE SET
+              display_name=excluded.display_name,
+              source_uri=excluded.source_uri,
+              compatibility_status=excluded.compatibility_status,
+              compatibility_message=excluded.compatibility_message,
+              selected=excluded.selected,
+              updated_at=excluded.updated_at
+            """,
+            (
+                config_name,
+                channel_name,
+                provider_id,
+                file_id,
+                display_name,
+                str(item.get("source_uri") or item.get("sourceUri") or ""),
+                str(item.get("compatibility_status") or item.get("compatibilityStatus") or "unknown"),
+                str(item.get("compatibility_message") or item.get("compatibilityMessage") or ""),
+                1,
+                timestamp,
+                timestamp,
+            ),
+        )
+        if owns_connection:
+            db.commit()
+    finally:
+        if owns_connection:
+            db.close()
+
+
 def sync_config(config_name: str, config: dict[str, Any], reason: str | None = None) -> None:
     init_db()
     with connect() as db:
@@ -318,6 +456,14 @@ def sync_config(config_name: str, config: dict[str, Any], reason: str | None = N
         raw_root = resolve_project_path(defaults.get("raw_dir", "Raw Videos"))
         normalized_root = resolve_project_path(defaults.get("normalized_dir", "Go Live"))
         current_channel_names = set()
+
+        storage = config.get("storage") if isinstance(config.get("storage"), dict) else {}
+        storage_providers = storage.get("providers", [])
+        if not isinstance(storage_providers, list):
+            storage_providers = []
+        for provider in storage_providers:
+            if isinstance(provider, dict):
+                upsert_storage_provider(config_name, provider, db)
 
         for channel in config.get("channels", []):
             channel_name = str(channel.get("name", "")).strip()
@@ -333,6 +479,12 @@ def sync_config(config_name: str, config: dict[str, Any], reason: str | None = N
             }
             for path_text in selected_paths:
                 upsert_video(config_name, channel_name, path_text, "raw", "selected", True, db)
+
+            cloud_playlist = channel.get("cloud_playlist", [])
+            if isinstance(cloud_playlist, list):
+                for item in cloud_playlist:
+                    if isinstance(item, dict):
+                        upsert_cloud_video(config_name, channel_name, item, db)
 
             raw_channel_dir = raw_root / channel_name
             if raw_channel_dir.exists():
@@ -559,7 +711,17 @@ def recent_stream_sessions(
 
 def stats() -> dict[str, Any]:
     init_db()
-    tables = ["channels", "videos", "settings_snapshots", "tasks", "stream_sessions", "logs", "app_events"]
+    tables = [
+        "channels",
+        "videos",
+        "storage_providers",
+        "cloud_videos",
+        "settings_snapshots",
+        "tasks",
+        "stream_sessions",
+        "logs",
+        "app_events",
+    ]
     with connect() as db:
         return {
             "path": str(DB_PATH),

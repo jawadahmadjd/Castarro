@@ -50,6 +50,16 @@ def build(config: dict, mode: str) -> tuple[list[str], str | None]:
     return command, note
 
 
+def build_preview_only(config: dict, mode: str) -> tuple[list[str], str | None]:
+    channel = dict(config["channels"][0])
+    live_profile = dict(channel.get("live_profile") or {})
+    live_profile["mode"] = mode
+    channel["live_profile"] = live_profile
+    preview_manifest = stream_manager.preview_manifest_path(Path("."), config, channel)
+    command, _, note = stream_manager.build_preview_command(Path("."), config, channel, preview_manifest)
+    return command, note
+
+
 def assert_transcode_preview_uses_transcode_args() -> None:
     with tempfile.TemporaryDirectory(prefix="castarro-preview-test-", dir=str(ROOT)) as temp_dir:
         temp_root = Path(temp_dir)
@@ -109,10 +119,30 @@ def assert_copy_mode_sets_warning_when_incompatible() -> None:
     assert note and note.startswith("Provided video is not fully compatible"), "Expected preview compatibility warning."
 
 
+def assert_preview_only_copy_uses_single_copy_output() -> None:
+    with tempfile.TemporaryDirectory(prefix="castarro-preview-test-", dir=str(ROOT)) as temp_dir:
+        temp_root = Path(temp_dir)
+        write_fixture_files(temp_root)
+        previous_cwd = Path.cwd()
+        try:
+            import os
+
+            os.chdir(temp_root)
+            config = make_config()
+            command, _note = build_preview_only(config, "copy")
+        finally:
+            os.chdir(previous_cwd)
+
+    copy_tokens = sum(1 for i in range(len(command) - 1) if command[i] == "-c" and command[i + 1] == "copy")
+    assert copy_tokens == 1, "Preview-only sidecar should only emit one copy output."
+    assert "-f" in command and "hls" in command, "Preview-only sidecar should target HLS output."
+
+
 def main() -> int:
     assert_transcode_preview_uses_transcode_args()
     assert_copy_preview_still_uses_copy()
     assert_copy_mode_sets_warning_when_incompatible()
+    assert_preview_only_copy_uses_single_copy_output()
     print("preview_command_test: PASS")
     return 0
 

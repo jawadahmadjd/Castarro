@@ -8,6 +8,7 @@ import com.castarro.mobile.data.preferences.castarroDataStore
 import com.castarro.mobile.data.secrets.EncryptedSecretStore
 import com.castarro.mobile.data.secrets.SecretStore
 import com.castarro.mobile.data.stream.StreamProfileRepository
+import com.castarro.mobile.data.sync.DesktopSyncRepository
 import com.castarro.mobile.data.youtube.YoutubeAuthorizationGateway
 import com.castarro.mobile.data.youtube.YoutubeLiveRepository
 import com.castarro.mobile.platform.AppUsageMonitor
@@ -25,6 +26,7 @@ class CastarroAppContainer(context: Context) {
     val secrets: SecretStore = EncryptedSecretStore(context.applicationContext)
     val videoImporter = VideoImportRepository(context.applicationContext)
     val streamProfiles = StreamProfileRepository(database.streamProfileDao(), secrets)
+    val desktopSync = DesktopSyncRepository(context.applicationContext, database, secrets)
     val youtube = YoutubeLiveRepository(context.applicationContext.castarroDataStore, secrets)
     val youtubeAuth = YoutubeAuthorizationGateway(context.applicationContext)
     val streamProtection = StreamProtectionMonitor(context.applicationContext)

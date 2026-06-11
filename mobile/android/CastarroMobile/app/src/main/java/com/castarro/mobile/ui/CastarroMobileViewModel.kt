@@ -16,6 +16,11 @@ import com.castarro.mobile.data.db.StreamSessionEntity
 import com.castarro.mobile.data.db.VideoAssetEntity
 import com.castarro.mobile.data.preferences.AppPreferences
 import com.castarro.mobile.data.preferences.castarroDataStore
+import com.castarro.mobile.data.sync.DesktopPairingRequest
+import com.castarro.mobile.data.sync.DesktopVideoDownloadCoordinator
+import com.castarro.mobile.data.sync.DesktopVideoDownloadForegroundService
+import com.castarro.mobile.data.sync.DesktopVideoDownloadPhase
+import com.castarro.mobile.data.sync.DesktopVideoDownloadTask
 import com.castarro.mobile.data.youtube.CreateBroadcastRequest
 import com.castarro.mobile.data.youtube.YoutubeAccount
 import com.castarro.mobile.domain.model.CompatibilityStatus
@@ -69,6 +74,15 @@ data class MobileUiState(
     val isStartingStream: Boolean = false,
     val streamProtection: StreamProtectionReport = StreamProtectionReport.Empty,
     val appUsage: AppUsageSnapshot = AppUsageSnapshot(),
+    val syncPairingUri: String = "",
+    val syncIncludeVideos: Boolean = true,
+    val isSyncingDesktop: Boolean = false,
+    val syncMessage: String? = null,
+    val desktopSyncLastCompletedAt: String? = null,
+    val desktopSyncLastSummary: String? = null,
+    val selectedDesktopDownloadIds: List<String> = emptyList(),
+    val desktopDownloadSelectionEdited: Boolean = false,
+    val desktopVideoDownloadTask: DesktopVideoDownloadTask = DesktopVideoDownloadTask(),
     val errorMessage: String? = null,
 ) {
     val selectedVideos: List<VideoAsset> =
@@ -111,6 +125,7 @@ class CastarroMobileViewModel(application: Application) : AndroidViewModel(appli
     private var youtubeJob: Job? = null
     private var channelSettingsJob: Job? = null
     private var usageJob: Job? = null
+    private var syncStatusJob: Job? = null
     private var pendingYoutubeAction: PendingYoutubeAction? = null
     private var lastSelectedChannelId: String? = null
 
@@ -121,6 +136,8 @@ class CastarroMobileViewModel(application: Application) : AndroidViewModel(appli
             observeChannels()
         }
         observeAppUsage()
+        observeDesktopSyncStatus()
+        observeDesktopVideoDownloads()
         refreshStreamProtection()
     }
 
@@ -426,6 +443,115 @@ class CastarroMobileViewModel(application: Application) : AndroidViewModel(appli
         }
     }
 
+    fun syncFromScannedPairingUri(value: String) {
+        val pairingUri = value.trim()
+        if (pairingUri.isBlank()) return showError("Scan the desktop QR code first.")
+        mutableUiState.update { it.copy(syncPairingUri = pairingUri, errorMessage = null) }
+        runDesktopPairingSync(pairingUri)
+    }
+
+    fun toggleDesktopVideoDownload(videoId: String, selected: Boolean) {
+        mutableUiState.update { state ->
+            val next = state.selectedDesktopDownloadIds.toMutableSet()
+            if (selected) {
+                next += videoId
+            } else {
+                next -= videoId
+            }
+            state.copy(
+                selectedDesktopDownloadIds = next.toList(),
+                desktopDownloadSelectionEdited = true,
+                errorMessage = null,
+            )
+        }
+    }
+
+    fun startSelectedDesktopVideoDownloads() {
+        val state = mutableUiState.value
+        val selectedIds = state.selectedDesktopDownloadIds.distinct()
+        if (selectedIds.isEmpty()) return showError("Select at least one synced desktop video first.")
+        val channelName = state.channel?.displayName ?: "Desktop sync"
+        app.startForegroundService(
+            Intent(app, DesktopVideoDownloadForegroundService::class.java).apply {
+                action = DesktopVideoDownloadForegroundService.ACTION_START
+                putStringArrayListExtra(
+                    DesktopVideoDownloadForegroundService.EXTRA_VIDEO_IDS,
+                    ArrayList(selectedIds),
+                )
+                putExtra(DesktopVideoDownloadForegroundService.EXTRA_CHANNEL_NAME, channelName)
+            },
+        )
+    }
+
+    fun pauseDesktopVideoDownloads() {
+        app.startService(
+            Intent(app, DesktopVideoDownloadForegroundService::class.java).apply {
+                action = DesktopVideoDownloadForegroundService.ACTION_PAUSE
+            },
+        )
+    }
+
+    fun resumeDesktopVideoDownloads() {
+        app.startService(
+            Intent(app, DesktopVideoDownloadForegroundService::class.java).apply {
+                action = DesktopVideoDownloadForegroundService.ACTION_RESUME
+            },
+        )
+    }
+
+    fun cancelDesktopVideoDownloads() {
+        app.startService(
+            Intent(app, DesktopVideoDownloadForegroundService::class.java).apply {
+                action = DesktopVideoDownloadForegroundService.ACTION_CANCEL
+            },
+        )
+    }
+
+    private fun runDesktopPairingSync(pairingUriOverride: String? = null) {
+        val state = mutableUiState.value
+        val pairingUri = (pairingUriOverride ?: state.syncPairingUri ?: "").trim()
+        if (pairingUri.isBlank()) return showError("Scan the desktop QR code first.")
+        viewModelScope.launch {
+            mutableUiState.update { it.copy(isSyncingDesktop = true, syncMessage = null, errorMessage = null) }
+            runCatching {
+                container.desktopSync.pairAndSync(
+                    DesktopPairingRequest(
+                        pairingUri = pairingUri,
+                        includeVideos = true,
+                    ),
+                )
+            }.onSuccess { result ->
+                val summary = buildString {
+                    append("Synced ${result.channelCount} channels and ${result.videoCount} videos.")
+                    if (result.downloadableVideos.isNotEmpty()) {
+                        append(" ${result.downloadableVideos.size} video files are ready to download.")
+                    } else if (result.downloadedVideoCount > 0) {
+                        append(" Downloaded ${result.downloadedVideoCount} video files.")
+                    }
+                }
+                val completedAt = Instant.now().toString()
+                app.castarroDataStore.edit { preferences ->
+                    preferences[AppPreferences.DesktopSyncLastCompletedAt] = completedAt
+                    preferences[AppPreferences.DesktopSyncLastSummary] = summary
+                }
+                mutableUiState.update {
+                    it.copy(
+                        isSyncingDesktop = false,
+                        syncMessage = summary,
+                        desktopSyncLastCompletedAt = completedAt,
+                        desktopSyncLastSummary = summary,
+                        selectedDesktopDownloadIds = emptyList(),
+                        desktopDownloadSelectionEdited = false,
+                        syncIncludeVideos = true,
+                    )
+                }
+            }.onFailure { error ->
+                showError(error.message ?: "Desktop sync failed.")
+                mutableUiState.update { it.copy(isSyncingDesktop = false, syncIncludeVideos = true) }
+            }
+        }
+    }
+
     fun selectChannel(channelId: String) {
         val channel = mutableUiState.value.channels.firstOrNull { it.id == channelId }
             ?: return showError("That channel is not available.")
@@ -554,6 +680,9 @@ class CastarroMobileViewModel(application: Application) : AndroidViewModel(appli
                 val videos = entities.map { it.toDomain() }
                 mutableUiState.update { state ->
                     val videoIds = videos.map { it.id }
+                    val downloadableIds = videos
+                        .filter { it.localPath.isNullOrBlank() && it.sourceUri.startsWith("http") }
+                        .map { it.id }
                     val edited = preferences[AppPreferences.videoSelectionEdited(channelId)] ?: false
                     val savedSelection = preferences[AppPreferences.videoSelectionIds(channelId)]
                         ?.decodeStringList()
@@ -564,10 +693,16 @@ class CastarroMobileViewModel(application: Application) : AndroidViewModel(appli
                     } else {
                         videoIds
                     }
+                    val selectedDesktopDownloads = if (state.desktopDownloadSelectionEdited) {
+                        state.selectedDesktopDownloadIds.filter { it in downloadableIds }
+                    } else {
+                        downloadableIds
+                    }
                     state.copy(
                         videos = videos,
                         selectedVideoIds = selected.distinct(),
                         videoSelectionEdited = edited,
+                        selectedDesktopDownloadIds = selectedDesktopDownloads.distinct(),
                     )
                 }
             }
@@ -793,6 +928,35 @@ class CastarroMobileViewModel(application: Application) : AndroidViewModel(appli
         usageJob = viewModelScope.launch {
             container.appUsage.snapshots().collect { usage ->
                 mutableUiState.update { it.copy(appUsage = usage) }
+            }
+        }
+    }
+
+    private fun observeDesktopSyncStatus() {
+        syncStatusJob?.cancel()
+        syncStatusJob = viewModelScope.launch {
+            app.castarroDataStore.data.collect { preferences ->
+                mutableUiState.update {
+                    it.copy(
+                        desktopSyncLastCompletedAt = preferences[AppPreferences.DesktopSyncLastCompletedAt],
+                        desktopSyncLastSummary = preferences[AppPreferences.DesktopSyncLastSummary],
+                    )
+                }
+            }
+        }
+    }
+
+    private fun observeDesktopVideoDownloads() {
+        viewModelScope.launch {
+            DesktopVideoDownloadCoordinator.state.collect { task ->
+                mutableUiState.update { state ->
+                    val resetSelection = task.phase == DesktopVideoDownloadPhase.Completed
+                    state.copy(
+                        desktopVideoDownloadTask = task,
+                        selectedDesktopDownloadIds = if (resetSelection) emptyList() else state.selectedDesktopDownloadIds,
+                        desktopDownloadSelectionEdited = if (resetSelection) false else state.desktopDownloadSelectionEdited,
+                    )
+                }
             }
         }
     }

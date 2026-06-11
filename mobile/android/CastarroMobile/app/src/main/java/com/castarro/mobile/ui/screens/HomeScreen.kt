@@ -14,8 +14,11 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
@@ -25,6 +28,7 @@ import androidx.compose.ui.unit.sp
 import com.castarro.mobile.domain.model.CompatibilityStatus
 import com.castarro.mobile.domain.model.StreamProfile
 import com.castarro.mobile.domain.model.VideoAsset
+import com.castarro.mobile.data.sync.DesktopVideoDownloadPhase
 import com.castarro.mobile.platform.AppUsageSnapshot
 import com.castarro.mobile.platform.StreamProtectionAction
 import com.castarro.mobile.ui.MobileUiState
@@ -41,6 +45,12 @@ fun HomeScreen(
     onStartStream: () -> Unit,
     onStopStream: () -> Unit,
     onStreamProtectionAction: (StreamProtectionAction) -> Unit,
+    onScanSyncPairing: () -> Unit,
+    onToggleDesktopVideoDownload: (String, Boolean) -> Unit,
+    onStartDesktopVideoDownloads: () -> Unit,
+    onPauseDesktopVideoDownloads: () -> Unit,
+    onResumeDesktopVideoDownloads: () -> Unit,
+    onCancelDesktopVideoDownloads: () -> Unit,
     onChannelHeaderClick: () -> Unit,
     onClearError: () -> Unit,
     modifier: Modifier = Modifier,
@@ -51,6 +61,9 @@ fun HomeScreen(
     val streamStatus = state.activeSession?.status?.name ?: "Idle"
     val showStreamProtection = state.streamProtection.warnings.isNotEmpty()
     val readinessIssues = readinessIssues(selectedVideos, profile)
+    val syncSummary = state.syncMessage ?: state.desktopSyncLastSummary
+    val downloadableVideos = state.videos.filter { it.localPath.isNullOrBlank() && it.sourceUri.startsWith("http") }
+    val downloadTask = state.desktopVideoDownloadTask
 
     Column(
         modifier = modifier
@@ -89,6 +102,100 @@ fun HomeScreen(
                 youtube = if (profile == null) "Missing" else "Manual",
                 stream = streamStatus,
             )
+
+            SurfaceCard {
+                Text("Desktop sync", fontWeight = FontWeight.Bold)
+                Text("Bring channels, YouTube settings, and selected videos from desktop.", color = Colors.Muted)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Button(
+                        onClick = onScanSyncPairing,
+                        enabled = !state.isSyncingDesktop,
+                        colors = ButtonDefaults.buttonColors(containerColor = Colors.Green),
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        if (state.isSyncingDesktop) {
+                            CircularProgressIndicator(modifier = Modifier.padding(end = 8.dp))
+                        }
+                        Text(if (state.isSyncingDesktop) "Syncing" else "Scan desktop QR")
+                    }
+                }
+                syncSummary?.let { summary ->
+                    Text(summary, color = if (state.syncMessage != null) Colors.Green else Colors.Muted)
+                }
+                if (downloadableVideos.isNotEmpty()) {
+                    Text("Desktop videos available", fontWeight = FontWeight.Bold)
+                    downloadableVideos.forEach { video ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(
+                                modifier = Modifier.weight(1f),
+                                verticalArrangement = Arrangement.spacedBy(2.dp),
+                            ) {
+                                Text(video.displayName, fontWeight = FontWeight.Bold)
+                                Text(formatBytes(video.sizeBytes), color = Colors.Muted)
+                            }
+                            Checkbox(
+                                checked = video.id in state.selectedDesktopDownloadIds,
+                                onCheckedChange = { checked ->
+                                    onToggleDesktopVideoDownload(video.id, checked)
+                                },
+                                enabled = !downloadTask.isActive,
+                            )
+                        }
+                    }
+                    if (!downloadTask.isActive) {
+                        Button(
+                            onClick = onStartDesktopVideoDownloads,
+                            enabled = state.selectedDesktopDownloadIds.isNotEmpty(),
+                            colors = ButtonDefaults.buttonColors(containerColor = Colors.Green),
+                        ) {
+                            Text("Download selected videos")
+                        }
+                    }
+                }
+                if (downloadTask.phase != DesktopVideoDownloadPhase.Idle) {
+                    Text(
+                        downloadTask.message ?: "Desktop video download",
+                        color = when (downloadTask.phase) {
+                            DesktopVideoDownloadPhase.Failed -> Colors.Danger
+                            DesktopVideoDownloadPhase.Cancelled -> Colors.Warning
+                            DesktopVideoDownloadPhase.Completed -> Colors.Green
+                            else -> Colors.Muted
+                        },
+                    )
+                    if (downloadTask.isActive) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Button(
+                                onClick = if (downloadTask.phase == DesktopVideoDownloadPhase.Paused) {
+                                    onResumeDesktopVideoDownloads
+                                } else {
+                                    onPauseDesktopVideoDownloads
+                                },
+                                modifier = Modifier.weight(1f),
+                            ) {
+                                Text(if (downloadTask.phase == DesktopVideoDownloadPhase.Paused) "Resume" else "Pause")
+                            }
+                            Button(
+                                onClick = onCancelDesktopVideoDownloads,
+                                colors = ButtonDefaults.buttonColors(containerColor = Colors.Danger),
+                                modifier = Modifier.weight(1f),
+                            ) {
+                                Text("Cancel")
+                            }
+                        }
+                    }
+                }
+            }
 
             AppUsagePanel(state.appUsage)
 

@@ -74,10 +74,16 @@ def validate_object(schema_path: Path, fixture_path: Path) -> None:
         if key in fixture:
             validate_value(key, fixture[key], rule)
 
-    if fixture_path.name.startswith("ready-") and not fixture.get("isReady"):
-        raise ContractError(f"{fixture_path}: ready fixtures must set isReady true")
-    if fixture_path.name.startswith("blocked-") and fixture.get("isReady"):
-        raise ContractError(f"{fixture_path}: blocked fixtures must set isReady false")
+    if "isReady" in fixture:
+        if fixture_path.name.startswith("ready-") and not fixture.get("isReady"):
+            raise ContractError(f"{fixture_path}: ready fixtures must set isReady true")
+        if fixture_path.name.startswith("blocked-") and fixture.get("isReady"):
+            raise ContractError(f"{fixture_path}: blocked fixtures must set isReady false")
+    if "compatibilityStatus" in fixture:
+        if fixture_path.name.startswith("ready-") and fixture.get("compatibilityStatus") != "ready":
+            raise ContractError(f"{fixture_path}: ready fixtures must use compatibilityStatus ready")
+        if fixture_path.name.startswith("blocked-") and fixture.get("compatibilityStatus") == "ready":
+            raise ContractError(f"{fixture_path}: blocked fixtures cannot use compatibilityStatus ready")
     if fixture.get("isReady") and fixture.get("blockingIssues"):
         raise ContractError(f"{fixture_path}: ready reports cannot include blocking issues")
 

@@ -24,8 +24,11 @@ from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
 import app_db
+import google_drive_provider
 import runtime_paths
+import storage_providers
 import stream_manager
+import sync_service
 import youtube_service
 
 
@@ -254,7 +257,6 @@ class StreamState:
     def as_dict(self) -> dict[str, Any]:
         process = self.running.process
         channel_name = str(self.running.channel.get("name") or "")
-        preview_manifest = self.running.preview_manifest
         log_tail = tail_file(self.log_path)
         transferred_bytes = parse_ffmpeg_size_bytes(log_tail)
         return {
@@ -266,8 +268,29 @@ class StreamState:
             "log_path": str(self.log_path),
             "log_tail": log_tail,
             "transferred_bytes": transferred_bytes,
-            "preview_url": f"/preview/{quote(channel_name, safe='')}/index.m3u8" if preview_manifest else None,
-            "preview_ready": bool(preview_manifest and preview_manifest.exists()),
+            "preview_url": None,
+            "preview_ready": False,
+            "preview_warning": None,
+        }
+
+
+class PreviewState:
+    def __init__(self, config_name: str, channel_name: str, running: stream_manager.RunningStream) -> None:
+        self.config_name = config_name
+        self.channel_name = channel_name
+        self.running = running
+        self.started_at = time.time()
+
+    def as_dict(self) -> dict[str, Any]:
+        manifest = self.running.preview_manifest
+        process = self.running.process
+        return {
+            "channel": self.channel_name,
+            "pid": process.pid,
+            "running": process.poll() is None,
+            "started_at": self.started_at,
+            "preview_url": f"/preview/{quote(self.channel_name, safe='')}/index.m3u8" if manifest else None,
+            "preview_ready": bool(manifest and manifest.exists()),
             "preview_warning": self.running.preview_warning,
         }
 
@@ -276,11 +299,15 @@ class AppState:
     def __init__(self) -> None:
         self.lock = threading.Lock()
         self.streams: dict[str, StreamState] = {}
+        self.preview: PreviewState | None = None
         self.tasks: deque[Task] = deque(maxlen=20)
         self.youtube_oauth_states: dict[str, dict[str, Any]] = {}
+        self.sync_pairings: dict[str, dict[str, Any]] = {}
+        self.sync_tokens: dict[str, dict[str, Any]] = {}
 
 
 STATE = AppState()
+SYNC_PORT = 0
 
 
 def desktop_oauth_redirect_uri(configured_redirect_uri: Any = "") -> str:
@@ -488,6 +515,7 @@ def load_config_or_none(config_name: str) -> tuple[dict[str, Any] | None, str | 
             config = runtime_paths.apply_runtime_defaults(json.load(fh))
             runtime_paths.apply_youtube_owner_seed(config)
             normalize_ui_settings(config)
+            storage_providers.normalize_storage_config(config)
             normalize_youtube_accounts(config)
             return config, None
     except Exception as exc:
@@ -497,6 +525,7 @@ def load_config_or_none(config_name: str) -> tuple[dict[str, Any] | None, str | 
 def save_config(config_name: str, config: dict[str, Any]) -> None:
     runtime_paths.apply_youtube_owner_seed(config)
     normalize_ui_settings(config)
+    storage_providers.normalize_storage_config(config)
     normalize_youtube_accounts(config)
     for channel in config.get("channels", []):
         if not isinstance(channel, dict):
@@ -507,6 +536,7 @@ def save_config(config_name: str, config: dict[str, Any]) -> None:
     target = ROOT / config_name
     target.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
     ensure_media_folders(config)
+    storage_providers.ensure_storage_dirs(config, ROOT)
     app_db.sync_config(config_name, config, "save")
 
 
@@ -975,6 +1005,41 @@ def youtube_status(config_name: str) -> dict[str, Any]:
         "expires_at": active.get("expires_at") if active else None,
         "message": message,
     }
+
+
+def storage_status(config_name: str) -> dict[str, Any]:
+    config, error = load_config_or_none(config_name)
+    if not config:
+        raise ValueError(error or "Config not found.")
+    return storage_providers.storage_status(ROOT, config)
+
+
+def storage_files(config_name: str, provider_id: str, folder_id: str | None = None) -> dict[str, Any]:
+    config, error = load_config_or_none(config_name)
+    if not config:
+        raise ValueError(error or "Config not found.")
+    provider = storage_providers.find_provider(config, provider_id)
+    if not provider:
+        raise ValueError(f"Unknown storage provider: {provider_id}")
+    provider_type = str(provider.get("type") or "")
+    if provider_type == "googleDrive":
+        return google_drive_provider.GoogleDriveProvider(ROOT, provider).list_files(folder_id)
+    return {
+        "ok": False,
+        "provider_id": provider.get("id"),
+        "files": [],
+        "message": f"{provider_type or 'Storage'} browsing is not wired yet.",
+    }
+
+
+def disconnect_storage_provider(config_name: str, provider_id: str) -> dict[str, Any]:
+    config, error = load_config_or_none(config_name)
+    if not config:
+        raise ValueError(error or "Config not found.")
+    provider = storage_providers.disconnect_provider(ROOT, config, provider_id)
+    save_config(config_name, config)
+    app_db.record_event("storage_provider_disconnected", config_name, None, {"provider_id": provider_id})
+    return {"ok": True, "provider": provider}
 
 
 def cleanup_expired_oauth_states() -> None:
@@ -2159,12 +2224,10 @@ def start_stream(config_name: str, channel_name: str | None) -> list[str]:
             existing = STATE.streams.get(name)
             if existing and existing.running.process.poll() is None:
                 continue
-            preview_manifest = stream_manager.preview_manifest_path(config_dir, config, channel)
             running = stream_manager.start_stream(
                 config_dir,
                 config,
                 channel,
-                preview_manifest=preview_manifest,
             )
             STATE.streams[name] = StreamState(config_name, running)
             app_db.record_stream_start(
@@ -2180,6 +2243,74 @@ def start_stream(config_name: str, channel_name: str | None) -> list[str]:
     return started
 
 
+def stop_preview(channel_name: str | None = None) -> str | None:
+    with STATE.lock:
+        preview = STATE.preview
+        if not preview:
+            return None
+        if channel_name and preview.channel_name != channel_name:
+            return None
+        stream_manager.stop_stream(preview.running)
+        if preview.running.preview_manifest:
+            stream_manager.clear_directory(preview.running.preview_manifest.parent)
+        app_db.record_event(
+            "preview_stopped",
+            preview.config_name,
+            preview.channel_name,
+            {"returncode": preview.running.process.returncode},
+        )
+        stopped_channel = preview.channel_name
+        STATE.preview = None
+        return stopped_channel
+
+
+def start_preview(config_name: str, channel_name: str | None) -> dict[str, Any]:
+    if not channel_name:
+        raise ValueError("Channel is required to start preview.")
+
+    config, config_dir = stream_manager.load_config((ROOT / config_name).resolve())
+    channels = {
+        str(channel.get("name") or ""): channel
+        for channel in config.get("channels", [])
+        if isinstance(channel, dict)
+    }
+    channel = channels.get(str(channel_name))
+    if not channel:
+        raise ValueError(f"Unknown channel: {channel_name}")
+
+    with STATE.lock:
+        stream_state = STATE.streams.get(channel_name)
+        if not stream_state or stream_state.running.process.poll() is not None:
+            raise ValueError(f"Channel '{channel_name}' is not currently live.")
+
+        preview = STATE.preview
+        if (
+            preview
+            and preview.channel_name == channel_name
+            and preview.config_name == config_name
+            and preview.running.process.poll() is None
+        ):
+            return preview.as_dict()
+
+        if preview:
+            stream_manager.stop_stream(preview.running)
+            if preview.running.preview_manifest:
+                stream_manager.clear_directory(preview.running.preview_manifest.parent)
+            app_db.record_event(
+                "preview_stopped",
+                preview.config_name,
+                preview.channel_name,
+                {"returncode": preview.running.process.returncode},
+            )
+            STATE.preview = None
+
+        preview_manifest = stream_manager.preview_manifest_path(config_dir, config, channel)
+        running = stream_manager.start_preview_stream(config_dir, config, channel, preview_manifest)
+        STATE.preview = PreviewState(config_name, channel_name, running)
+        app_db.record_event("preview_started", config_name, channel_name, {"pid": running.process.pid})
+        return STATE.preview.as_dict()
+
+
 def stop_stream(channel_name: str | None) -> list[str]:
     stopped: list[str] = []
     with STATE.lock:
@@ -2190,6 +2321,18 @@ def stop_stream(channel_name: str | None) -> list[str]:
             state = STATE.streams.get(name)
             if not state:
                 continue
+            if STATE.preview and STATE.preview.channel_name == name:
+                preview = STATE.preview
+                stream_manager.stop_stream(preview.running)
+                if preview.running.preview_manifest:
+                    stream_manager.clear_directory(preview.running.preview_manifest.parent)
+                app_db.record_event(
+                    "preview_stopped",
+                    preview.config_name,
+                    preview.channel_name,
+                    {"returncode": preview.running.process.returncode},
+                )
+                STATE.preview = None
             stream_manager.stop_stream(state.running)
             if state.running.preview_manifest:
                 stream_manager.clear_directory(state.running.preview_manifest.parent)
@@ -2225,6 +2368,13 @@ def status_payload(config_name: str) -> dict[str, Any]:
     with STATE.lock:
         streams = {name: state.as_dict() for name, state in STATE.streams.items()}
         tasks = [task.as_dict() for task in list(STATE.tasks)]
+        preview = STATE.preview.as_dict() if STATE.preview else None
+    if preview:
+        preview_channel = str(preview.get("channel") or "")
+        if preview_channel in streams:
+            streams[preview_channel]["preview_url"] = preview.get("preview_url")
+            streams[preview_channel]["preview_ready"] = bool(preview.get("preview_ready"))
+            streams[preview_channel]["preview_warning"] = preview.get("preview_warning")
     active_stream_names = {
         name
         for name, stream in streams.items()
@@ -2251,6 +2401,7 @@ def status_payload(config_name: str) -> dict[str, Any]:
                 "name": ch.get("name", "<unnamed>"),
                 "enabled": ch.get("enabled", True),
                 "playlist_count": len(ch.get("playlist", [])) if isinstance(ch.get("playlist"), list) else 1,
+                "cloud_playlist_count": len(ch.get("cloud_playlist", [])) if isinstance(ch.get("cloud_playlist"), list) else 0,
                 "normalized_count": normalized_video_count(config, str(ch.get("name", ""))),
                 "raw_playlist_count": len(ch.get("raw_playlist", [])) if isinstance(ch.get("raw_playlist"), list) else 0,
                 "stream_key_env": ch.get("stream_key_env"),
@@ -2264,9 +2415,11 @@ def status_payload(config_name: str) -> dict[str, Any]:
             }
             for ch in channels
         ],
+        "storage": storage_providers.storage_status(ROOT, config) if config else {"ok": False, "providers": []},
         "database": app_db.stats(),
         "binaries": runtime_paths.runtime_binary_status(),
         "streams": streams,
+        "preview": preview or {"channel": "", "running": False, "preview_url": None, "preview_ready": False, "preview_warning": None},
         "stream_history": stream_history,
         "usage": {
             "stream_transfer_today_bytes": app_db.stream_transfer_today_bytes(config_name) + active_transfer_bytes,
@@ -2302,10 +2455,10 @@ def preview_file_for_request(channel_name: str, leaf: str) -> Path | None:
     if Path(leaf).name != leaf:
         return None
     with STATE.lock:
-        stream_state = STATE.streams.get(channel_name)
-        if not stream_state:
+        preview = STATE.preview
+        if not preview or preview.channel_name != channel_name:
             return None
-        manifest = stream_state.running.preview_manifest
+        manifest = preview.running.preview_manifest
     if not manifest:
         return None
 
@@ -2314,6 +2467,236 @@ def preview_file_for_request(channel_name: str, leaf: str) -> Path | None:
     if not str(target).startswith(str(root)):
         return None
     return target
+
+
+def sync_public_status() -> dict[str, Any]:
+    return {
+        **sync_service.account_status(),
+        "syncServer": {
+            "host": sync_service.local_lan_ip(),
+            "port": SYNC_PORT,
+            "running": bool(SYNC_PORT),
+        },
+    }
+
+
+def create_sync_account(body: dict[str, Any]) -> dict[str, Any]:
+    account = sync_service.create_account(body.get("username"), body.get("password"), body.get("displayName"))
+    app_db.record_event("sync_account_created", details={"username": account["username"]})
+    return {"ok": True, "account": account, **sync_public_status()}
+
+
+def login_sync_account(body: dict[str, Any]) -> dict[str, Any]:
+    account = sync_service.verify_account(body.get("username"), body.get("password"))
+    return {"ok": True, "account": account, **sync_public_status()}
+
+
+def start_sync_pairing(config_name: str, body: dict[str, Any]) -> dict[str, Any]:
+    if not SYNC_PORT:
+        raise ValueError("Sync server is not running.")
+    account = sync_service.ensure_local_account()
+    config, error = load_config_or_none(config_name)
+    if not config:
+        raise ValueError(error or "Config not found.")
+    pairing = sync_service.new_pairing(
+        account["username"],
+        config_name,
+        SYNC_PORT,
+        include_videos=bool(body.get("includeVideos", False)),
+    )
+    with STATE.lock:
+        STATE.sync_pairings[pairing["token"]] = pairing
+    app_db.record_event(
+        "sync_pairing_started",
+        config_name,
+        details={
+            "username": account["username"],
+            "expires_at": pairing["expiresAt"],
+            "include_videos": pairing["includeVideos"],
+        },
+    )
+    return {"ok": True, "account": account, "pairing": pairing["payload"]}
+
+
+def sync_pairing_for_token(token: str) -> dict[str, Any]:
+    with STATE.lock:
+        pairing = STATE.sync_pairings.get(token)
+    if not pairing or sync_service.is_expired(pairing):
+        raise ValueError("Pairing code expired. Start pairing again on desktop.")
+    return pairing
+
+
+def issue_sync_token(
+    pairing: dict[str, Any],
+    account: dict[str, Any],
+    *,
+    include_videos: bool,
+    device: dict[str, Any],
+) -> str:
+    sync_token = secrets.token_urlsafe(32)
+    with STATE.lock:
+        STATE.sync_tokens[sync_token] = {
+            "username": account["username"],
+            "accountId": account["id"],
+            "configName": pairing["configName"],
+            "includeVideos": bool(include_videos),
+            "expiresAt": time.time() + 60 * 60 * 6,
+            "device": device,
+        }
+    return sync_token
+
+
+def sync_token_record(token: str) -> dict[str, Any]:
+    with STATE.lock:
+        record = STATE.sync_tokens.get(token)
+    if not record or time.time() >= float(record.get("expiresAt") or 0):
+        raise ValueError("Sync session expired. Scan the QR code again.")
+    return record
+
+
+def sync_base_url(handler: BaseHTTPRequestHandler) -> str:
+    host = str(handler.headers.get("Host") or "").strip()
+    if not host:
+        host = f"{sync_service.local_lan_ip()}:{SYNC_PORT}"
+    return f"http://{host}"
+
+
+def sync_bundle_for_record(record: dict[str, Any], token: str, base_url: str) -> dict[str, Any]:
+    config_name = safe_config_name(record.get("configName"))
+    config, error = load_config_or_none(config_name)
+    if not config:
+        raise ValueError(error or "Config not found.")
+    account = {
+        "id": record["accountId"],
+        "username": record["username"],
+        "displayName": record["username"],
+        "createdAt": sync_service.now_iso(),
+        "updatedAt": sync_service.now_iso(),
+    }
+    video_base_url = f"{base_url}/sync/video?syncToken={quote(token, safe='')}"
+    return sync_service.build_sync_bundle(
+        config_name,
+        config,
+        account,
+        include_videos=bool(record.get("includeVideos")),
+        video_base_url=video_base_url,
+    )
+
+
+def handle_sync_pair_info(token: str) -> dict[str, Any]:
+    pairing = sync_pairing_for_token(token)
+    return {
+        "ok": True,
+        "username": pairing["username"],
+        "configName": pairing["configName"],
+        "includeVideos": bool(pairing.get("includeVideos")),
+        "expiresAt": pairing["expiresAt"],
+    }
+
+
+def handle_sync_pair_login(handler: BaseHTTPRequestHandler, token: str, body: dict[str, Any]) -> dict[str, Any]:
+    pairing = sync_pairing_for_token(token)
+    code = str(body.get("code") or "").strip()
+    if code and not secrets.compare_digest(code, str(pairing.get("code") or "")):
+        raise ValueError("Pairing code is not correct.")
+    account = sync_service.account_by_username(pairing["username"])
+    device = body.get("device") if isinstance(body.get("device"), dict) else {}
+    device_id = str(device.get("id") or f"device-{secrets.token_hex(8)}")
+    device_name = str(device.get("name") or "Android phone").strip() or "Android phone"
+    platform = str(device.get("platform") or "android").strip().lower()
+    stored_device = sync_service.remember_device(account["id"], device_id, device_name, platform)
+    include_videos = bool(pairing.get("includeVideos", False)) and bool(body.get("includeVideos", False))
+    sync_token = issue_sync_token(pairing, account, include_videos=include_videos, device=stored_device)
+    record = sync_token_record(sync_token)
+    bundle = sync_bundle_for_record(record, sync_token, sync_base_url(handler))
+    app_db.record_event(
+        "sync_pairing_completed",
+        pairing["configName"],
+        details={"username": account["username"], "device": device_name, "include_videos": include_videos},
+    )
+    return {
+        "ok": True,
+        "account": account,
+        "device": stored_device,
+        "syncToken": sync_token,
+        "includeVideos": include_videos,
+        "bundle": bundle,
+    }
+
+
+def handle_sync_pull(handler: BaseHTTPRequestHandler, token: str) -> dict[str, Any]:
+    record = sync_token_record(token)
+    return {"ok": True, "bundle": sync_bundle_for_record(record, token, sync_base_url(handler))}
+
+
+def sync_video_path(record: dict[str, Any], requested_path: str) -> Path:
+    config_name = safe_config_name(record.get("configName"))
+    config, error = load_config_or_none(config_name)
+    if not config:
+        raise ValueError(error or "Config not found.")
+    allowed = {
+        path_text
+        for channel in config.get("channels", [])
+        if isinstance(channel, dict)
+        for _kind, path_text in sync_service._playlist_items(channel)
+    }
+    if requested_path not in allowed:
+        raise ValueError("That video is not part of the synced channel playlist.")
+    path = app_db.resolve_project_path(requested_path).resolve()
+    root = ROOT.resolve()
+    if not str(path).startswith(str(root)) or not path.is_file():
+        raise ValueError("Video file is not available for sync.")
+    return path
+
+
+class SyncHandler(BaseHTTPRequestHandler):
+    def log_message(self, fmt: str, *args: Any) -> None:
+        print(f"[sync] {self.address_string()} - {fmt % args}")
+
+    def do_GET(self) -> None:
+        parsed = urlparse(self.path)
+        try:
+            if parsed.path.startswith("/sync/pair/"):
+                json_response(self, handle_sync_pair_info(parsed.path.rsplit("/", 1)[-1]))
+                return
+            if parsed.path == "/sync/pull":
+                query = parse_qs(parsed.query)
+                token = str(query.get("syncToken", [""])[0] or "")
+                json_response(self, handle_sync_pull(self, token))
+                return
+            if parsed.path == "/sync/video":
+                query = parse_qs(parsed.query)
+                token = str(query.get("syncToken", [""])[0] or "")
+                requested_path = str(query.get("path", [""])[0] or "")
+                record = sync_token_record(token)
+                if not bool(record.get("includeVideos")):
+                    raise ValueError("This sync session was created without video file transfer.")
+                file_path = sync_video_path(record, requested_path)
+                write_response(
+                    self,
+                    200,
+                    file_path.read_bytes(),
+                    content_type(file_path),
+                    {"Content-Disposition": f"attachment; filename=\"{file_path.name}\""},
+                )
+                return
+            json_response(self, {"error": "Not found"}, 404)
+        except Exception as exc:
+            status_code = 400 if isinstance(exc, ValueError) else 500
+            json_response(self, {"error": str(exc)}, status_code)
+
+    def do_POST(self) -> None:
+        parsed = urlparse(self.path)
+        try:
+            body = read_body(self)
+            if parsed.path.startswith("/sync/pair/"):
+                token = parsed.path.rsplit("/", 1)[-1]
+                json_response(self, handle_sync_pair_login(self, token, body if isinstance(body, dict) else {}))
+                return
+            json_response(self, {"error": "Not found"}, 404)
+        except Exception as exc:
+            status_code = 400 if isinstance(exc, ValueError) else 500
+            json_response(self, {"error": str(exc)}, status_code)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -2359,10 +2742,22 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 return
 
+            if parsed.path == "/vendor/qrcode-generator.js":
+                vendor_path = (CODE_ROOT / "node_modules" / "qrcode-generator" / "qrcode.js").resolve()
+                if not vendor_path.exists():
+                    text_response(self, "QR library is not installed.", 404)
+                    return
+                write_response(self, 200, vendor_path.read_bytes(), "application/javascript; charset=utf-8")
+                return
+
             if parsed.path == "/api/status":
                 config_name = safe_config_name(query.get("config", [DEFAULT_CONFIG])[0])
                 update_request_trace(self, config_name=config_name)
                 json_response(self, status_payload(config_name))
+                return
+
+            if parsed.path == "/api/sync/status":
+                json_response(self, sync_public_status())
                 return
 
             if parsed.path == "/api/stream-history":
@@ -2391,6 +2786,20 @@ class Handler(BaseHTTPRequestHandler):
                 config_name = safe_config_name(query.get("config", [DEFAULT_CONFIG])[0])
                 update_request_trace(self, config_name=config_name)
                 json_response(self, youtube_status(config_name))
+                return
+
+            if parsed.path == "/api/storage/status":
+                config_name = safe_config_name(query.get("config", [DEFAULT_CONFIG])[0])
+                update_request_trace(self, config_name=config_name)
+                json_response(self, storage_status(config_name))
+                return
+
+            if parsed.path == "/api/storage/files":
+                config_name = safe_config_name(query.get("config", [DEFAULT_CONFIG])[0])
+                provider_id = str(query.get("provider", [""])[0] or "").strip()
+                folder_id = str(query.get("folder", [""])[0] or "").strip() or None
+                update_request_trace(self, config_name=config_name)
+                json_response(self, storage_files(config_name, provider_id, folder_id))
                 return
 
             if parsed.path == "/api/youtube/auth/start":
@@ -2532,6 +2941,18 @@ class Handler(BaseHTTPRequestHandler):
                 json_response(self, {"ok": True, "config": config_name})
                 return
 
+            if parsed.path == "/api/sync/register":
+                json_response(self, create_sync_account(body))
+                return
+
+            if parsed.path == "/api/sync/login":
+                json_response(self, login_sync_account(body))
+                return
+
+            if parsed.path == "/api/sync/pairing/start":
+                json_response(self, start_sync_pairing(config_name, body))
+                return
+
             if parsed.path == "/api/youtube/disconnect":
                 config, error = load_config_or_none(config_name)
                 if not config:
@@ -2551,6 +2972,13 @@ class Handler(BaseHTTPRequestHandler):
                 account["hidden_subscriber_count"] = False
                 save_config(config_name, config)
                 json_response(self, {"ok": True, "config": config_name, "account_id": account_id})
+                return
+
+            if parsed.path == "/api/storage/disconnect":
+                provider_id = str(body.get("provider") or "").strip()
+                if not provider_id:
+                    raise ValueError("Storage provider is required.")
+                json_response(self, disconnect_storage_provider(config_name, provider_id))
                 return
 
             if parsed.path == "/api/youtube/schedule":
@@ -2612,6 +3040,18 @@ class Handler(BaseHTTPRequestHandler):
                 json_response(self, {"ok": True, "stopped": stopped})
                 return
 
+            if parsed.path == "/api/preview/start":
+                update_request_trace(self, channel_name=body.get("channel") or None)
+                preview = start_preview(config_name, body.get("channel") or None)
+                json_response(self, {"ok": True, "preview": preview})
+                return
+
+            if parsed.path == "/api/preview/stop":
+                update_request_trace(self, channel_name=body.get("channel") or None)
+                stopped_preview = stop_preview(body.get("channel") or None)
+                json_response(self, {"ok": True, "stopped": stopped_preview})
+                return
+
             if parsed.path == "/api/activity/clear":
                 preserve_running_tasks = bool(body.get("preserve_running_tasks", True))
                 channel_name = str(body.get("channel") or "").strip() or None
@@ -2663,6 +3103,12 @@ class Handler(BaseHTTPRequestHandler):
 def shutdown_streams() -> None:
     with STATE.lock:
         streams = list(STATE.streams.values())
+        preview = STATE.preview
+        STATE.preview = None
+    if preview:
+        stream_manager.stop_stream(preview.running)
+        if preview.running.preview_manifest:
+            stream_manager.clear_directory(preview.running.preview_manifest.parent)
     for state in streams:
         stream_manager.stop_stream(state.running)
 
@@ -2675,7 +3121,7 @@ def shutdown_tasks() -> None:
 
 
 def main() -> int:
-    global DEFAULT_CONFIG, UI_PORT
+    global DEFAULT_CONFIG, UI_PORT, SYNC_PORT
     runtime_paths.ensure_data_root()
     migrated = runtime_paths.migrate_legacy_layout()
     if migrated:
@@ -2690,6 +3136,11 @@ def main() -> int:
     port = int(os.environ.get("STREAM_UI_PORT", "8765"))
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     UI_PORT = int(server.server_address[1])
+    requested_sync_port = int(os.environ.get("CASTARRO_SYNC_PORT", "0"))
+    sync_server = ThreadingHTTPServer(("0.0.0.0", requested_sync_port), SyncHandler)
+    SYNC_PORT = int(sync_server.server_address[1])
+    sync_thread = threading.Thread(target=sync_server.serve_forever, daemon=True)
+    sync_thread.start()
 
     def handle_stop(_signum: int, _frame: Any) -> None:
         print("\nStopping UI, tasks, and streams...")
@@ -2701,10 +3152,13 @@ def main() -> int:
     signal.signal(signal.SIGTERM, handle_stop)
 
     print(f"Castarro UI running at http://127.0.0.1:{UI_PORT}")
+    print(f"Castarro device sync available at http://{sync_service.local_lan_ip()}:{SYNC_PORT}")
     print("Press Ctrl+C to stop the UI and any streams started from it.")
     try:
         server.serve_forever()
     finally:
+        sync_server.shutdown()
+        sync_server.server_close()
         shutdown_tasks()
         shutdown_streams()
         server.server_close()

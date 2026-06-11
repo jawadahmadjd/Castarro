@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://castarro.local/schemas/storage-provider.schema.json",
+  "title": "StorageProvider",
+  "type": "object",
+  "required": [
+    "id",
+    "type",
+    "displayName",
+    "authMode",
+    "status",
+    "createdAt",
+    "updatedAt"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "id": { "type": "string", "minLength": 1 },
+    "type": { "type": "string", "enum": ["googleDrive", "dropbox", "oneDrive", "s3", "directHttp"] },
+    "displayName": { "type": "string", "minLength": 1 },
+    "authMode": { "type": "string", "enum": ["oauth", "accessKey", "publicUrl"] },
+    "status": { "type": "string", "enum": ["connected", "disconnected", "expired", "error"] },
+    "accountEmail": { "type": ["string", "null"] },
+    "tokensFile": { "type": ["string", "null"] },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "updatedAt": { "type": "string", "format": "date-time" }
+  }
+}

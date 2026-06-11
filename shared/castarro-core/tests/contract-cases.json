@@ -24,6 +24,26 @@
       "name": "YouTube account stream profile fixture",
       "schema": "schemas/stream-profile.schema.json",
       "fixture": "fixtures/stream-profiles/youtube-account.json"
+    },
+    {
+      "name": "connected Google Drive storage provider fixture",
+      "schema": "schemas/storage-provider.schema.json",
+      "fixture": "fixtures/storage-providers/google-drive-connected.json"
+    },
+    {
+      "name": "ready Google Drive cloud video fixture",
+      "schema": "schemas/cloud-video-asset.schema.json",
+      "fixture": "fixtures/cloud-video-assets/ready-google-drive-h264-aac.json"
+    },
+    {
+      "name": "blocked Google Drive HEVC cloud video fixture",
+      "schema": "schemas/cloud-video-asset.schema.json",
+      "fixture": "fixtures/cloud-video-assets/blocked-google-drive-hevc.json"
+    },
+    {
+      "name": "blocked Google Drive no-range cloud video fixture",
+      "schema": "schemas/cloud-video-asset.schema.json",
+      "fixture": "fixtures/cloud-video-assets/blocked-google-drive-no-range.json"
     }
   ],
   "androidFixtureCoverage": {

@@ -7,6 +7,7 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.os.Build
+import com.castarro.mobile.data.sync.DesktopVideoDownloadForegroundService
 import com.castarro.mobile.streaming.StreamForegroundService
 
 class NotificationFactory(private val context: Context) {
@@ -36,6 +37,49 @@ class NotificationFactory(private val context: Context) {
             .build()
     }
 
+    fun desktopSyncDownloadNotification(
+        channelName: String,
+        status: String,
+        detail: String,
+        paused: Boolean,
+    ): Notification {
+        ensureDesktopSyncChannel()
+        val pauseOrResumeIntent = Intent(context, DesktopVideoDownloadForegroundService::class.java).apply {
+            action = if (paused) {
+                DesktopVideoDownloadForegroundService.ACTION_RESUME
+            } else {
+                DesktopVideoDownloadForegroundService.ACTION_PAUSE
+            }
+        }
+        val cancelIntent = Intent(context, DesktopVideoDownloadForegroundService::class.java).apply {
+            action = DesktopVideoDownloadForegroundService.ACTION_CANCEL
+        }
+        val pauseOrResumePendingIntent = PendingIntent.getService(
+            context,
+            41,
+            pauseOrResumeIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        val cancelPendingIntent = PendingIntent.getService(
+            context,
+            42,
+            cancelIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        return Notification.Builder(context, DESKTOP_SYNC_CHANNEL_ID)
+            .setContentTitle("$channelName desktop download")
+            .setContentText("$status | $detail")
+            .setSmallIcon(android.R.drawable.stat_sys_download)
+            .setOngoing(status == "Downloading" || status == "Paused")
+            .addAction(
+                if (paused) android.R.drawable.ic_media_play else android.R.drawable.ic_media_pause,
+                if (paused) "Resume" else "Pause",
+                pauseOrResumePendingIntent,
+            )
+            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Cancel", cancelPendingIntent)
+            .build()
+    }
+
     private fun ensureChannel() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val manager = context.getSystemService(NotificationManager::class.java)
@@ -49,7 +93,21 @@ class NotificationFactory(private val context: Context) {
         manager.createNotificationChannel(channel)
     }
 
+    private fun ensureDesktopSyncChannel() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        val manager = context.getSystemService(NotificationManager::class.java)
+        val channel = NotificationChannel(
+            DESKTOP_SYNC_CHANNEL_ID,
+            "Desktop sync downloads",
+            NotificationManager.IMPORTANCE_LOW,
+        ).apply {
+            description = "Foreground status for desktop video downloads with pause and cancel controls."
+        }
+        manager.createNotificationChannel(channel)
+    }
+
     companion object {
         const val CHANNEL_ID = "castarro_live_streaming"
+        const val DESKTOP_SYNC_CHANNEL_ID = "castarro_desktop_sync_downloads"
     }
 }

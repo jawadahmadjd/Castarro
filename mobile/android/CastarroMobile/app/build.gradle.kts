@@ -96,6 +96,7 @@ dependencies {
     implementation("androidx.room:room-ktx:2.6.1")
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
     implementation("com.google.android.gms:play-services-auth:21.6.0")
+    implementation("com.google.android.gms:play-services-code-scanner:16.1.0")
     implementation("com.moizhassan.ffmpeg:ffmpeg-kit-16kb:6.1.1")
     ksp("androidx.room:room-compiler:2.6.1")
 

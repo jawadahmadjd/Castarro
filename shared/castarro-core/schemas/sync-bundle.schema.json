@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://castarro.local/schemas/sync-bundle.schema.json",
+  "title": "CastarroSyncBundle",
+  "type": "object",
+  "required": ["schemaVersion", "account", "configName", "exportedAt", "channels", "streamProfiles", "videos", "settings"],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "type": "integer", "const": 1 },
+    "account": { "$ref": "sync-account.schema.json" },
+    "configName": { "type": "string", "minLength": 1 },
+    "exportedAt": { "type": "string", "format": "date-time" },
+    "channels": {
+      "type": "array",
+      "items": { "$ref": "channel.schema.json" }
+    },
+    "streamProfiles": {
+      "type": "array",
+      "items": { "$ref": "stream-profile.schema.json" }
+    },
+    "videos": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "channelId", "displayName", "sourceUri", "sourceType", "syncFile"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "channelId": { "type": "string", "minLength": 1 },
+          "displayName": { "type": "string", "minLength": 1 },
+          "sourceUri": { "type": "string", "minLength": 1 },
+          "sourceType": { "type": "string", "enum": ["desktopPath", "downloadUrl", "local", "cloud"] },
+          "desktopPath": { "type": ["string", "null"] },
+          "downloadUrl": { "type": ["string", "null"] },
+          "sizeBytes": { "type": ["integer", "null"], "minimum": 0 },
+          "mtime": { "type": ["string", "null"] },
+          "kind": { "type": ["string", "null"] },
+          "syncFile": { "type": "boolean" }
+        }
+      }
+    },
+    "secrets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["ref", "value", "kind"],
+        "additionalProperties": false,
+        "properties": {
+          "ref": { "type": "string", "minLength": 1 },
+          "value": { "type": "string" },
+          "kind": { "type": "string", "enum": ["streamKey"] }
+        }
+      }
+    },
+    "settings": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  }
+}

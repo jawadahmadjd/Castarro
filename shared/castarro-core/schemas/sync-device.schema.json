@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://castarro.local/schemas/sync-device.schema.json",
+  "title": "CastarroSyncDevice",
+  "type": "object",
+  "required": ["id", "accountId", "deviceName", "platform", "pairedAt"],
+  "additionalProperties": false,
+  "properties": {
+    "id": { "type": "string", "minLength": 1 },
+    "accountId": { "type": "string", "minLength": 1 },
+    "deviceName": { "type": "string", "minLength": 1 },
+    "platform": { "type": "string", "enum": ["desktop", "android", "ios", "unknown"] },
+    "lastSeenAt": { "type": ["string", "null"], "format": "date-time" },
+    "pairedAt": { "type": "string", "format": "date-time" }
+  }
+}

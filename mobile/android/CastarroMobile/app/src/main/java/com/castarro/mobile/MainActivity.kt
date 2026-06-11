@@ -15,6 +15,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.castarro.mobile.ui.CastarroMobileViewModel
 import com.castarro.mobile.ui.navigation.AppNavGraph
 import com.castarro.mobile.ui.theme.CastarroTheme
+import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -76,6 +77,18 @@ class MainActivity : ComponentActivity() {
                     onStreamProtectionAction = { action ->
                         mobileViewModel.openStreamProtectionAction(this, action)
                     },
+                    onScanSyncPairing = {
+                        GmsBarcodeScanning.getClient(this)
+                            .startScan()
+                            .addOnSuccessListener { barcode ->
+                                barcode.rawValue?.let(mobileViewModel::syncFromScannedPairingUri)
+                            }
+                    },
+                    onToggleDesktopVideoDownload = mobileViewModel::toggleDesktopVideoDownload,
+                    onStartDesktopVideoDownloads = mobileViewModel::startSelectedDesktopVideoDownloads,
+                    onPauseDesktopVideoDownloads = mobileViewModel::pauseDesktopVideoDownloads,
+                    onResumeDesktopVideoDownloads = mobileViewModel::resumeDesktopVideoDownloads,
+                    onCancelDesktopVideoDownloads = mobileViewModel::cancelDesktopVideoDownloads,
                     onClearError = mobileViewModel::clearError,
                 )
             }

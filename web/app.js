@@ -35,13 +35,16 @@ const state = {
   removedChannelUndo: null,
   hadRunningSettingsTask: false,
   expandedTaskLogs: {},
-  previewChannel: "",
+  previewEnabled: true,
+  previewRequestInFlight: "",
+  previewStopInFlight: false,
   previewUrl: "",
   previewHls: null,
   appVersion: null,
   updateStatus: null,
   usageMetrics: null,
   youtubeStatus: null,
+  storageStatus: null,
   youtubeBroadcasts: [],
   youtubeKeyChecks: null,
   youtubeAutoVerifyInFlightKey: "",
@@ -73,6 +76,8 @@ const state = {
     pendingEnd: "",
     selectingCustomEnd: false,
   },
+  syncStatus: null,
+  syncPairing: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -81,6 +86,7 @@ const ACTIVITY_STREAM_SPLIT_KEY = "castarro.activityStreamSplitRatio.v1";
 const WORKSPACE_SELECTED_CHANNEL_KEY = "castarro.workspace.selectedChannel.v1";
 const DASHBOARD_CACHE_KEY = "castarro.dashboard.frontPage.v1";
 const YOUTUBE_STATUS_CACHE_KEY = "castarro.youtube.status.v1";
+const PREVIEW_ENABLED_KEY = "castarro.preview.enabled.v1";
 const WORKSPACE_ROUTES = ["overview", "encoder", "youtube", "history", "troubleshoot"];
 const routeToSettingsTab = {
   encoder: "normalize",
@@ -115,24 +121,26 @@ function usageProcessPids(payload) {
 
 function renderUsageMetrics(payload = state.status) {
   const cpuNode = $("workspaceUsageCpu");
+  const gpuNode = $("workspaceUsageGpu");
   const ramNode = $("workspaceUsageRam");
   const dataNode = $("workspaceUsageData");
-  const batteryNode = $("workspaceUsageBattery");
   const metrics = state.usageMetrics || {};
   const usage = payload?.usage || {};
   if (cpuNode) {
     cpuNode.textContent = Number.isFinite(Number(metrics.cpuPercent)) ? formatCpuUsage(metrics.cpuPercent) : "Unavailable";
+  }
+  if (gpuNode) {
+    gpuNode.textContent =
+      metrics.gpuStatus === "unavailable" || !Number.isFinite(Number(metrics.gpuPercent))
+        ? "Unavailable"
+        : formatCpuUsage(metrics.gpuPercent);
+    gpuNode.title = metrics.gpuDetail || "";
   }
   if (ramNode) {
     ramNode.textContent = Number.isFinite(Number(metrics.memoryBytes)) ? formatBytes(metrics.memoryBytes) : "Unavailable";
   }
   if (dataNode) {
     dataNode.textContent = formatBytes(usage.stream_transfer_today_bytes || 0);
-  }
-  if (batteryNode) {
-    const battery = metrics.batteryToday || usage.battery_today || {};
-    batteryNode.textContent = battery.label || "Unavailable";
-    batteryNode.title = battery.detail || "";
   }
 }
 
@@ -185,6 +193,28 @@ const defaultYoutubeSettings = () => ({
   default_auto_stop: true,
 });
 
+const defaultStorageSettings = () => ({
+  providers: [
+    {
+      id: "google-drive-main",
+      type: "googleDrive",
+      display_name: "Google Drive",
+      auth_mode: "oauth",
+      tokens_file: ".runtime/google_drive_tokens_google-drive-main.json",
+      account_email: "",
+      status: "",
+    },
+  ],
+  source_proxy: {
+    host: "127.0.0.1",
+    port: 8876,
+    cache_dir: ".runtime/cloud-cache",
+    startup_buffer_mb: 64,
+    max_cache_mb: 2048,
+    spool_before_start: false,
+  },
+});
+
 const defaultConfigData = () => ({
   defaults: {
     ffmpeg_path: "ffmpeg",
@@ -214,6 +244,7 @@ const defaultConfigData = () => ({
   },
   live_profile: defaultLiveProfile(),
   youtube: defaultYoutubeSettings(),
+  storage: defaultStorageSettings(),
   ui: {
     channel_workspace_enabled: true,
     legacy_tabs_enabled: false,
@@ -227,6 +258,7 @@ const defaultChannel = (index) => ({
   stream_key_env: `YT_CHANNEL_${index}_KEY`,
   raw_playlist: [`Raw Videos/channel_${index}/video-001.mp4`],
   playlist: [],
+  cloud_playlist: [],
   normalize_profile: {
     width: 1920,
     height: 1080,
@@ -314,9 +346,102 @@ function youtubeStatusStorageKey() {
   return `${YOUTUBE_STATUS_CACHE_KEY}:${state.config || "config.json"}`;
 }
 
+function readPreviewEnabled() {
+  try {
+    const saved = window.localStorage.getItem(PREVIEW_ENABLED_KEY);
+    if (saved === null) return true;
+    return saved !== "false";
+  } catch {
+    return true;
+  }
+}
+
+function writePreviewEnabled(value) {
+  state.previewEnabled = value !== false;
+  try {
+    window.localStorage.setItem(PREVIEW_ENABLED_KEY, state.previewEnabled ? "true" : "false");
+  } catch {
+    // Ignore storage failures; preview can still work for this session.
+  }
+}
+
+function isOverviewVisible() {
+  return state.activeTab === "control" && normalizeWorkspaceRoute(state.workspace.activeRoute) === "overview";
+}
+
+function runningPreviewCandidates(streams = state.status?.streams || {}) {
+  return Object.values(streams || {}).filter((stream) => stream?.running);
+}
+
+function selectedPreviewChannelName(streams = state.status?.streams || {}) {
+  const running = runningPreviewCandidates(streams);
+  if (!running.length) return "";
+  const selectedWorkspaceChannel = String(state.workspace.selectedChannelName || "").trim();
+  if (selectedWorkspaceChannel && running.some((stream) => stream.name === selectedWorkspaceChannel)) {
+    return selectedWorkspaceChannel;
+  }
+  return running[0].name;
+}
+
+async function requestPreviewStart(channelName) {
+  const target = String(channelName || "").trim();
+  if (!target || state.previewRequestInFlight === target) return;
+  state.previewRequestInFlight = target;
+  state.previewStopInFlight = false;
+  try {
+    await api("/api/preview/start", {
+      method: "POST",
+      action: "preview.start",
+      body: JSON.stringify({ config: state.config, channel: target }),
+    });
+  } finally {
+    if (state.previewRequestInFlight === target) {
+      state.previewRequestInFlight = "";
+    }
+  }
+}
+
+async function requestPreviewStop(channelName = "") {
+  if (state.previewStopInFlight) return;
+  state.previewStopInFlight = true;
+  const target = String(channelName || "").trim();
+  try {
+    await api("/api/preview/stop", {
+      method: "POST",
+      action: "preview.stop",
+      body: JSON.stringify({ config: state.config, ...(target ? { channel: target } : {}) }),
+    });
+  } finally {
+    state.previewStopInFlight = false;
+    if (!target || state.previewRequestInFlight === target) {
+      state.previewRequestInFlight = "";
+    }
+  }
+}
+
+function syncPreviewLifecycle(streams = state.status?.streams || {}) {
+  const previewState = state.status?.preview || {};
+  const previewChannel = String(previewState.channel || "").trim();
+  const desiredChannel = selectedPreviewChannelName(streams);
+  const shouldRunPreview = Boolean(state.previewEnabled && isOverviewVisible() && desiredChannel);
+
+  if (!shouldRunPreview) {
+    detachPreviewPlayer();
+    if (previewChannel) {
+      requestPreviewStop(previewChannel).catch((error) => toast(error.message));
+    }
+    return;
+  }
+
+  if (previewChannel === desiredChannel && previewState.running) return;
+  requestPreviewStart(desiredChannel).catch((error) => toast(error.message));
+}
+
 function isChannelWorkspaceEnabled() {
   return Boolean(state.configData?.ui?.channel_workspace_enabled);
 }
+
+state.previewEnabled = readPreviewEnabled();
 
 function areLegacyTabsEnabled() {
   return false;
@@ -585,6 +710,7 @@ async function refresh() {
   const payload = await api(`/api/status?config=${encodeURIComponent(state.config)}`);
   const visiblePayload = applyPendingChannelRemovalToStatus(payload);
   state.status = visiblePayload;
+  state.storageStatus = visiblePayload.storage || state.storageStatus;
 
   const previousConfig = state.config;
   if (!visiblePayload.configs.includes(state.config)) {
@@ -605,7 +731,9 @@ async function refresh() {
   renderChannelWorkspace(visiblePayload);
   renderUsageMetrics(visiblePayload);
   refreshUsageMetrics(visiblePayload).catch(() => {});
+  refreshSyncStatus().catch(() => {});
   renderPreview(visiblePayload.streams);
+  syncPreviewLifecycle(visiblePayload.streams);
   renderLiveHistory(visiblePayload.stream_history || []);
   renderTasks(visiblePayload.tasks, visiblePayload.activity_events || []);
   renderLogs(visiblePayload.streams);
@@ -734,6 +862,7 @@ function renderCachedDashboard() {
   renderChannels(payload);
   renderChannelWorkspace(payload);
   renderPreview(payload.streams || {});
+  syncPreviewLifecycle(payload.streams || {});
   renderLiveHistory(payload.stream_history || []);
   renderTasks([], []);
   renderLogs(payload.streams || {});
@@ -949,7 +1078,7 @@ function renderChannels(payload) {
           <div class="channel-name">${escapeHtml(channel.name)}</div>
           <span class="badge ${live ? "live" : ""}">${live ? "Live" : channel.enabled ? "Ready" : "Disabled"}</span>
         </div>
-        <div class="meta">${channel.raw_playlist_count || 0} raw item${channel.raw_playlist_count === 1 ? "" : "s"} - ${channel.normalized_count || 0} normalized item${channel.normalized_count === 1 ? "" : "s"} - ${channel.playlist_count} playlist override${channel.playlist_count === 1 ? "" : "s"} - ${escapeHtml(key)}</div>
+        <div class="meta">${channel.raw_playlist_count || 0} raw item${channel.raw_playlist_count === 1 ? "" : "s"} - ${channel.normalized_count || 0} normalized item${channel.normalized_count === 1 ? "" : "s"} - ${channel.cloud_playlist_count || 0} cloud item${channel.cloud_playlist_count === 1 ? "" : "s"} - ${channel.playlist_count} playlist override${channel.playlist_count === 1 ? "" : "s"} - ${escapeHtml(key)}</div>
         <div class="meta">
           <span class="badge ${autoReady ? "live" : "warn"}">${escapeHtml(autoText)}</span>
           ${studio}
@@ -1530,10 +1659,12 @@ function applyLegacyTabView(tab) {
 
 function applySettingsSection(tab) {
   $("settingsNormalizeTab")?.classList.toggle("active", tab === "normalize");
+  $("settingsStorageTab")?.classList.toggle("active", tab === "storage");
   $("settingsYoutubeTab")?.classList.toggle("active", tab === "youtube");
   $("settingsLiveHistoryTab")?.classList.toggle("active", tab === "liveHistory");
   $("settingsTroubleshootingTab")?.classList.toggle("active", tab === "troubleshooting");
   $("settingsNormalizeView")?.classList.toggle("active", tab === "normalize");
+  $("settingsStorageView")?.classList.toggle("active", tab === "storage");
   $("settingsYoutubeView")?.classList.toggle("active", tab === "youtube");
   $("settingsLiveHistoryView")?.classList.toggle("active", tab === "liveHistory");
   $("settingsTroubleshootingView")?.classList.toggle("active", tab === "troubleshooting");
@@ -1548,8 +1679,11 @@ function renderWorkspaceRoute(payload, routeName) {
     renderOverviewPanels(payload, selected);
     renderLiveHistory(payload?.stream_history || []);
     renderPreview(payload?.streams || {});
+    syncPreviewLifecycle(payload?.streams || {});
     return;
   }
+  detachPreviewPlayer();
+  syncPreviewLifecycle(payload?.streams || {});
   const settingsTab = routeToSettingsTab[route] || "normalize";
   applyLegacyTabView("settings");
   state.settingsTab = settingsTab;
@@ -2639,60 +2773,86 @@ function renderLogs(streams) {
 }
 
 function renderPreview(streams) {
-  const select = $("previewChannelSelect");
+  const toggle = $("previewEnabledToggle");
   const badge = $("previewStatus");
   const video = $("programPreview");
   const empty = $("previewEmpty");
   const warning = $("previewWarning");
-  if (!select || !badge || !video || !empty || !warning) return;
+  if (!toggle || !badge || !video || !empty || !warning) return;
 
-  const running = Object.values(streams || {})
-    .filter((stream) => stream.running && stream.preview_url);
+  const running = runningPreviewCandidates(streams);
+  toggle.checked = state.previewEnabled;
 
   if (!running.length) {
-    select.innerHTML = `<option value="">No live channels</option>`;
-    select.disabled = true;
     badge.textContent = "Idle";
     badge.className = "badge";
-    empty.textContent = "Start a stream to see live preview here.";
+    empty.textContent = "Start the selected channel to see live preview here.";
     empty.style.display = "grid";
     warning.textContent = "";
     warning.classList.add("hidden");
     detachPreviewPlayer();
-    state.previewChannel = "";
     return;
   }
 
-  select.disabled = false;
-  select.innerHTML = running
-    .map((stream) => `<option value="${escapeAttr(stream.name)}">${escapeHtml(stream.name)}</option>`)
-    .join("");
-
-  const hasSelection = running.some((stream) => stream.name === state.previewChannel);
-  if (!hasSelection) {
-    state.previewChannel = running[0].name;
-  }
-  select.value = state.previewChannel;
-
-  const selected = running.find((stream) => stream.name === state.previewChannel) || running[0];
+  const selectedName = selectedPreviewChannelName(streams);
+  const selected = running.find((stream) => stream.name === selectedName) || running[0];
   if (!selected) return;
-  if (selected.name !== state.previewChannel) {
-    state.previewChannel = selected.name;
-    select.value = selected.name;
+
+  if (!state.previewEnabled) {
+    badge.textContent = "Off";
+    badge.className = "badge";
+    empty.textContent = "Preview is turned off.";
+    empty.style.display = "grid";
+    warning.textContent = "";
+    warning.classList.add("hidden");
+    detachPreviewPlayer();
+    return;
   }
 
-  const buffering = !selected.preview_ready;
+  if (!isOverviewVisible()) {
+    badge.textContent = "Paused";
+    badge.className = "badge";
+    empty.textContent = "Open Overview to start the live preview.";
+    empty.style.display = "grid";
+    warning.textContent = "";
+    warning.classList.add("hidden");
+    detachPreviewPlayer();
+    return;
+  }
+
+  const previewActive = Boolean(selected.preview_url);
+  const buffering = previewActive && !selected.preview_ready;
+  const previewWarningText = String(selected.preview_warning || "").trim();
+  if (!previewActive) {
+    badge.textContent = "Starting";
+    badge.className = "badge";
+    empty.textContent = `Preview is warming up for ${selected.name}...`;
+    empty.style.display = "grid";
+    if (previewWarningText) {
+      warning.textContent = previewWarningText;
+      warning.classList.remove("hidden");
+    } else {
+      warning.textContent = "";
+      warning.classList.add("hidden");
+    }
+    detachPreviewPlayer();
+    return;
+  }
+
   badge.textContent = buffering ? "Buffering" : "Live";
   badge.className = `badge ${buffering ? "" : "live"}`;
   empty.textContent = buffering ? "Preview is warming up..." : "";
   empty.style.display = buffering ? "grid" : "none";
-  const previewWarningText = String(selected.preview_warning || "").trim();
   if (previewWarningText) {
     warning.textContent = previewWarningText;
     warning.classList.remove("hidden");
   } else {
     warning.textContent = "";
     warning.classList.add("hidden");
+  }
+  if (buffering) {
+    detachPreviewPlayer();
+    return;
   }
   attachPreviewPlayer(selected.preview_url);
 }
@@ -3127,6 +3287,14 @@ function normalizeConfigShape() {
   config.normalize_profile = { ...defaultConfigData().normalize_profile, ...(config.normalize_profile || {}) };
   config.live_profile = { ...defaultLiveProfile(), ...(config.live_profile || {}) };
   config.youtube = { ...defaultYoutubeSettings(), ...(config.youtube || {}) };
+  config.storage = { ...defaultStorageSettings(), ...(config.storage || {}) };
+  config.storage.source_proxy = {
+    ...defaultStorageSettings().source_proxy,
+    ...(config.storage.source_proxy || {}),
+  };
+  config.storage.providers = Array.isArray(config.storage.providers)
+    ? config.storage.providers
+    : defaultStorageSettings().providers;
   config.youtube.accounts = normalizedYoutubeAccounts(config);
   config.youtube.default_account_id = normalizeAccountId(config.youtube.default_account_id || "");
   if (!config.youtube.default_account_id && config.youtube.accounts.length) {
@@ -3142,6 +3310,9 @@ function normalizeConfigShape() {
     }
     if (!Array.isArray(channel.playlist)) {
       channel.playlist = [];
+    }
+    if (!Array.isArray(channel.cloud_playlist)) {
+      channel.cloud_playlist = [];
     }
     channel.normalize_profile = {
       ...config.normalize_profile,
@@ -3268,6 +3439,14 @@ function renderSettingsForms() {
   config.defaults = config.defaults || {};
   config.normalize_profile = config.normalize_profile || {};
   config.youtube = { ...defaultYoutubeSettings(), ...(config.youtube || {}) };
+  config.storage = { ...defaultStorageSettings(), ...(config.storage || {}) };
+  config.storage.source_proxy = {
+    ...defaultStorageSettings().source_proxy,
+    ...(config.storage.source_proxy || {}),
+  };
+  config.storage.providers = Array.isArray(config.storage.providers)
+    ? config.storage.providers
+    : defaultStorageSettings().providers;
   config.youtube.accounts = normalizedYoutubeAccounts(config);
   config.youtube.default_account_id = normalizeAccountId(config.youtube.default_account_id || "");
   if (!config.youtube.default_account_id && config.youtube.accounts.length) {
@@ -3277,6 +3456,9 @@ function renderSettingsForms() {
   config.channels = Array.isArray(config.channels) ? config.channels : [];
   config.channels.forEach((channel) => {
     channel.youtube_account_id = normalizeAccountId(channel.youtube_account_id || "");
+    if (!Array.isArray(channel.cloud_playlist)) {
+      channel.cloud_playlist = [];
+    }
   });
   if ($("removeChannelNormalize")) {
     $("removeChannelNormalize").disabled = !config.channels.length;
@@ -3285,6 +3467,7 @@ function renderSettingsForms() {
   if ($("folderSettingsFields")) {
     $("folderSettingsFields").innerHTML = folderSettingsMarkup(config.defaults);
   }
+  renderStorageSettingsPanel(config);
 
   const activeNormalizeIndex = selectedSettingsChannelIndex(config);
   $("normalizationChannels").innerHTML = activeNormalizeIndex >= 0
@@ -3294,6 +3477,119 @@ function renderSettingsForms() {
   window.requestAnimationFrame(restoreNormalizeFileListScroll);
 
   renderYoutubeSettingsPanel(config);
+}
+
+function renderStorageSettingsPanel(config = state.configData || defaultConfigData()) {
+  const container = $("storageSettingsPanel");
+  if (!container) return;
+  const storage = { ...defaultStorageSettings(), ...(config.storage || {}) };
+  const proxy = { ...defaultStorageSettings().source_proxy, ...(storage.source_proxy || {}) };
+  const providers = Array.isArray(storage.providers) ? storage.providers : [];
+  const statusProviders = Array.isArray(state.storageStatus?.providers) ? state.storageStatus.providers : [];
+  const statusById = new Map(statusProviders.map((item) => [String(item.id || ""), item]));
+  const providerMarkup = providers.length
+    ? providers.map((provider) => {
+        const id = String(provider.id || "").trim();
+        const status = statusById.get(id) || provider;
+        const connected = Boolean(status.connected || status.status === "connected");
+        const statusLabel = connected ? "Connected" : (status.status || "Disconnected");
+        const tokenText = status.tokens_present ? "Token stored" : "No token";
+        return `
+          <section class="channel-settings storage-provider-card">
+            <div class="section-head compact">
+              <div>
+                <h3>${escapeHtml(provider.display_name || provider.displayName || id || "Storage provider")}</h3>
+                <p class="helper">${escapeHtml(provider.type || "storage")} - ${escapeHtml(tokenText)}</p>
+              </div>
+              <span class="badge ${connected ? "ok" : "warn"}">${escapeHtml(statusLabel)}</span>
+            </div>
+            <div class="form-grid">
+              <label>
+                <span class="field-hint">Provider ID</span>
+                <input value="${escapeAttr(id)}" readonly>
+              </label>
+              <label>
+                <span class="field-hint">Account</span>
+                <input value="${escapeAttr(status.account_email || provider.account_email || "")}" readonly placeholder="Not connected">
+              </label>
+              <label>
+                <span class="field-hint">Token file</span>
+                <input value="${escapeAttr(provider.tokens_file || "")}" readonly>
+              </label>
+            </div>
+            <div class="row wrap">
+              <button class="pill" type="button" onclick="connectStorageProvider('${escapeJs(id)}')">Connect Google Drive</button>
+              <button class="pill ghost" type="button" onclick="disconnectStorageProvider('${escapeJs(id)}')" ${connected || status.tokens_present ? "" : "disabled"}>Disconnect</button>
+            </div>
+          </section>
+        `;
+      }).join("")
+    : `<div class="notice warn">No storage providers are configured.</div>`;
+
+  container.innerHTML = `
+    <div class="channel-settings-list">
+      ${providerMarkup}
+      <section class="channel-settings">
+        <div class="section-head compact">
+          <div>
+            <h3>Source Proxy Cache</h3>
+            <p class="helper">Localhost proxy settings used when FFmpeg reads cloud videos.</p>
+          </div>
+        </div>
+        <div class="form-grid">
+          <label>
+            <span class="field-hint">Host</span>
+            <input data-storage-proxy-field="host" value="${escapeAttr(proxy.host || "127.0.0.1")}">
+          </label>
+          <label>
+            <span class="field-hint">Port</span>
+            <input type="number" min="1" max="65535" data-storage-proxy-field="port" value="${escapeAttr(proxy.port || 8876)}">
+          </label>
+          <label>
+            <span class="field-hint">Cache folder</span>
+            <input data-storage-proxy-field="cache_dir" value="${escapeAttr(proxy.cache_dir || ".runtime/cloud-cache")}">
+          </label>
+          <label>
+            <span class="field-hint">Startup buffer MB</span>
+            <input type="number" min="0" data-storage-proxy-field="startup_buffer_mb" value="${escapeAttr(proxy.startup_buffer_mb ?? 64)}">
+          </label>
+          <label>
+            <span class="field-hint">Max cache MB</span>
+            <input type="number" min="0" data-storage-proxy-field="max_cache_mb" value="${escapeAttr(proxy.max_cache_mb ?? 2048)}">
+          </label>
+          <label class="checkbox">
+            <input type="checkbox" data-storage-proxy-field="spool_before_start" ${proxy.spool_before_start ? "checked" : ""}>
+            <span>Spool before start</span>
+          </label>
+        </div>
+      </section>
+    </div>
+  `;
+}
+
+async function refreshStorageStatus() {
+  const payload = await api(`/api/storage/status?config=${encodeURIComponent(state.config)}`, {
+    action: "storage.status",
+  });
+  state.storageStatus = payload;
+  renderStorageSettingsPanel(state.configData || defaultConfigData());
+  return payload;
+}
+
+function connectStorageProvider(providerId) {
+  toast("Google Drive connection UI is next in the checklist.");
+  logLocalActivityEvent("storage_connect_pending", "Google Drive connection UI is next in the checklist.", { provider_id: providerId }, "info");
+}
+
+async function disconnectStorageProvider(providerId) {
+  const payload = await api("/api/storage/disconnect", {
+    method: "POST",
+    body: JSON.stringify({ config: state.config, provider: providerId }),
+    action: "storage.disconnect",
+  });
+  state.storageStatus = null;
+  await refreshStorageStatus();
+  toast(`${payload?.provider?.display_name || "Storage provider"} disconnected.`);
 }
 
 function renderRemovedChannelUndo() {
@@ -5340,6 +5636,14 @@ function collectSettingsData() {
   config.normalize_profile = config.normalize_profile || {};
   config.youtube = { ...defaultYoutubeSettings(), ...(config.youtube || {}) };
   config.youtube.accounts = normalizedYoutubeAccounts(config);
+  config.storage = { ...defaultStorageSettings(), ...(config.storage || {}) };
+  config.storage.source_proxy = {
+    ...defaultStorageSettings().source_proxy,
+    ...(config.storage.source_proxy || {}),
+  };
+  config.storage.providers = Array.isArray(config.storage.providers)
+    ? config.storage.providers
+    : defaultStorageSettings().providers;
   config.ui = { ...defaultConfigData().ui, ...(config.ui || {}) };
   config.ui.channel_workspace_enabled = true;
   config.ui.legacy_tabs_enabled = false;
@@ -5359,6 +5663,13 @@ function collectSettingsData() {
     } else {
       config.youtube[field] = input.value;
     }
+  });
+
+  document.querySelectorAll("[data-storage-proxy-field]").forEach((input) => {
+    const field = input.dataset.storageProxyField;
+    config.storage.source_proxy[field] = input.type === "checkbox"
+      ? input.checked
+      : coerceValue(input.value, input.type);
   });
 
   config.youtube.default_account_id = normalizeAccountId(config.youtube.default_account_id || "");
@@ -5422,6 +5733,7 @@ function collectSettingsData() {
       ? config.channels[index].playlist
       : [];
     channel.playlist = liveFileInputs.length ? checkedLiveFiles : existingPlaylist;
+    channel.cloud_playlist = Array.isArray(existingChannel.cloud_playlist) ? existingChannel.cloud_playlist : [];
     channel.youtube_broadcast_id = String(existingChannel.youtube_broadcast_id || "");
     channel.youtube_stream_id = String(existingChannel.youtube_stream_id || "");
     channel.youtube_account_id = normalizeAccountId(channel.youtube_account_id || existingChannel.youtube_account_id || "");
@@ -5462,6 +5774,9 @@ function collectSettingsData() {
 
   config.channels.forEach((channel) => {
     channel.youtube_account_id = normalizeAccountId(channel.youtube_account_id || "");
+    if (!Array.isArray(channel.cloud_playlist)) {
+      channel.cloud_playlist = [];
+    }
   });
 
   return config;
@@ -5535,6 +5850,7 @@ function settingsAutosaveTargetChanged(target) {
     "[data-default-field]",
     "[data-profile-field]",
     "[data-youtube-field]",
+    "[data-storage-proxy-field]",
     "[data-normalize-index][data-normalize-field]",
     "[data-channel-field]",
     "[data-live-profile-field]",
@@ -5919,6 +6235,91 @@ function showSettingsTab(tab) {
   }
 }
 
+async function refreshSyncStatus() {
+  const payload = await api("/api/sync/status", { action: "sync.status" });
+  state.syncStatus = payload;
+  renderSyncPanel();
+  return payload;
+}
+
+function renderSyncPanel() {
+  const status = state.syncStatus || {};
+  const badge = $("syncServerBadge");
+  const devices = Array.isArray(status.devices) ? status.devices : [];
+  const isSynced = devices.length > 0;
+  if (badge) {
+    badge.textContent = isSynced ? "Synced" : "Not Synced";
+    badge.classList.toggle("live", isSynced);
+    badge.classList.toggle("warn", !isSynced);
+  }
+
+  const deviceList = $("syncDeviceList");
+  if (deviceList) {
+    deviceList.innerHTML = devices.length
+      ? devices.map((device) => `
+          <div class="channel-settings">
+            <div class="channel-summary">
+              <span class="channel-name">${escapeHtml(device.deviceName || "Paired device")}</span>
+              <span class="badge">${escapeHtml(device.platform || "unknown")}</span>
+            </div>
+            <div class="channel-body">
+              <p class="helper">Paired ${escapeHtml(formatDateTime(device.pairedAt || ""))}${device.lastSeenAt ? `, last seen ${escapeHtml(formatDateTime(device.lastSeenAt))}` : ""}</p>
+            </div>
+          </div>
+        `).join("")
+      : `<p class="helper">No mobile devices paired yet.</p>`;
+  }
+}
+
+async function startSyncPairing() {
+  const payload = await api("/api/sync/pairing/start", {
+    method: "POST",
+    action: "sync.pairing.start",
+    body: JSON.stringify({
+      config: state.config,
+      includeVideos: true,
+    }),
+  });
+  state.syncPairing = payload.pairing || null;
+  renderSyncPairing();
+  toast("Pairing QR is ready.");
+}
+
+function renderSyncPairing() {
+  const pairing = state.syncPairing;
+  const box = $("syncPairingBox");
+  if (!pairing || !box) return;
+  box.classList.remove("hidden");
+  const canvas = $("syncQrCanvas");
+  const value = pairing.pairingUri || pairing.pairingUrl || "";
+  if (canvas && window.qrcode && value) {
+    drawPairingQr(canvas, value);
+  }
+}
+
+function drawPairingQr(canvas, value) {
+  const qr = window.qrcode(0, "M");
+  qr.addData(value);
+  qr.make();
+  const context = canvas.getContext("2d");
+  const count = qr.getModuleCount();
+  const size = canvas.width;
+  const margin = 10;
+  const moduleSize = Math.floor((size - margin * 2) / count);
+  const qrSize = moduleSize * count;
+  const offset = Math.floor((size - qrSize) / 2);
+  context.fillStyle = "#FFFAF0";
+  context.fillRect(0, 0, size, size);
+  context.fillStyle = "#2F2414";
+  for (let row = 0; row < count; row += 1) {
+    for (let col = 0; col < count; col += 1) {
+      if (qr.isDark(row, col)) {
+        context.fillRect(offset + col * moduleSize, offset + row * moduleSize, moduleSize, moduleSize);
+      }
+    }
+  }
+}
+
 function toast(message) {
   $("serverState").textContent = message;
 }
@@ -5940,9 +6341,18 @@ function escapeJs(value) {
   return String(value).replaceAll("\\", "\\\\").replaceAll("'", "\\'");
 }
 
+function formatDateTime(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value || "");
+  return date.toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
+}
+
 $("tabControl").addEventListener("click", () => showTab("control"));
 $("tabSettings").addEventListener("click", () => showTab("settings"));
 $("settingsNormalizeTab").addEventListener("click", () => showSettingsTab("normalize"));
+if ($("settingsStorageTab")) {
+  $("settingsStorageTab").addEventListener("click", () => showSettingsTab("storage"));
+}
 if ($("settingsLiveHistoryTab")) {
   $("settingsLiveHistoryTab").addEventListener("click", () => showSettingsTab("liveHistory"));
 }
@@ -5951,6 +6361,9 @@ if ($("settingsTroubleshootingTab")) {
 }
 if ($("settingsYoutubeTab")) {
   $("settingsYoutubeTab").addEventListener("click", () => showSettingsTab("youtube"));
+}
+if ($("syncStartPairing")) {
+  $("syncStartPairing").addEventListener("click", () => startSyncPairing().catch((error) => toast(error.message)));
 }
 if ($("settingsLiveHistoryRangeButton")) {
   $("settingsLiveHistoryRangeButton").addEventListener("click", (event) => {
@@ -6134,10 +6547,11 @@ if ($("railOpenLive")) {
 if ($("railOpenYoutube")) {
   $("railOpenYoutube").addEventListener("click", () => openWorkspaceRoute("youtube"));
 }
-if ($("previewChannelSelect")) {
-  $("previewChannelSelect").addEventListener("change", (event) => {
-    state.previewChannel = event.target.value;
+if ($("previewEnabledToggle")) {
+  $("previewEnabledToggle").addEventListener("change", (event) => {
+    writePreviewEnabled(Boolean(event.target.checked));
     renderPreview(state.status?.streams || {});
+    syncPreviewLifecycle(state.status?.streams || {});
   });
 }
 if ($("restartToUpdate")) {
@@ -6208,7 +6622,9 @@ window.addEventListener("message", (event) => {
   }
 });
 
-showSettingsTab(state.settingsTab);
+applySettingsSection(state.settingsTab);
+applyLegacyTabView("control");
+renderChannelTools();
 initActivityStreamSplitter();
 initDesktopIntegration().catch(() => {});
 renderCachedDashboard();

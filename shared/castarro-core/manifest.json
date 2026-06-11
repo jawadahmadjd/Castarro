@@ -14,7 +14,10 @@
     "stream-profile",
     "compatibility-report",
     "youtube-profile",
-    "stream-session"
+    "stream-session",
+    "sync-account",
+    "sync-device",
+    "sync-bundle"
   ],
   "notes": [
     "Shared contracts define behavior and data shape, not platform layout.",

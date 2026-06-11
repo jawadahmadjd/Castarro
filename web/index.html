@@ -112,8 +112,8 @@
               <strong id="workspaceUsageData">Checking</strong>
             </div>
             <div class="workspace-status-item">
-              <span class="field-hint">Battery today</span>
-              <strong id="workspaceUsageBattery">Unavailable</strong>
+              <span class="field-hint">GPU</span>
+              <strong id="workspaceUsageGpu">Checking</strong>
             </div>
           </section>
 
@@ -125,10 +125,13 @@
               <h2>Program Preview</h2>
               <p class="helper">Live monitor feed for the selected channel.</p>
             </div>
-            <div class="row wrap">
-              <label>
-                <span class="field-hint">Channel</span>
-                <select id="previewChannelSelect"></select>
+            <div class="row wrap preview-controls">
+              <label class="preview-toggle" for="previewEnabledToggle">
+                <span class="preview-toggle-label">Live Preview</span>
+                <span class="preview-toggle-switch">
+                  <input id="previewEnabledToggle" type="checkbox" checked>
+                  <span class="preview-toggle-slider" aria-hidden="true"></span>
+                </span>
               </label>
               <span class="badge" id="previewStatus">Idle</span>
             </div>
@@ -140,10 +143,29 @@
           <div class="notice warn hidden" id="previewWarning"></div>
         </section>
 
-        <aside class="panel workspace-readiness-panel" id="workspaceReadinessPanel">
-          <div class="workspace-channel-skeleton skeleton-block"></div>
-          <div class="workspace-channel-skeleton skeleton-block"></div>
-          <div class="workspace-channel-skeleton skeleton-block"></div>
+        <aside class="workspace-readiness-panel">
+          <section class="panel" id="workspaceReadinessPanel">
+            <div class="workspace-channel-skeleton skeleton-block"></div>
+            <div class="workspace-channel-skeleton skeleton-block"></div>
+            <div class="workspace-channel-skeleton skeleton-block"></div>
+          </section>
+
+          <section class="panel workspace-sync-panel" id="workspaceSyncPanel">
+            <div class="section-head">
+              <div>
+                <h2>Device Sync</h2>
+                <p class="helper">Pair this desktop with mobile devices on the same network.</p>
+              </div>
+              <span class="badge warn" id="syncServerBadge">Not Synced</span>
+            </div>
+            <div class="row wrap">
+              <button class="pill primary" id="syncStartPairing" type="button">Create QR pairing</button>
+            </div>
+            <div class="sync-pairing-box hidden" id="syncPairingBox">
+              <canvas id="syncQrCanvas" width="220" height="220" aria-label="Castarro pairing QR code"></canvas>
+            </div>
+            <div id="syncDeviceList" class="channel-settings-list"></div>
+          </section>
         </aside>
         </section>
 
@@ -179,6 +201,7 @@
           <div class="settings-menu">
             <div class="tabs">
               <button class="tab active" id="settingsNormalizeTab" type="button">Video Encoder</button>
+              <button class="tab" id="settingsStorageTab" type="button">Storage</button>
               <button class="tab" id="settingsYoutubeTab" type="button">YouTube</button>
               <button class="tab" id="settingsLiveHistoryTab" type="button">Live History</button>
               <button class="tab" id="settingsTroubleshootingTab" type="button">Troubleshooting</button>
@@ -214,6 +237,18 @@
               </div>
             </div>
             <div id="youtubeSettingsPanel"></div>
+          </section>
+        </section>
+
+        <section id="settingsStorageView" class="settings-section">
+          <section class="panel">
+            <div class="section-head">
+              <div>
+                <h2>Storage</h2>
+                <p class="helper">Connect online video sources and manage the local source cache.</p>
+              </div>
+            </div>
+            <div id="storageSettingsPanel"></div>
           </section>
         </section>
 
@@ -346,6 +381,7 @@
         </div>
       </section>
     </div>
+    <script src="/vendor/qrcode-generator.js"></script>
     <script src="/app.js"></script>
   </body>
 </html>

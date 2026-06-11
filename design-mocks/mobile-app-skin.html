@@ -64,7 +64,7 @@
 
       .screen-grid {
         display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+        grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
         gap: 24px;
         align-items: start;
       }
@@ -421,6 +421,68 @@
         font: inherit;
       }
 
+      .input-like {
+        min-height: 44px;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: rgba(255, 255, 255, 0.62);
+        color: var(--ink);
+        padding: 12px;
+        font-size: 12px;
+        font-weight: 750;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .input-like.tall {
+        min-height: 64px;
+        white-space: normal;
+      }
+
+      .field-label {
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 900;
+      }
+
+      .toggle-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        min-height: 44px;
+        color: var(--ink);
+        font-size: 13px;
+        font-weight: 850;
+      }
+
+      .switch-on {
+        width: 42px;
+        height: 24px;
+        border-radius: 999px;
+        background: var(--green);
+        position: relative;
+      }
+
+      .switch-on::after {
+        content: "";
+        position: absolute;
+        top: 4px;
+        right: 4px;
+        width: 16px;
+        height: 16px;
+        border-radius: 999px;
+        background: var(--surface);
+      }
+
+      .action-bar.inline {
+        padding: 0;
+        border: 0;
+        background: transparent;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
       .live-panel {
         border-radius: var(--radius);
         padding: 14px;
@@ -511,6 +573,15 @@
 
               <section class="card">
                 <div class="card-head">
+                  <h2>Desktop Sync</h2>
+                  <span class="badge">New</span>
+                </div>
+                <p class="muted">Bring channels, YouTube settings, and selected videos from desktop.</p>
+                <button class="button primary" type="button">Set up sync</button>
+              </section>
+
+              <section class="card">
+                <div class="card-head">
                   <h2>Selected Video</h2>
                   <span class="badge good">Copy mode</span>
                 </div>
@@ -551,6 +622,7 @@
                 <button class="nav-item" type="button">Video</button>
                 <button class="nav-item" type="button">YouTube</button>
                 <button class="nav-item" type="button">History</button>
+                <button class="nav-item" type="button">Settings</button>
               </nav>
             </footer>
           </div>
@@ -614,6 +686,7 @@
                 <button class="nav-item active" type="button">Video</button>
                 <button class="nav-item" type="button">YouTube</button>
                 <button class="nav-item" type="button">History</button>
+                <button class="nav-item" type="button">Settings</button>
               </nav>
             </footer>
           </div>
@@ -696,6 +769,7 @@
                 <button class="nav-item" type="button">Video</button>
                 <button class="nav-item active" type="button">YouTube</button>
                 <button class="nav-item" type="button">History</button>
+                <button class="nav-item" type="button">Settings</button>
               </nav>
             </footer>
           </div>
@@ -775,6 +849,55 @@
                 <button class="nav-item" type="button">Video</button>
                 <button class="nav-item" type="button">YouTube</button>
                 <button class="nav-item" type="button">History</button>
+                <button class="nav-item" type="button">Settings</button>
+              </nav>
+            </footer>
+          </div>
+        </article>
+
+        <article class="phone" aria-label="Settings screen">
+          <div class="screen">
+            <header class="app-top">
+              <div class="brand-row">
+                <div class="brand"><span class="brand-mark">C</span>Settings</div>
+                <span class="chip">Inside Us</span>
+              </div>
+            </header>
+
+            <section class="screen-body">
+              <section class="card">
+                <div class="card-head">
+                  <h2>Desktop Sync</h2>
+                  <span class="badge good">Ready</span>
+                </div>
+                <label class="field-label">QR pairing link</label>
+                <div class="input-like tall">castarro://pair?host=192.168.100.100...</div>
+                <div class="toggle-row">
+                  <span>Sync video files too</span>
+                  <span class="switch-on"></span>
+                </div>
+                <div class="action-bar inline">
+                  <button class="button ghost" type="button">Scan QR</button>
+                  <button class="button primary" type="button">Sync</button>
+                </div>
+              </section>
+
+              <section class="card">
+                <h2>Stream Protection</h2>
+                <div class="readiness-row">
+                  <div class="video-title"><strong>Battery</strong><span>Unrestricted mode</span></div>
+                  <span class="badge good">OK</span>
+                </div>
+              </section>
+            </section>
+
+            <footer>
+              <nav class="bottom-nav" aria-label="Primary">
+                <button class="nav-item" type="button">Home</button>
+                <button class="nav-item" type="button">Video</button>
+                <button class="nav-item" type="button">YouTube</button>
+                <button class="nav-item" type="button">History</button>
+                <button class="nav-item active" type="button">Settings</button>
               </nav>
             </footer>
           </div>

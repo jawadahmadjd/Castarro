@@ -10,6 +10,7 @@ const HEALTHCHECK_TIMEOUT_MS = 30000;
 const HEALTHCHECK_INTERVAL_MS = 500;
 const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const TRAY_TOOLTIP_REFRESH_MS = 5000;
+const GPU_METRICS_CACHE_MS = 10000;
 const PRODUCT_NAME = "Castarro";
 const LEGACY_PRODUCT_NAME = ["FFmpeg", "Live", "Streaming"].join(" ");
 const BACKEND_INFO_FILE = "backend-info.json";
@@ -30,6 +31,8 @@ let trayStatusTimer = null;
 let lastTrayTooltip = "";
 let lastTrayStatusLabel = "";
 const externalCpuSamples = new Map();
+let gpuMetricsCache = { key: "", sampledAt: 0, ok: false, items: [] };
+let gpuMetricsInFlight = null;
 const updateState = {
   status: "idle",
   version: null,
@@ -50,6 +53,10 @@ function memoryBytesFromElectronMetric(metric) {
   return Math.max(0, Math.round(workingSet * 1024));
 }
 
+function uniquePids(pids) {
+  return [...new Set((pids || []).map((pid) => Math.floor(Number(pid))).filter((pid) => pid > 0))];
+}
+
 function electronProcessMetrics() {
   try {
     return app.getAppMetrics().map((metric) => ({
@@ -65,7 +72,7 @@ function electronProcessMetrics() {
 }
 
 function queryWindowsProcesses(pids) {
-  const ids = [...new Set((pids || []).map((pid) => Math.floor(Number(pid))).filter((pid) => pid > 0))];
+  const ids = uniquePids(pids);
   if (!ids.length || process.platform !== "win32") return Promise.resolve([]);
   const command = `$ids=@(${ids.join(",")}); Get-Process -Id $ids -ErrorAction SilentlyContinue | Select-Object Id,ProcessName,CPU,WorkingSet64 | ConvertTo-Json -Compress`;
   return new Promise((resolve) => {
@@ -112,24 +119,92 @@ function queryWindowsProcesses(pids) {
   });
 }
 
+function normalizeGpuSnapshot(parsed) {
+  const rawItems = Array.isArray(parsed?.items) ? parsed.items : parsed?.items ? [parsed.items] : [];
+  return {
+    ok: Boolean(parsed?.ok),
+    items: rawItems
+      .map((item) => ({
+        pid: Math.floor(safeNumber(item?.pid ?? item?.Id, 0)),
+        gpuPercent: Math.max(0, safeNumber(item?.gpuPercent ?? item?.GpuPercent, 0)),
+      }))
+      .filter((item) => item.pid > 0),
+  };
+}
+
+function queryWindowsGpuUsage(pids) {
+  const ids = uniquePids(pids);
+  if (!ids.length || process.platform !== "win32") {
+    return Promise.resolve({ ok: false, items: [] });
+  }
+  const key = ids.join(",");
+  const nowMs = Date.now();
+  if (gpuMetricsCache.key === key && nowMs - gpuMetricsCache.sampledAt < GPU_METRICS_CACHE_MS) {
+    return Promise.resolve(gpuMetricsCache);
+  }
+  if (gpuMetricsInFlight && gpuMetricsInFlight.key === key) {
+    return gpuMetricsInFlight.promise;
+  }
+  const command = `$ids=@(${ids.join(",")}); try { $usage=@{}; Get-CimInstance Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine -ErrorAction Stop | ForEach-Object { $name=[string]$_.Name; if($name -match '^pid_(\\d+)_'){ $pid=[int]$matches[1]; if($ids -contains $pid){ $current=0.0; if($usage.ContainsKey($pid)){ $current=[double]$usage[$pid] }; $usage[$pid]=$current+[double]$_.UtilizationPercentage } } }; $items=foreach($id in $ids){ $value=0.0; if($usage.ContainsKey($id)){ $value=[double]$usage[$id] }; [pscustomobject]@{ pid=$id; gpuPercent=[math]::Min(100,[math]::Round($value,1)) } }; [pscustomobject]@{ ok=$true; items=$items } | ConvertTo-Json -Compress -Depth 4 } catch { [pscustomobject]@{ ok=$false; items=@() } | ConvertTo-Json -Compress -Depth 4 }`;
+  const promise = new Promise((resolve) => {
+    execFile(
+      "powershell.exe",
+      ["-NoProfile", "-Command", command],
+      { windowsHide: true, timeout: 5000, maxBuffer: 1024 * 1024 },
+      (error, stdout) => {
+        if (error || !String(stdout || "").trim()) {
+          if (error) diagnosticLog("windows gpu metrics failed", error);
+          resolve({ ok: false, items: [] });
+          return;
+        }
+        try {
+          const snapshot = normalizeGpuSnapshot(JSON.parse(stdout));
+          if (snapshot.ok) {
+            gpuMetricsCache = { key, sampledAt: Date.now(), ...snapshot };
+          }
+          resolve(snapshot);
+        } catch (parseError) {
+          diagnosticLog("windows gpu metrics parse failed", parseError);
+          resolve({ ok: false, items: [] });
+        }
+      },
+    );
+  }).finally(() => {
+    if (gpuMetricsInFlight?.key === key) gpuMetricsInFlight = null;
+  });
+  gpuMetricsInFlight = { key, promise };
+  return promise;
+}
+
 async function collectUsageMetrics(payload = {}) {
   const streamPids = Array.isArray(payload?.pids) ? payload.pids : [];
   const backendPid = backend?.pid || readBackendInfo()?.pid || null;
   const externalPids = [backendPid, ...streamPids].filter(Boolean);
   const electronMetrics = electronProcessMetrics();
-  const externalMetrics = await queryWindowsProcesses(externalPids);
-  const processes = [...electronMetrics, ...externalMetrics].filter((item) => item.pid > 0);
+  const trackedPids = [...electronMetrics.map((item) => item.pid), ...externalPids];
+  const [externalMetrics, gpuSnapshot] = await Promise.all([
+    queryWindowsProcesses(externalPids),
+    queryWindowsGpuUsage(trackedPids),
+  ]);
+  const gpuByPid = new Map((gpuSnapshot.items || []).map((item) => [item.pid, item.gpuPercent]));
+  const processes = [...electronMetrics, ...externalMetrics]
+    .filter((item) => item.pid > 0)
+    .map((item) => ({
+      ...item,
+      gpuPercent: Math.max(0, safeNumber(gpuByPid.get(item.pid), 0)),
+    }));
   const cpuPercent = processes.reduce((sum, item) => sum + safeNumber(item.cpuPercent, 0), 0);
   const memoryBytes = processes.reduce((sum, item) => sum + safeNumber(item.memoryBytes, 0), 0);
+  const gpuPercent = Math.min(100, processes.reduce((sum, item) => sum + safeNumber(item.gpuPercent, 0), 0));
   return {
     cpuPercent,
+    gpuPercent,
     memoryBytes,
     processes,
-    batteryToday: {
-      status: "unavailable",
-      label: "Unavailable",
-      detail: "Windows does not expose exact per-app battery consumption to a normal desktop app.",
-    },
+    gpuStatus: gpuSnapshot.ok ? "available" : "unavailable",
+    gpuDetail: gpuSnapshot.ok
+      ? "Estimated GPU utilization across Castarro, backend, and FFmpeg processes."
+      : "GPU usage is unavailable on this Windows device.",
   };
 }
 

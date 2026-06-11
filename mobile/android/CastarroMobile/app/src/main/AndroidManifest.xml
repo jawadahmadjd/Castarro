@@ -14,6 +14,7 @@
         android:allowBackup="true"
         android:icon="@drawable/ic_castarro"
         android:label="Castarro"
+        android:networkSecurityConfig="@xml/network_security_config"
         android:roundIcon="@drawable/ic_castarro"
         android:supportsRtl="true"
         android:theme="@style/Theme.CastarroMobile">
@@ -30,5 +31,9 @@
             android:name=".streaming.StreamForegroundService"
             android:exported="false"
             android:foregroundServiceType="dataSync|mediaPlayback" />
+        <service
+            android:name=".data.sync.DesktopVideoDownloadForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
     </application>
 </manifest>

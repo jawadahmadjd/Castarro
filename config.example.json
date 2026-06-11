@@ -61,6 +61,27 @@
     "default_auto_start": true,
     "default_auto_stop": true
   },
+  "storage": {
+    "providers": [
+      {
+        "id": "google-drive-main",
+        "type": "googleDrive",
+        "display_name": "Google Drive",
+        "auth_mode": "oauth",
+        "tokens_file": ".runtime/google_drive_tokens_google-drive-main.json",
+        "account_email": "",
+        "status": ""
+      }
+    ],
+    "source_proxy": {
+      "host": "127.0.0.1",
+      "port": 8876,
+      "cache_dir": ".runtime/cloud-cache",
+      "startup_buffer_mb": 64,
+      "max_cache_mb": 2048,
+      "spool_before_start": false
+    }
+  },
   "ui": {
     "channel_workspace_enabled": false,
     "legacy_tabs_enabled": true
@@ -74,6 +95,7 @@
         "Raw Videos/channel_1/video-001.mp4"
       ],
       "playlist": [],
+      "cloud_playlist": [],
       "normalize_profile": {
         "width": 1920,
         "height": 1080,

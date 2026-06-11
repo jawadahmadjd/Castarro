@@ -101,6 +101,48 @@ def concat_escape(path: Path) -> str:
     return "file '" + text.replace("'", "'\\''") + "'"
 
 
+def source_url(value: str) -> bool:
+    text = str(value or "").strip().lower()
+    return text.startswith("http://") or text.startswith("https://")
+
+
+def concat_escape_source(value: str | Path) -> str:
+    if isinstance(value, Path):
+        return concat_escape(value)
+    text = str(value or "").strip()
+    if source_url(text):
+        return "file '" + text.replace("'", "'\\''") + "'"
+    return concat_escape(Path(text))
+
+
+def cloud_playlist_sources(channel: dict[str, Any]) -> list[str]:
+    sources: list[str] = []
+    raw = channel.get("cloud_playlist", [])
+    if not isinstance(raw, list):
+        return sources
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        source = str(
+            item.get("proxy_url")
+            or item.get("source_url")
+            or item.get("sourceUri")
+            or item.get("source_uri")
+            or ""
+        ).strip()
+        if source_url(source):
+            sources.append(source)
+            continue
+        provider_id = str(item.get("provider_id") or item.get("providerId") or "").strip()
+        file_id = str(item.get("file_id") or item.get("provider_file_id") or item.get("providerFileId") or "").strip()
+        label = str(item.get("display_name") or item.get("displayName") or file_id or "cloud video").strip()
+        if provider_id or file_id:
+            raise SystemExit(
+                f"Cloud video '{label}' for channel '{channel.get('name')}' has not been prepared by the source proxy yet."
+            )
+    return sources
+
+
 def discover_go_live_files(config_dir: Path, defaults: dict[str, Any], channel: dict[str, Any]) -> list[Path]:
     go_live_root = resolve_path(config_dir, defaults.get("normalized_dir", "Go Live"))
     channel_dir = go_live_root / str(channel["name"])
@@ -117,22 +159,29 @@ def write_concat_playlist(
     config_dir: Path,
     runtime_dir: Path,
     channel: dict[str, Any],
-) -> Path:
+) -> tuple[Path, bool]:
     playlist = channel.get("playlist")
+    network_inputs = False
     if not playlist:
-        discovered = discover_go_live_files(config_dir, defaults, channel)
+        cloud_sources = cloud_playlist_sources(channel)
+        if cloud_sources:
+            playlist = cloud_sources
+            network_inputs = True
+        discovered = [] if playlist else discover_go_live_files(config_dir, defaults, channel)
         if not discovered:
-            raise SystemExit(
-                f"Channel '{channel.get('name')}' has no playlist and no videos in "
-                f"{defaults.get('normalized_dir', 'Go Live')}/{channel.get('name')}."
-            )
-        playlist = [str(path) for path in discovered]
+            if not playlist:
+                raise SystemExit(
+                    f"Channel '{channel.get('name')}' has no playlist and no videos in "
+                    f"{defaults.get('normalized_dir', 'Go Live')}/{channel.get('name')}."
+                )
+        if not playlist:
+            playlist = [str(path) for path in discovered]
 
     if isinstance(playlist, str):
         playlist_path = resolve_path(config_dir, playlist)
         if not playlist_path.exists():
             raise SystemExit(f"Playlist file does not exist: {playlist_path}")
-        return playlist_path
+        return playlist_path, False
 
     if not isinstance(playlist, list):
         raise SystemExit(f"Channel '{channel.get('name')}' playlist must be a list or file path.")
@@ -143,17 +192,22 @@ def write_concat_playlist(
     lines: list[str] = []
     missing: list[Path] = []
     for item in playlist:
-        media_path = resolve_path(config_dir, str(item))
+        text = str(item)
+        if source_url(text):
+            network_inputs = True
+            lines.append(concat_escape_source(text))
+            continue
+        media_path = resolve_path(config_dir, text)
         if not media_path.exists():
             missing.append(media_path)
-        lines.append(concat_escape(media_path))
+        lines.append(concat_escape_source(media_path))
 
     if missing:
         formatted = "\n".join(f"  - {path}" for path in missing)
         raise SystemExit(f"Missing media files for '{channel.get('name')}':\n{formatted}")
 
     playlist_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return playlist_path
+    return playlist_path, network_inputs
 
 
 def output_url(channel: dict[str, Any], defaults: dict[str, Any]) -> str:
@@ -424,9 +478,14 @@ def build_command(
 ) -> tuple[list[str], Path, str, str | None]:
     defaults = config.get("defaults", {})
     runtime_dir = resolve_path(config_dir, defaults.get("runtime_dir", ".runtime"))
-    playlist_path = write_concat_playlist(defaults, config_dir, runtime_dir, channel)
+    playlist_path, has_network_inputs = write_concat_playlist(defaults, config_dir, runtime_dir, channel)
     ffmpeg = str(channel.get("ffmpeg_path") or defaults.get("ffmpeg_path", "ffmpeg"))
     url = output_url(channel, defaults)
+    if has_network_inputs and transcode_enabled(config, channel):
+        raise SystemExit(
+            f"Channel '{channel.get('name')}' uses cloud/network source inputs, so live transcoding is blocked. "
+            "Use copy mode or normalize the videos before streaming."
+        )
 
     command = [
         ffmpeg,
@@ -439,6 +498,7 @@ def build_command(
         command += ["-stream_loop", "-1"]
 
     command += [
+        *(["-protocol_whitelist", "file,http,https,tcp,tls,crypto"] if has_network_inputs else []),
         "-f",
         "concat",
         "-safe",
@@ -504,12 +564,86 @@ def build_command(
     return command, playlist_path, url, preview_warning
 
 
-def log_path(config_dir: Path, config: dict[str, Any], channel: dict[str, Any]) -> Path:
+def log_path(
+    config_dir: Path,
+    config: dict[str, Any],
+    channel: dict[str, Any],
+    *,
+    suffix: str = "",
+) -> Path:
     defaults = config.get("defaults", {})
     log_dir = resolve_path(config_dir, defaults.get("log_dir", "logs"))
     log_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    return log_dir / f"{channel['name']}-{stamp}.log"
+    safe_suffix = f"-{suffix}" if suffix else ""
+    return log_dir / f"{channel['name']}{safe_suffix}-{stamp}.log"
+
+
+def build_preview_command(
+    config_dir: Path,
+    config: dict[str, Any],
+    channel: dict[str, Any],
+    preview_manifest: Path,
+) -> tuple[list[str], Path, str | None]:
+    defaults = config.get("defaults", {})
+    runtime_dir = resolve_path(config_dir, defaults.get("runtime_dir", ".runtime"))
+    playlist_path, has_network_inputs = write_concat_playlist(defaults, config_dir, runtime_dir, channel)
+    ffmpeg = str(channel.get("ffmpeg_path") or defaults.get("ffmpeg_path", "ffmpeg"))
+
+    command = [
+        ffmpeg,
+        "-hide_banner",
+        "-nostdin",
+        "-re",
+    ]
+
+    if channel.get("loop", True):
+        command += ["-stream_loop", "-1"]
+
+    command += [
+        *(["-protocol_whitelist", "file,http,https,tcp,tls,crypto"] if has_network_inputs else []),
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        str(playlist_path),
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a:0?",
+    ]
+
+    output_args = ["-c", "copy"]
+    if transcode_enabled(config, channel):
+        output_args = transcode_args(config, channel)
+    preview_warning: str | None = None
+
+    if not transcode_enabled(config, channel):
+        copy_safe, _issues = preview_copy_compatibility(config, channel, defaults, playlist_path)
+        if not copy_safe:
+            preview_warning = (
+                "Provided video is not fully compatible and you have to normalize the video first to get live preview."
+            )
+
+    segment_pattern = preview_manifest.parent / "segment_%05d.ts"
+    command += [
+        *output_args,
+        "-hls_time",
+        "2",
+        "-hls_list_size",
+        "6",
+        "-hls_flags",
+        "delete_segments+append_list+omit_endlist",
+        "-hls_segment_type",
+        "mpegts",
+        "-hls_segment_filename",
+        str(segment_pattern),
+        "-f",
+        "hls",
+        str(preview_manifest),
+    ]
+    return command, playlist_path, preview_warning
 
 
 def start_stream(
@@ -539,6 +673,42 @@ def start_stream(
         creationflags=windows_creation_flags(new_process_group=True),
     )
     print(f"[{channel['name']}] pid: {process.pid}")
+    return RunningStream(
+        channel=channel,
+        process=process,
+        log_handle=log_handle,
+        command=command,
+        preview_manifest=preview_manifest,
+        preview_warning=preview_warning,
+    )
+
+
+def start_preview_stream(
+    config_dir: Path,
+    config: dict[str, Any],
+    channel: dict[str, Any],
+    preview_manifest: Path,
+) -> RunningStream:
+    preview_manifest.parent.mkdir(parents=True, exist_ok=True)
+    clear_directory(preview_manifest.parent)
+    command, _playlist_path, preview_warning = build_preview_command(config_dir, config, channel, preview_manifest)
+    path = log_path(config_dir, config, channel, suffix="preview")
+    log_handle = path.open("ab")
+    if preview_warning:
+        log_handle.write((f"PREVIEW_WARNING {preview_warning}\n").encode("utf-8", errors="replace"))
+        log_handle.flush()
+
+    print(f"[{channel['name']}] preview starting")
+    print(f"[{channel['name']}] preview log: {path}")
+
+    process = subprocess.Popen(
+        command,
+        cwd=str(config_dir),
+        stdout=log_handle,
+        stderr=subprocess.STDOUT,
+        creationflags=windows_creation_flags(new_process_group=True),
+    )
+    print(f"[{channel['name']}] preview pid: {process.pid}")
     return RunningStream(
         channel=channel,
         process=process,
