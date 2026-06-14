@@ -19,6 +19,9 @@ contextBridge.exposeInMainWorld("desktopShell", {
   getUsageMetrics(payload = {}) {
     return ipcRenderer.invoke("desktop:get-usage-metrics", payload);
   },
+  showNotification(payload = {}) {
+    return ipcRenderer.invoke("desktop:show-notification", payload);
+  },
   selectFolder(options = {}) {
     return ipcRenderer.invoke("desktop:select-folder", options);
   },

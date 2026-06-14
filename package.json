@@ -1,6 +1,6 @@
 {
   "name": "castarro-desktop",
-  "version": "1.1.7",
+  "version": "1.1.8",
   "description": "Windows desktop package for Castarro, a local multi-channel live streaming dashboard.",
   "main": "desktop/main.js",
   "author": "Jawad Ahmad",
@@ -21,6 +21,7 @@
     "test:workspace-contract": "python tests/channel_workspace_contract_test.py",
     "test:mobile-contracts": "python tests/mobile_shared_core_contract_test.py",
     "test:workspace-ui": "node tests/screenshots/channel-workspace-e2e.js",
+    "test:storage-ui": "node tests/screenshots/capture-storage-cloud-ui.js",
     "screenshot:mobile": "node tests/screenshots/capture-mobile-app-skin.js",
     "verify:mobile": "powershell -ExecutionPolicy Bypass -File scripts/verify_android_mobile.ps1",
     "verify:signature": "powershell -ExecutionPolicy Bypass -File scripts/verify_windows_signature.ps1",

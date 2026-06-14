@@ -15,6 +15,7 @@ import signal
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -63,6 +64,13 @@ class RunningStream:
     command: list[str]
     preview_manifest: Path | None = None
     preview_warning: str | None = None
+    log_thread: threading.Thread | None = None
+    monitor_thread: threading.Thread | None = None
+    started_monotonic: float = 0.0
+    kind: str = "stream"
+    masked_output_url: str | None = None
+    playlist_path: Path | None = None
+    stop_requested: bool = False
 
 
 def load_config(config_path: Path) -> tuple[dict[str, Any], Path]:
@@ -254,6 +262,135 @@ def mask_url(url: str) -> str:
         return "***"
     prefix, _key = url.rsplit("/", 1)
     return f"{prefix}/***"
+
+
+def stream_log_level(config: dict[str, Any], channel: dict[str, Any]) -> str:
+    defaults = config.get("defaults", {})
+    value = str(channel.get("stream_log_level") or defaults.get("stream_log_level") or "").strip()
+    return value or "repeat+level+verbose"
+
+
+def log_timestamp() -> str:
+    return datetime.now().astimezone().isoformat(timespec="milliseconds")
+
+
+def write_log_line(log_handle: Any, line: str) -> None:
+    text = str(line)
+    if not text.endswith("\n"):
+        text += "\n"
+    try:
+        log_handle.write(text)
+    except TypeError:
+        log_handle.write(text.encode("utf-8", errors="replace"))
+    log_handle.flush()
+
+
+def write_timestamped_log_line(log_handle: Any, message: str) -> None:
+    write_log_line(log_handle, f"{log_timestamp()} | {message}")
+
+
+def signed_returncode(returncode: int | None) -> int | None:
+    if returncode is None:
+        return None
+    if returncode > 0x7FFFFFFF:
+        return returncode - 0x100000000
+    return returncode
+
+
+def describe_returncode(returncode: int | None, *, stop_requested: bool = False) -> str:
+    if returncode is None:
+        return "still running"
+
+    signed = signed_returncode(returncode)
+    if signed == 0:
+        return "stopped by user request" if stop_requested else "completed successfully"
+
+    windows_errors = {
+        -10053: "network connection aborted locally (WSAECONNABORTED)",
+        -10054: "network connection reset by remote host (WSAECONNRESET)",
+        -10060: "network connection timed out (WSAETIMEDOUT)",
+        -1073741510: "interrupted by console control signal",
+    }
+    if signed in windows_errors:
+        if stop_requested and signed == -1073741510:
+            return "stopped by user request"
+        return windows_errors[signed]
+
+    if stop_requested:
+        return "stopped by user request"
+
+    if signed is not None and signed < 0:
+        return f"windows error {signed}"
+    return f"exit code {signed}"
+
+
+def log_session_header(
+    stream: RunningStream,
+    *,
+    channel_name: str,
+    log_path: Path,
+    command_text: str,
+) -> None:
+    write_timestamped_log_line(
+        stream.log_handle,
+        f"SESSION_START kind={stream.kind} channel={json.dumps(channel_name)} pid={stream.process.pid}",
+    )
+    write_timestamped_log_line(stream.log_handle, f"SESSION_LOG_PATH {log_path}")
+    if stream.masked_output_url:
+        write_timestamped_log_line(stream.log_handle, f"SESSION_OUTPUT {stream.masked_output_url}")
+    if stream.playlist_path:
+        write_timestamped_log_line(stream.log_handle, f"SESSION_PLAYLIST {stream.playlist_path}")
+    if stream.preview_manifest:
+        write_timestamped_log_line(stream.log_handle, f"SESSION_PREVIEW_MANIFEST {stream.preview_manifest}")
+    write_timestamped_log_line(stream.log_handle, f"SESSION_COMMAND {command_text}")
+    if stream.preview_warning:
+        write_timestamped_log_line(stream.log_handle, f"PREVIEW_WARNING {stream.preview_warning}")
+
+
+def pump_process_output(stream: RunningStream) -> None:
+    stdout = stream.process.stdout
+    if stdout is None:
+        return
+    try:
+        for raw_line in stdout:
+            line = raw_line.rstrip("\r\n")
+            if not line:
+                continue
+            write_timestamped_log_line(stream.log_handle, line)
+    finally:
+        try:
+            stdout.close()
+        except Exception:
+            pass
+
+
+def monitor_stream_exit(stream: RunningStream) -> None:
+    returncode = stream.process.wait()
+    if stream.log_thread and stream.log_thread.is_alive():
+        stream.log_thread.join(timeout=2)
+    duration_seconds = max(0.0, time.monotonic() - stream.started_monotonic)
+    signed = signed_returncode(returncode)
+    reason = describe_returncode(returncode, stop_requested=stream.stop_requested)
+    write_timestamped_log_line(
+        stream.log_handle,
+        "SESSION_EXIT "
+        f"kind={stream.kind} "
+        f"channel={json.dumps(str(stream.channel.get('name') or '<unnamed>'))} "
+        f"pid={stream.process.pid} "
+        f"returncode={returncode} "
+        f"signed_returncode={signed} "
+        f"reason={json.dumps(reason)} "
+        f"duration_seconds={duration_seconds:.3f}",
+    )
+
+
+def close_stream_log(stream: RunningStream) -> None:
+    if stream.monitor_thread and stream.monitor_thread.is_alive():
+        stream.monitor_thread.join(timeout=3)
+    if stream.log_thread and stream.log_thread.is_alive():
+        stream.log_thread.join(timeout=1)
+    if not getattr(stream.log_handle, "closed", False):
+        stream.log_handle.close()
 
 
 def infer_inline_key_from_env_field(value: str | None) -> str | None:
@@ -489,8 +626,13 @@ def build_command(
 
     command = [
         ffmpeg,
-        "-hide_banner",
+        "-loglevel",
+        stream_log_level(config, channel),
         "-nostdin",
+        "-progress",
+        "pipe:1",
+        "-stats_period",
+        "1",
         "-re",
     ]
 
@@ -592,8 +734,13 @@ def build_preview_command(
 
     command = [
         ffmpeg,
-        "-hide_banner",
+        "-loglevel",
+        stream_log_level(config, channel),
         "-nostdin",
+        "-progress",
+        "pipe:1",
+        "-stats_period",
+        "1",
         "-re",
     ]
 
@@ -655,32 +802,49 @@ def start_stream(
     if preview_manifest is not None:
         preview_manifest.parent.mkdir(parents=True, exist_ok=True)
         clear_directory(preview_manifest.parent)
-    command, _playlist_path, url, preview_warning = build_command(config_dir, config, channel, preview_manifest)
+    command, playlist_path, url, preview_warning = build_command(config_dir, config, channel, preview_manifest)
     path = log_path(config_dir, config, channel)
-    log_handle = path.open("ab")
-    if preview_warning:
-        log_handle.write((f"PREVIEW_WARNING {preview_warning}\n").encode("utf-8", errors="replace"))
-        log_handle.flush()
+    log_handle = path.open("a", encoding="utf-8", buffering=1)
+    masked_url = mask_url(url)
 
-    print(f"[{channel['name']}] starting -> {mask_url(url)}")
+    print(f"[{channel['name']}] starting -> {masked_url}")
     print(f"[{channel['name']}] log: {path}")
 
     process = subprocess.Popen(
         command,
         cwd=str(config_dir),
-        stdout=log_handle,
+        stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        bufsize=1,
         creationflags=windows_creation_flags(new_process_group=True),
     )
-    print(f"[{channel['name']}] pid: {process.pid}")
-    return RunningStream(
+    running = RunningStream(
         channel=channel,
         process=process,
         log_handle=log_handle,
         command=command,
         preview_manifest=preview_manifest,
         preview_warning=preview_warning,
+        started_monotonic=time.monotonic(),
+        kind="stream",
+        masked_output_url=masked_url,
+        playlist_path=playlist_path,
     )
+    log_session_header(
+        running,
+        channel_name=str(channel["name"]),
+        log_path=path,
+        command_text=command_as_text_with_masked_url(command, url, masked_url),
+    )
+    running.log_thread = threading.Thread(target=pump_process_output, args=(running,), daemon=True)
+    running.monitor_thread = threading.Thread(target=monitor_stream_exit, args=(running,), daemon=True)
+    running.log_thread.start()
+    running.monitor_thread.start()
+    print(f"[{channel['name']}] pid: {process.pid}")
+    return running
 
 
 def start_preview_stream(
@@ -691,12 +855,9 @@ def start_preview_stream(
 ) -> RunningStream:
     preview_manifest.parent.mkdir(parents=True, exist_ok=True)
     clear_directory(preview_manifest.parent)
-    command, _playlist_path, preview_warning = build_preview_command(config_dir, config, channel, preview_manifest)
+    command, playlist_path, preview_warning = build_preview_command(config_dir, config, channel, preview_manifest)
     path = log_path(config_dir, config, channel, suffix="preview")
-    log_handle = path.open("ab")
-    if preview_warning:
-        log_handle.write((f"PREVIEW_WARNING {preview_warning}\n").encode("utf-8", errors="replace"))
-        log_handle.flush()
+    log_handle = path.open("a", encoding="utf-8", buffering=1)
 
     print(f"[{channel['name']}] preview starting")
     print(f"[{channel['name']}] preview log: {path}")
@@ -704,25 +865,40 @@ def start_preview_stream(
     process = subprocess.Popen(
         command,
         cwd=str(config_dir),
-        stdout=log_handle,
+        stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        bufsize=1,
         creationflags=windows_creation_flags(new_process_group=True),
     )
-    print(f"[{channel['name']}] preview pid: {process.pid}")
-    return RunningStream(
+    running = RunningStream(
         channel=channel,
         process=process,
         log_handle=log_handle,
         command=command,
         preview_manifest=preview_manifest,
         preview_warning=preview_warning,
+        started_monotonic=time.monotonic(),
+        kind="preview",
+        playlist_path=playlist_path,
     )
+    log_session_header(running, channel_name=str(channel["name"]), log_path=path, command_text=subprocess.list2cmdline(command))
+    running.log_thread = threading.Thread(target=pump_process_output, args=(running,), daemon=True)
+    running.monitor_thread = threading.Thread(target=monitor_stream_exit, args=(running,), daemon=True)
+    running.log_thread.start()
+    running.monitor_thread.start()
+    print(f"[{channel['name']}] preview pid: {process.pid}")
+    return running
 
 
 def stop_stream(stream: RunningStream) -> None:
     name = stream.channel.get("name", "<unnamed>")
     if stream.process.poll() is None:
+        stream.stop_requested = True
         print(f"[{name}] stopping pid {stream.process.pid}")
+        write_timestamped_log_line(stream.log_handle, f"STOP_REQUEST kind={stream.kind} pid={stream.process.pid}")
         try:
             if os.name == "nt":
                 stream.process.send_signal(signal.CTRL_BREAK_EVENT)
@@ -740,11 +916,16 @@ def stop_stream(stream: RunningStream) -> None:
         except subprocess.TimeoutExpired:
             stream.process.kill()
 
-    stream.log_handle.close()
+    close_stream_log(stream)
 
 
 def command_as_text(command: list[str], masked_url: str) -> str:
     safe = command[:-1] + [masked_url]
+    return subprocess.list2cmdline(safe)
+
+
+def command_as_text_with_masked_url(command: list[str], url: str, masked_url: str) -> str:
+    safe = [masked_url if part == url else part for part in command]
     return subprocess.list2cmdline(safe)
 
 
@@ -775,7 +956,7 @@ def start_all(config_path: Path, channel_name: str | None) -> None:
 
                 if stream:
                     exit_code = stream.process.returncode
-                    stream.log_handle.close()
+                    close_stream_log(stream)
                     running.pop(name, None)
                     print(f"[{name}] exited with code {exit_code}")
 

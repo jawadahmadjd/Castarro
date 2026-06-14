@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Castarro Mobile Remote Control Mock</title>
+    <style>
+      :root {
+        --bg: #f3ede0;
+        --card: rgba(255, 250, 240, 0.94);
+        --card-soft: rgba(246, 238, 225, 0.92);
+        --ink: #2b2417;
+        --muted: #6f6555;
+        --line: rgba(53, 43, 25, 0.12);
+        --green: #1e7a63;
+        --amber: #b77a25;
+        --red: #b34733;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        font-family: "Segoe UI", Tahoma, sans-serif;
+        color: var(--ink);
+        background:
+          radial-gradient(circle at top left, rgba(190, 218, 203, 0.55), transparent 34%),
+          linear-gradient(160deg, #f8f3e8 0%, #ede3d3 100%);
+        display: grid;
+        place-items: center;
+        padding: 32px;
+      }
+
+      .stage {
+        display: grid;
+        gap: 24px;
+        grid-template-columns: repeat(auto-fit, minmax(320px, 390px));
+        align-items: start;
+        justify-content: center;
+        width: min(100%, 920px);
+      }
+
+      .phone {
+        border-radius: 32px;
+        background: #1e1b17;
+        padding: 14px;
+        box-shadow: 0 24px 80px rgba(43, 33, 16, 0.25);
+      }
+
+      .screen {
+        border-radius: 24px;
+        overflow: hidden;
+        background: var(--bg);
+        min-height: 760px;
+      }
+
+      .header {
+        padding: 20px 20px 14px;
+        background: linear-gradient(180deg, #1f6f62 0%, #295649 100%);
+        color: #fffaf0;
+      }
+
+      .header h1,
+      .card h2,
+      .card h3,
+      p {
+        margin: 0;
+      }
+
+      .header p {
+        margin-top: 8px;
+        color: rgba(255, 250, 240, 0.78);
+      }
+
+      .content {
+        padding: 16px;
+        display: grid;
+        gap: 14px;
+      }
+
+      .card {
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: 22px;
+        padding: 16px;
+        display: grid;
+        gap: 12px;
+      }
+
+      .subtle {
+        color: var(--muted);
+        font-size: 14px;
+        line-height: 1.45;
+      }
+
+      .status-row,
+      .button-row,
+      .metrics {
+        display: grid;
+        gap: 10px;
+      }
+
+      .status-row {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+
+      .pill,
+      .metric,
+      .alert {
+        border-radius: 16px;
+        padding: 12px;
+        background: var(--card-soft);
+        border: 1px solid var(--line);
+      }
+
+      .pill strong,
+      .metric strong,
+      .alert strong {
+        display: block;
+      }
+
+      .button-row {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+
+      .button {
+        border-radius: 16px;
+        border: none;
+        padding: 14px 12px;
+        font-weight: 700;
+        color: #fffaf0;
+      }
+
+      .button.refresh {
+        background: #6f6555;
+      }
+
+      .button.start {
+        background: var(--green);
+      }
+
+      .button.restart {
+        background: var(--amber);
+      }
+
+      .metrics {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .alert {
+        border-left: 5px solid var(--amber);
+      }
+
+      .alert.danger {
+        border-left-color: var(--red);
+      }
+
+      .footer {
+        display: grid;
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+        gap: 8px;
+        padding: 14px 16px 20px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .footer span {
+        text-align: center;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="stage">
+      <section class="phone">
+        <div class="screen">
+          <header class="header">
+            <h1>Castarro</h1>
+            <p>Mobile stream - remote control paired</p>
+          </header>
+          <div class="content">
+            <article class="card">
+              <h2>Desktop remote control</h2>
+              <p class="subtle">Castarro Desktop is ready for health monitoring and channel control.</p>
+              <div class="status-row">
+                <div class="pill">
+                  <strong>Inside Us</strong>
+                  <span class="subtle">Selected channel</span>
+                </div>
+                <div class="pill">
+                  <strong>Running</strong>
+                  <span class="subtle">Desktop state</span>
+                </div>
+                <div class="pill">
+                  <strong>Watch</strong>
+                  <span class="subtle">Live health</span>
+                </div>
+              </div>
+              <div class="metrics">
+                <div class="metric">
+                  <strong>5.8 Mbps</strong>
+                  <span class="subtle">Avg bitrate</span>
+                </div>
+                <div class="metric">
+                  <strong>1.00x</strong>
+                  <span class="subtle">Realtime speed</span>
+                </div>
+                <div class="metric">
+                  <strong>Inside window</strong>
+                  <span class="subtle">Daily schedule</span>
+                </div>
+                <div class="metric">
+                  <strong>Next stop 5:00 PM</strong>
+                  <span class="subtle">Scheduler</span>
+                </div>
+              </div>
+              <div class="button-row">
+                <button class="button refresh">Refresh</button>
+                <button class="button start">Stop desktop</button>
+                <button class="button restart">Restart</button>
+              </div>
+            </article>
+
+            <article class="card">
+              <h3>Alerts from desktop</h3>
+              <div class="alert danger">
+                <strong>Inside Us connection needs attention</strong>
+                <span class="subtle">Stream is running, but frame delivery is below target.</span>
+              </div>
+              <div class="alert">
+                <strong>Scheduler started Inside Us</strong>
+                <span class="subtle">Daily schedule opened at 9:00 AM.</span>
+              </div>
+            </article>
+          </div>
+          <div class="footer">
+            <span>Home</span>
+            <span>Video</span>
+            <span>YouTube</span>
+            <span>History</span>
+            <span>Settings</span>
+          </div>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>

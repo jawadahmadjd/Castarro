@@ -70,7 +70,18 @@
         "auth_mode": "oauth",
         "tokens_file": ".runtime/google_drive_tokens_google-drive-main.json",
         "account_email": "",
-        "status": ""
+        "status": "",
+        "oauth": {
+          "client_id": "",
+          "client_secret": "",
+          "redirect_uri": "http://127.0.0.1:8765/oauth2redirect",
+          "oauth_client_type": "desktop",
+          "use_pkce": true,
+          "scopes": [
+            "https://www.googleapis.com/auth/drive.readonly",
+            "https://www.googleapis.com/auth/userinfo.email"
+          ]
+        }
       }
     ],
     "source_proxy": {
@@ -81,6 +92,23 @@
       "max_cache_mb": 2048,
       "spool_before_start": false
     }
+  },
+  "alerts": {
+    "desktop_notifications_enabled": true,
+    "mobile_notifications_enabled": true,
+    "cooldown_seconds": 300,
+    "rules": {
+      "stream_stopped": true,
+      "poor_connection": true,
+      "scheduler_started": true,
+      "scheduler_stopped": true
+    }
+  },
+  "scheduler": {
+    "enabled": false,
+    "timezone": "local",
+    "poll_seconds": 20,
+    "channels": []
   },
   "ui": {
     "channel_workspace_enabled": false,

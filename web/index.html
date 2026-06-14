@@ -150,6 +150,11 @@
             <div class="workspace-channel-skeleton skeleton-block"></div>
           </section>
 
+          <section class="panel" id="workspaceLiveMetricsPanel">
+            <div class="workspace-channel-skeleton skeleton-block"></div>
+            <div class="workspace-channel-skeleton skeleton-block"></div>
+          </section>
+
           <section class="panel workspace-sync-panel" id="workspaceSyncPanel">
             <div class="section-head">
               <div>
@@ -165,6 +170,19 @@
               <canvas id="syncQrCanvas" width="220" height="220" aria-label="Castarro pairing QR code"></canvas>
             </div>
             <div id="syncDeviceList" class="channel-settings-list"></div>
+          </section>
+
+          <section class="panel workspace-alerts-panel" id="workspaceAlertsPanel">
+            <div class="section-head">
+              <div>
+                <h2>Alerts</h2>
+                <p class="helper">Major stream and scheduler events for this channel.</p>
+              </div>
+              <span class="badge" id="workspaceAlertsBadge">0 alerts</span>
+            </div>
+            <div id="workspaceAlertsList" class="channel-settings-list">
+              <p class="helper">No recent alerts.</p>
+            </div>
           </section>
         </aside>
         </section>
@@ -203,6 +221,7 @@
               <button class="tab active" id="settingsNormalizeTab" type="button">Video Encoder</button>
               <button class="tab" id="settingsStorageTab" type="button">Storage</button>
               <button class="tab" id="settingsYoutubeTab" type="button">YouTube</button>
+              <button class="tab" id="settingsAutomationTab" type="button">Automation</button>
               <button class="tab" id="settingsLiveHistoryTab" type="button">Live History</button>
               <button class="tab" id="settingsTroubleshootingTab" type="button">Troubleshooting</button>
             </div>
@@ -249,6 +268,18 @@
               </div>
             </div>
             <div id="storageSettingsPanel"></div>
+          </section>
+        </section>
+
+        <section id="settingsAutomationView" class="settings-section">
+          <section class="panel">
+            <div class="section-head">
+              <div>
+                <h2>Automation</h2>
+                <p class="helper">Desktop and mobile alerts plus daily start and stop schedules.</p>
+              </div>
+            </div>
+            <div id="automationSettingsPanel"></div>
           </section>
         </section>
 

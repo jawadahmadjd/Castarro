@@ -7,6 +7,7 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.os.Build
+import androidx.core.app.NotificationCompat
 import com.castarro.mobile.data.sync.DesktopVideoDownloadForegroundService
 import com.castarro.mobile.streaming.StreamForegroundService
 
@@ -80,6 +81,23 @@ class NotificationFactory(private val context: Context) {
             .build()
     }
 
+    fun desktopRemoteAlertNotification(
+        channelName: String,
+        title: String,
+        detail: String,
+        severe: Boolean,
+    ): Notification {
+        ensureDesktopRemoteChannel()
+        return NotificationCompat.Builder(context, DESKTOP_REMOTE_CHANNEL_ID)
+            .setContentTitle(title.ifBlank { "$channelName needs attention" })
+            .setContentText(detail.ifBlank { channelName })
+            .setStyle(NotificationCompat.BigTextStyle().bigText(detail.ifBlank { channelName }))
+            .setSmallIcon(if (severe) android.R.drawable.stat_notify_error else android.R.drawable.stat_notify_more)
+            .setPriority(if (severe) NotificationCompat.PRIORITY_HIGH else NotificationCompat.PRIORITY_DEFAULT)
+            .setAutoCancel(true)
+            .build()
+    }
+
     private fun ensureChannel() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val manager = context.getSystemService(NotificationManager::class.java)
@@ -106,8 +124,22 @@ class NotificationFactory(private val context: Context) {
         manager.createNotificationChannel(channel)
     }
 
+    private fun ensureDesktopRemoteChannel() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        val manager = context.getSystemService(NotificationManager::class.java)
+        val channel = NotificationChannel(
+            DESKTOP_REMOTE_CHANNEL_ID,
+            "Desktop remote alerts",
+            NotificationManager.IMPORTANCE_DEFAULT,
+        ).apply {
+            description = "Desktop stream alerts received through Castarro remote control."
+        }
+        manager.createNotificationChannel(channel)
+    }
+
     companion object {
         const val CHANNEL_ID = "castarro_live_streaming"
         const val DESKTOP_SYNC_CHANNEL_ID = "castarro_desktop_sync_downloads"
+        const val DESKTOP_REMOTE_CHANNEL_ID = "castarro_desktop_remote_alerts"
     }
 }

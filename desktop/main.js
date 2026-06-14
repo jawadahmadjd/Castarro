@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, Tray, dialog, ipcMain, shell } = require("electron");
+const { app, BrowserWindow, Menu, Tray, dialog, ipcMain, shell, Notification } = require("electron");
 const { execFile, spawn } = require("child_process");
 const fs = require("fs");
 const http = require("http");
@@ -145,7 +145,7 @@ function queryWindowsGpuUsage(pids) {
   if (gpuMetricsInFlight && gpuMetricsInFlight.key === key) {
     return gpuMetricsInFlight.promise;
   }
-  const command = `$ids=@(${ids.join(",")}); try { $usage=@{}; Get-CimInstance Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine -ErrorAction Stop | ForEach-Object { $name=[string]$_.Name; if($name -match '^pid_(\\d+)_'){ $pid=[int]$matches[1]; if($ids -contains $pid){ $current=0.0; if($usage.ContainsKey($pid)){ $current=[double]$usage[$pid] }; $usage[$pid]=$current+[double]$_.UtilizationPercentage } } }; $items=foreach($id in $ids){ $value=0.0; if($usage.ContainsKey($id)){ $value=[double]$usage[$id] }; [pscustomobject]@{ pid=$id; gpuPercent=[math]::Min(100,[math]::Round($value,1)) } }; [pscustomobject]@{ ok=$true; items=$items } | ConvertTo-Json -Compress -Depth 4 } catch { [pscustomobject]@{ ok=$false; items=@() } | ConvertTo-Json -Compress -Depth 4 }`;
+  const command = `$ids=@(${ids.join(",")}); try { $usage=@{}; Get-CimInstance Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine -ErrorAction Stop | ForEach-Object { $name=[string]$_.Name; if($name -match '^pid_(\\d+)_'){ $procId=[int]$matches[1]; if($ids -contains $procId){ $current=0.0; if($usage.ContainsKey($procId)){ $current=[double]$usage[$procId] }; $usage[$procId]=$current+[double]$_.UtilizationPercentage } } }; $items=foreach($streamPid in $ids){ $value=0.0; if($usage.ContainsKey($streamPid)){ $value=[double]$usage[$streamPid] }; [pscustomobject]@{ pid=$streamPid; gpuPercent=[math]::Min(100,[math]::Round($value,1)) } }; [pscustomobject]@{ ok=$true; items=$items } | ConvertTo-Json -Compress -Depth 4 } catch { [pscustomobject]@{ ok=$false; items=@() } | ConvertTo-Json -Compress -Depth 4 }`;
   const promise = new Promise((resolve) => {
     execFile(
       "powershell.exe",
@@ -570,6 +570,20 @@ async function requestQuit(source = "unknown", mode = "ui-only", options = {}) {
 ipcMain.handle("desktop:get-update-status", () => ({ ...updateState }));
 ipcMain.handle("desktop:get-app-version", () => app.getVersion());
 ipcMain.handle("desktop:get-usage-metrics", async (_event, payload) => collectUsageMetrics(payload));
+ipcMain.handle("desktop:show-notification", async (_event, payload) => {
+  const title = String(payload?.title || PRODUCT_NAME).trim() || PRODUCT_NAME;
+  const body = String(payload?.body || "").trim();
+  if (!Notification || typeof Notification.isSupported === "function" && !Notification.isSupported()) {
+    return { ok: false, supported: false };
+  }
+  const notification = new Notification({
+    title,
+    body,
+    silent: false,
+  });
+  notification.show();
+  return { ok: true };
+});
 ipcMain.handle("desktop:select-folder", async (_event, payload) => {
   const defaultPath = typeof payload?.defaultPath === "string" && payload.defaultPath.trim()
     ? payload.defaultPath.trim()

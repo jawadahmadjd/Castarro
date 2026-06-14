@@ -901,6 +901,94 @@ textarea {
   min-width: min(520px, 100%);
 }
 
+.workspace-alerts-panel {
+  min-height: 220px;
+}
+
+.alerts-list,
+.automation-card-list {
+  display: grid;
+  gap: 12px;
+}
+
+.alert-card {
+  border: 1px solid rgba(47, 36, 20, 0.12);
+  border-left-width: 5px;
+  border-radius: 14px;
+  background: rgba(255, 250, 240, 0.92);
+  padding: 14px;
+  display: grid;
+  gap: 6px;
+}
+
+.alert-card.info {
+  border-left-color: #1f6f62;
+}
+
+.alert-card.warn {
+  border-left-color: #d28a2d;
+}
+
+.alert-card.danger {
+  border-left-color: #b44732;
+}
+
+.alert-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.automation-grid {
+  display: grid;
+  gap: 18px;
+}
+
+.automation-card {
+  border: 1px solid rgba(47, 36, 20, 0.1);
+  border-radius: 16px;
+  background: rgba(255, 250, 240, 0.9);
+  padding: 18px;
+  display: grid;
+  gap: 14px;
+}
+
+.automation-toggle-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.automation-toggle {
+  border: 1px solid rgba(47, 36, 20, 0.1);
+  border-radius: 12px;
+  background: rgba(247, 240, 227, 0.86);
+  padding: 12px 14px;
+  display: grid;
+  gap: 8px;
+}
+
+.automation-toggle label,
+.schedule-days label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.schedule-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+.schedule-days {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+}
+
 @media (max-width: 720px) {
   .sync-pairing-box {
     align-items: flex-start;
@@ -1417,6 +1505,14 @@ details[open] > .channel-summary::after {
   border-radius: 8px;
   touch-action: none;
   will-change: transform;
+}
+
+.cloud-video-option {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 48px;
 }
 
 .live-video-list.is-dragging .live-video-option:not(.is-dragging) {
@@ -3186,6 +3282,41 @@ h1 {
   gap: 10px;
 }
 
+.live-metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.live-metrics-stat {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid var(--ui-line);
+  border-radius: calc(var(--ui-radius) - 6px);
+  background: rgba(255, 255, 255, 0.52);
+}
+
+.live-metrics-stat strong {
+  min-width: 0;
+  color: var(--ui-ink);
+  font-size: 18px;
+  overflow-wrap: anywhere;
+}
+
+.live-metrics-stat small,
+.live-metrics-note {
+  color: var(--ui-muted);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.45;
+}
+
+.live-metrics-note {
+  margin: 12px 2px 0;
+}
+
 .readiness-row {
   width: 100%;
   min-height: 70px;
@@ -3310,6 +3441,10 @@ button:focus-visible {
   }
 
   .workspace-overview-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .live-metrics-grid {
     grid-template-columns: 1fr;
   }
 

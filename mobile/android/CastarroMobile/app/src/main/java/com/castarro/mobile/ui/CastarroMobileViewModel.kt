@@ -17,6 +17,7 @@ import com.castarro.mobile.data.db.VideoAssetEntity
 import com.castarro.mobile.data.preferences.AppPreferences
 import com.castarro.mobile.data.preferences.castarroDataStore
 import com.castarro.mobile.data.sync.DesktopPairingRequest
+import com.castarro.mobile.data.sync.DesktopRemoteStatus
 import com.castarro.mobile.data.sync.DesktopVideoDownloadCoordinator
 import com.castarro.mobile.data.sync.DesktopVideoDownloadForegroundService
 import com.castarro.mobile.data.sync.DesktopVideoDownloadPhase
@@ -31,6 +32,7 @@ import com.castarro.mobile.domain.model.StreamSessionStatus
 import com.castarro.mobile.domain.model.VideoAsset
 import com.castarro.mobile.domain.usecase.StartStreamUseCase
 import com.castarro.mobile.platform.AppUsageSnapshot
+import com.castarro.mobile.platform.NotificationFactory
 import com.castarro.mobile.platform.StreamProtectionAction
 import com.castarro.mobile.platform.StreamProtectionReport
 import com.castarro.mobile.streaming.StreamForegroundService
@@ -38,6 +40,7 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.MutablePreferences
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
@@ -49,6 +52,18 @@ import org.json.JSONArray
 import java.io.File
 import java.time.Instant
 import java.util.UUID
+
+private val EmptyDesktopRemoteStatus = DesktopRemoteStatus(
+    connected = false,
+    desktopLabel = "Castarro Desktop",
+    configName = "",
+    generatedAt = "",
+    alertsEnabled = false,
+    schedulerEnabled = false,
+    channels = emptyList(),
+    recentAlerts = emptyList(),
+    errorMessage = null,
+)
 
 data class MobileUiState(
     val channel: ChannelEntity? = null,
@@ -80,6 +95,8 @@ data class MobileUiState(
     val syncMessage: String? = null,
     val desktopSyncLastCompletedAt: String? = null,
     val desktopSyncLastSummary: String? = null,
+    val remoteStatus: DesktopRemoteStatus = EmptyDesktopRemoteStatus,
+    val isRemoteActionBusy: Boolean = false,
     val selectedDesktopDownloadIds: List<String> = emptyList(),
     val desktopDownloadSelectionEdited: Boolean = false,
     val desktopVideoDownloadTask: DesktopVideoDownloadTask = DesktopVideoDownloadTask(),
@@ -109,6 +126,7 @@ data class MobileUiState(
 class CastarroMobileViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application as CastarroApp
     private val container = app.container
+    private val notifications = NotificationFactory(application.applicationContext)
     private val channelDao = container.database.channelDao()
     private val videoDao = container.database.videoAssetDao()
     private val profileDao = container.database.streamProfileDao()
@@ -126,6 +144,7 @@ class CastarroMobileViewModel(application: Application) : AndroidViewModel(appli
     private var channelSettingsJob: Job? = null
     private var usageJob: Job? = null
     private var syncStatusJob: Job? = null
+    private var remoteStatusJob: Job? = null
     private var pendingYoutubeAction: PendingYoutubeAction? = null
     private var lastSelectedChannelId: String? = null
 
@@ -138,6 +157,7 @@ class CastarroMobileViewModel(application: Application) : AndroidViewModel(appli
         observeAppUsage()
         observeDesktopSyncStatus()
         observeDesktopVideoDownloads()
+        observeDesktopRemoteStatus()
         refreshStreamProtection()
     }
 
@@ -429,6 +449,30 @@ class CastarroMobileViewModel(application: Application) : AndroidViewModel(appli
         )
     }
 
+    fun refreshDesktopRemoteStatusNow() {
+        viewModelScope.launch {
+            runCatching {
+                container.desktopSync.fetchRemoteStatus()
+            }.onSuccess { status ->
+                applyRemoteStatus(status)
+            }.onFailure { error ->
+                mutableUiState.update {
+                    it.copy(
+                        remoteStatus = EmptyDesktopRemoteStatus.copy(
+                            errorMessage = error.message ?: "Desktop remote is unavailable.",
+                        ),
+                    )
+                }
+            }
+        }
+    }
+
+    fun startDesktopRemoteStream() = runRemoteAction("start")
+
+    fun stopDesktopRemoteStream() = runRemoteAction("stop")
+
+    fun restartDesktopRemoteStream() = runRemoteAction("restart")
+
     fun refreshStreamProtection() {
         mutableUiState.update {
             it.copy(streamProtection = container.streamProtection.currentReport())
@@ -507,6 +551,23 @@ class CastarroMobileViewModel(application: Application) : AndroidViewModel(appli
         )
     }
 
+    private fun runRemoteAction(action: String) {
+        val state = mutableUiState.value
+        val channelName = selectedRemoteChannelName(state)
+            ?: return showError("Sync a desktop channel first to use remote control.")
+        viewModelScope.launch {
+            mutableUiState.update { it.copy(isRemoteActionBusy = true, errorMessage = null) }
+            runCatching {
+                container.desktopSync.sendRemoteControl(action, channelName)
+            }.onSuccess { status ->
+                applyRemoteStatus(status)
+            }.onFailure { error ->
+                showError(error.message ?: "Desktop remote control failed.")
+            }
+            mutableUiState.update { it.copy(isRemoteActionBusy = false) }
+        }
+    }
+
     private fun runDesktopPairingSync(pairingUriOverride: String? = null) {
         val state = mutableUiState.value
         val pairingUri = (pairingUriOverride ?: state.syncPairingUri ?: "").trim()
@@ -545,6 +606,7 @@ class CastarroMobileViewModel(application: Application) : AndroidViewModel(appli
                         syncIncludeVideos = true,
                     )
                 }
+                refreshDesktopRemoteStatusNow()
             }.onFailure { error ->
                 showError(error.message ?: "Desktop sync failed.")
                 mutableUiState.update { it.copy(isSyncingDesktop = false, syncIncludeVideos = true) }
@@ -944,6 +1006,61 @@ class CastarroMobileViewModel(application: Application) : AndroidViewModel(appli
                 }
             }
         }
+    }
+
+    private fun observeDesktopRemoteStatus() {
+        remoteStatusJob?.cancel()
+        remoteStatusJob = viewModelScope.launch {
+            while (true) {
+                runCatching {
+                    container.desktopSync.fetchRemoteStatus()
+                }.onSuccess { status ->
+                    applyRemoteStatus(status)
+                }.onFailure { error ->
+                    mutableUiState.update {
+                        it.copy(
+                            remoteStatus = EmptyDesktopRemoteStatus.copy(
+                                errorMessage = error.message ?: "Desktop remote is unavailable.",
+                            ),
+                        )
+                    }
+                }
+                delay(15000)
+            }
+        }
+    }
+
+    private suspend fun applyRemoteStatus(status: DesktopRemoteStatus) {
+        mutableUiState.update { it.copy(remoteStatus = status) }
+        notifyRemoteAlerts(status)
+    }
+
+    private fun selectedRemoteChannelName(state: MobileUiState): String? {
+        val channelId = state.channel?.id ?: return null
+        return state.remoteStatus.channels.firstOrNull { it.channelId == channelId }?.channelName
+            ?: state.channel?.displayName
+    }
+
+    private suspend fun notifyRemoteAlerts(status: DesktopRemoteStatus) {
+        if (!status.alertsEnabled) return
+        val lastId = container.desktopSync.lastRemoteAlertId()
+        val fresh = status.recentAlerts
+            .filter { it.mobileEnabled && it.id > lastId }
+            .sortedBy { it.id }
+        if (fresh.isEmpty()) return
+        val manager = app.getSystemService(android.app.NotificationManager::class.java)
+        fresh.forEach { alert ->
+            manager.notify(
+                alert.id.toInt(),
+                notifications.desktopRemoteAlertNotification(
+                    channelName = alert.channelName.ifBlank { "Castarro Desktop" },
+                    title = alert.title,
+                    detail = alert.message,
+                    severe = alert.severity.equals("danger", ignoreCase = true),
+                ),
+            )
+        }
+        container.desktopSync.rememberLastRemoteAlertId(fresh.maxOf { it.id })
     }
 
     private fun observeDesktopVideoDownloads() {

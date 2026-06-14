@@ -17,6 +17,7 @@ import time
 import traceback
 import unicodedata
 from collections import deque
+from datetime import datetime, timedelta
 from difflib import SequenceMatcher
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -24,6 +25,8 @@ from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
 import app_db
+import cloud_probe
+import cloud_source_proxy
 import google_drive_provider
 import runtime_paths
 import storage_providers
@@ -42,7 +45,19 @@ THUMBNAIL_MAX_BYTES = 2 * 1024 * 1024
 YOUTUBE_CHANNEL_NAME_MATCH_THRESHOLD = 0.80
 UI_PORT = int(os.environ.get("STREAM_UI_PORT", "8765"))
 MEDIA_READY_CACHE: dict[tuple[str, int, int, str], bool] = {}
+SCHEDULER_DAY_ORDER = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+ALERT_SEVERITY_RANK = {"info": 0, "warn": 1, "danger": 2}
 FFMPEG_SIZE_PATTERN = re.compile(r"size=\s*([0-9]+(?:\.[0-9]+)?)\s*([KMGT]?i?B|[kmgt]?B)", re.IGNORECASE)
+FFMPEG_BITRATE_PATTERN = re.compile(r"bitrate=\s*([0-9]+(?:\.[0-9]+)?)\s*([kmg]?bits/s)", re.IGNORECASE)
+FFMPEG_STATS_FRAME_PATTERN = re.compile(r"frame=\s*([0-9]+)")
+FFMPEG_STATS_FPS_PATTERN = re.compile(r"fps=\s*([0-9]+(?:\.[0-9]+)?)")
+FFMPEG_STATS_SPEED_PATTERN = re.compile(r"speed=\s*([0-9]+(?:\.[0-9]+)?)x", re.IGNORECASE)
+FFMPEG_STATS_TIME_PATTERN = re.compile(r"time=\s*([0-9:.]+)")
+FFMPEG_STATS_DUP_PATTERN = re.compile(r"dup=\s*([0-9]+)")
+FFMPEG_STATS_DROP_PATTERN = re.compile(r"drop=\s*([0-9]+)")
+TIMESTAMPED_LOG_PREFIX_PATTERN = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})\s+\|\s+"
+)
 
 
 def windows_creation_flags(*, new_process_group: bool = False) -> int:
@@ -93,6 +108,202 @@ def parse_ffmpeg_size_bytes(text: str) -> int:
         unit = match.group(2).lower()
         latest = int(value * multipliers.get(unit, 1))
     return max(0, latest)
+
+
+def parse_ffmpeg_bitrate_bps(text: str) -> int | None:
+    match = FFMPEG_BITRATE_PATTERN.search(text or "")
+    if not match:
+        return None
+    value = float(match.group(1))
+    unit = match.group(2).lower()
+    multipliers = {
+        "bits/s": 1,
+        "kbits/s": 1000,
+        "mbits/s": 1000 ** 2,
+        "gbits/s": 1000 ** 3,
+    }
+    return int(value * multipliers.get(unit, 1))
+
+
+def parse_ffmpeg_clock_seconds(text: str) -> float | None:
+    raw = str(text or "").strip()
+    if not raw:
+        return None
+    parts = raw.split(":")
+    if len(parts) != 3:
+        return None
+    try:
+        hours = int(parts[0])
+        minutes = int(parts[1])
+        seconds = float(parts[2])
+    except ValueError:
+        return None
+    return max(0.0, hours * 3600 + minutes * 60 + seconds)
+
+
+def parse_ffmpeg_progress_value(raw: str) -> float | int | None:
+    text = str(raw or "").strip()
+    if not text or text.upper() == "N/A":
+        return None
+    if text.endswith("x"):
+        text = text[:-1]
+    try:
+        number = float(text)
+    except ValueError:
+        return None
+    if number.is_integer():
+        return int(number)
+    return number
+
+
+def strip_timestamped_log_prefix(line: str) -> str:
+    text = str(line or "").strip()
+    if not text:
+        return ""
+    return TIMESTAMPED_LOG_PREFIX_PATTERN.sub("", text, count=1)
+
+
+def latest_ffmpeg_progress(text: str) -> dict[str, str]:
+    snapshot: dict[str, str] = {}
+    current: dict[str, str] = {}
+    normalized = (text or "").replace("\r", "\n")
+    for raw_line in normalized.splitlines():
+        line = strip_timestamped_log_prefix(raw_line)
+        if not line or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if not key:
+            continue
+        if re.search(r"\s+[A-Za-z0-9_]+=", value):
+            continue
+        current[key] = value.strip()
+        if key == "progress":
+            if len(current) > 1:
+                snapshot = current.copy()
+            current = {}
+    if current and len(current) > 1:
+        snapshot = current.copy()
+    return snapshot
+
+
+def latest_ffmpeg_stats_line(text: str) -> str:
+    normalized = (text or "").replace("\r", "\n")
+    for raw_line in reversed(normalized.splitlines()):
+        line = strip_timestamped_log_prefix(raw_line)
+        if "frame=" in line and ("fps=" in line or "speed=" in line):
+            return line
+    return ""
+
+
+def stream_delivery_health(
+    *,
+    running: bool,
+    output_fps: float | None,
+    target_fps: float | None,
+    speed: float | None,
+    drop_frames: int | None,
+) -> tuple[str, str, str]:
+    if not running:
+        return "idle", "Stopped", "Stream is not running."
+    if output_fps is None and speed is None:
+        return "pending", "Collecting", "Waiting for FFmpeg to emit live stream progress."
+
+    fps_ratio = None
+    if output_fps is not None and target_fps and target_fps > 0:
+        fps_ratio = output_fps / target_fps
+
+    dropped = int(drop_frames or 0)
+    if (speed is not None and speed < 0.9) or (fps_ratio is not None and fps_ratio < 0.9):
+        return "danger", "Behind", "Output is falling behind real time. Upload bandwidth or encoder headroom may be tight."
+    if dropped > 0 or (speed is not None and speed < 0.98) or (fps_ratio is not None and fps_ratio < 0.97):
+        return "warn", "Watch", "Stream is running, but frame delivery is below target or frames are being dropped."
+    return "success", "Healthy", "Output is keeping pace with the configured live frame rate."
+
+
+def parse_stream_stats(log_text: str, *, running: bool, target_fps: float | None = None) -> dict[str, Any]:
+    progress = latest_ffmpeg_progress(log_text)
+    frame = None
+    encoder_fps = None
+    speed = None
+    total_size_bytes = 0
+    output_time_seconds = None
+    drop_frames = None
+    dup_frames = None
+    average_bitrate_bps = None
+
+    if progress:
+        frame_value = parse_ffmpeg_progress_value(progress.get("frame"))
+        frame = int(frame_value) if isinstance(frame_value, (int, float)) else None
+        fps_value = parse_ffmpeg_progress_value(progress.get("fps"))
+        encoder_fps = float(fps_value) if isinstance(fps_value, (int, float)) else None
+        speed_value = parse_ffmpeg_progress_value(progress.get("speed"))
+        speed = float(speed_value) if isinstance(speed_value, (int, float)) else None
+        size_value = parse_ffmpeg_progress_value(progress.get("total_size"))
+        total_size_bytes = max(0, int(size_value or 0))
+        out_time_us = parse_ffmpeg_progress_value(progress.get("out_time_us"))
+        out_time_ms = parse_ffmpeg_progress_value(progress.get("out_time_ms"))
+        if isinstance(out_time_us, (int, float)) and out_time_us > 0:
+            output_time_seconds = float(out_time_us) / 1_000_000
+        elif isinstance(out_time_ms, (int, float)) and out_time_ms > 0:
+            output_time_seconds = float(out_time_ms) / 1000
+        else:
+            output_time_seconds = parse_ffmpeg_clock_seconds(progress.get("out_time"))
+        drop_value = parse_ffmpeg_progress_value(progress.get("drop_frames"))
+        dup_value = parse_ffmpeg_progress_value(progress.get("dup_frames"))
+        drop_frames = int(drop_value) if isinstance(drop_value, (int, float)) else None
+        dup_frames = int(dup_value) if isinstance(dup_value, (int, float)) else None
+    else:
+        stats_line = latest_ffmpeg_stats_line(log_text)
+        if stats_line:
+            frame_match = FFMPEG_STATS_FRAME_PATTERN.search(stats_line)
+            fps_match = FFMPEG_STATS_FPS_PATTERN.search(stats_line)
+            speed_match = FFMPEG_STATS_SPEED_PATTERN.search(stats_line)
+            time_match = FFMPEG_STATS_TIME_PATTERN.search(stats_line)
+            drop_match = FFMPEG_STATS_DROP_PATTERN.search(stats_line)
+            dup_match = FFMPEG_STATS_DUP_PATTERN.search(stats_line)
+            frame = int(frame_match.group(1)) if frame_match else None
+            encoder_fps = float(fps_match.group(1)) if fps_match else None
+            speed = float(speed_match.group(1)) if speed_match else None
+            output_time_seconds = parse_ffmpeg_clock_seconds(time_match.group(1)) if time_match else None
+            drop_frames = int(drop_match.group(1)) if drop_match else None
+            dup_frames = int(dup_match.group(1)) if dup_match else None
+            total_size_bytes = parse_ffmpeg_size_bytes(stats_line)
+            average_bitrate_bps = parse_ffmpeg_bitrate_bps(stats_line)
+
+    output_fps = None
+    if frame is not None and output_time_seconds and output_time_seconds > 0:
+        output_fps = frame / output_time_seconds
+
+    if average_bitrate_bps is None and total_size_bytes > 0 and output_time_seconds and output_time_seconds > 0:
+        average_bitrate_bps = int((total_size_bytes * 8) / output_time_seconds)
+
+    health_tone, health_label, detail = stream_delivery_health(
+        running=running,
+        output_fps=output_fps,
+        target_fps=target_fps,
+        speed=speed,
+        drop_frames=drop_frames,
+    )
+    return {
+        "available": bool(progress or latest_ffmpeg_stats_line(log_text)),
+        "source": "ffmpeg-progress" if progress else "ffmpeg-stats-line" if latest_ffmpeg_stats_line(log_text) else "none",
+        "frame": frame,
+        "output_fps": round(output_fps, 2) if output_fps is not None else None,
+        "encoder_fps": round(encoder_fps, 2) if encoder_fps is not None else None,
+        "target_fps": round(float(target_fps), 2) if target_fps is not None else None,
+        "speed": round(speed, 3) if speed is not None else None,
+        "output_time_seconds": round(output_time_seconds, 2) if output_time_seconds is not None else None,
+        "total_size_bytes": total_size_bytes,
+        "average_bitrate_bps": average_bitrate_bps,
+        "drop_frames": drop_frames,
+        "dup_frames": dup_frames,
+        "health_tone": health_tone,
+        "health_label": health_label,
+        "detail": detail,
+        "youtube_ingest_fps": None,
+        "youtube_ingest_detail": "YouTube ingest frame rate is not exposed to this desktop app. These stats show what FFmpeg is currently sending.",
+    }
 
 
 def task_progress(
@@ -245,11 +456,18 @@ class Task:
 
 
 class StreamState:
-    def __init__(self, config_name: str, running: stream_manager.RunningStream) -> None:
+    def __init__(
+        self,
+        config_name: str,
+        running: stream_manager.RunningStream,
+        *,
+        cloud_asset_ids: list[str] | None = None,
+    ) -> None:
         self.config_name = config_name
         self.running = running
         self.started_at = time.time()
         self.log_path = Path(running.log_handle.name)
+        self.cloud_asset_ids = list(cloud_asset_ids or [])
 
     def transferred_bytes(self) -> int:
         return parse_ffmpeg_size_bytes(tail_file(self.log_path, max_chars=20000))
@@ -259,6 +477,7 @@ class StreamState:
         channel_name = str(self.running.channel.get("name") or "")
         log_tail = tail_file(self.log_path)
         transferred_bytes = parse_ffmpeg_size_bytes(log_tail)
+        stream_stats = parse_stream_stats(log_tail, running=process.poll() is None)
         return {
             "name": channel_name,
             "pid": process.pid,
@@ -268,6 +487,7 @@ class StreamState:
             "log_path": str(self.log_path),
             "log_tail": log_tail,
             "transferred_bytes": transferred_bytes,
+            "stream_stats": stream_stats,
             "preview_url": None,
             "preview_ready": False,
             "preview_warning": None,
@@ -302,8 +522,16 @@ class AppState:
         self.preview: PreviewState | None = None
         self.tasks: deque[Task] = deque(maxlen=20)
         self.youtube_oauth_states: dict[str, dict[str, Any]] = {}
+        self.storage_oauth_states: dict[str, dict[str, Any]] = {}
         self.sync_pairings: dict[str, dict[str, Any]] = {}
         self.sync_tokens: dict[str, dict[str, Any]] = {}
+        self.cloud_proxy: cloud_source_proxy.CloudSourceProxy | None = None
+        self.cloud_proxy_settings: dict[str, Any] = {}
+        self.stop_event = threading.Event()
+        self.scheduler_channels: dict[tuple[str, str], dict[str, Any]] = {}
+        self.alert_cooldowns: dict[tuple[str | None, str | None, str], float] = {}
+        self.stream_exit_recorded: set[tuple[str, str]] = set()
+        self.connection_watch: dict[tuple[str, str], dict[str, Any]] = {}
 
 
 STATE = AppState()
@@ -330,6 +558,14 @@ def active_youtube_oauth_redirect_uri(config: dict[str, Any]) -> str:
     settings = youtube_service.merge_settings(config)
     configured = str(settings.get("redirect_uri") or "").strip()
     if settings.get("oauth_client_type") == "web":
+        return configured
+    return desktop_oauth_redirect_uri(configured)
+
+
+def active_storage_oauth_redirect_uri(provider: dict[str, Any]) -> str:
+    oauth = google_drive_provider.provider_oauth(provider)
+    configured = str(oauth.get("redirect_uri") or "").strip()
+    if oauth.get("oauth_client_type") == "web":
         return configured
     return desktop_oauth_redirect_uri(configured)
 
@@ -515,6 +751,8 @@ def load_config_or_none(config_name: str) -> tuple[dict[str, Any] | None, str | 
             config = runtime_paths.apply_runtime_defaults(json.load(fh))
             runtime_paths.apply_youtube_owner_seed(config)
             normalize_ui_settings(config)
+            normalize_alert_settings(config)
+            normalize_scheduler_settings(config)
             storage_providers.normalize_storage_config(config)
             normalize_youtube_accounts(config)
             return config, None
@@ -525,6 +763,8 @@ def load_config_or_none(config_name: str) -> tuple[dict[str, Any] | None, str | 
 def save_config(config_name: str, config: dict[str, Any]) -> None:
     runtime_paths.apply_youtube_owner_seed(config)
     normalize_ui_settings(config)
+    normalize_alert_settings(config)
+    normalize_scheduler_settings(config)
     storage_providers.normalize_storage_config(config)
     normalize_youtube_accounts(config)
     for channel in config.get("channels", []):
@@ -547,6 +787,94 @@ def normalize_ui_settings(config: dict[str, Any]) -> dict[str, Any]:
     ui["legacy_tabs_enabled"] = ui.get("legacy_tabs_enabled", True) is not False
     config["ui"] = ui
     return ui
+
+
+def default_alert_settings() -> dict[str, Any]:
+    return {
+        "desktop_notifications_enabled": True,
+        "mobile_notifications_enabled": True,
+        "cooldown_seconds": 300,
+        "rules": {
+            "stream_stopped": True,
+            "poor_connection": True,
+            "scheduler_started": True,
+            "scheduler_stopped": True,
+        },
+    }
+
+
+def normalize_alert_settings(config: dict[str, Any]) -> dict[str, Any]:
+    raw = config.get("alerts")
+    alerts = dict(raw) if isinstance(raw, dict) else {}
+    defaults = default_alert_settings()
+    rules_raw = alerts.get("rules")
+    rules = dict(rules_raw) if isinstance(rules_raw, dict) else {}
+    alerts["desktop_notifications_enabled"] = bool(alerts.get("desktop_notifications_enabled", True))
+    alerts["mobile_notifications_enabled"] = bool(alerts.get("mobile_notifications_enabled", True))
+    alerts["cooldown_seconds"] = max(30, int(alerts.get("cooldown_seconds") or defaults["cooldown_seconds"]))
+    alerts["rules"] = {
+        key: bool(rules.get(key, value))
+        for key, value in defaults["rules"].items()
+    }
+    config["alerts"] = alerts
+    return alerts
+
+
+def default_scheduler_settings() -> dict[str, Any]:
+    return {
+        "enabled": False,
+        "timezone": "local",
+        "poll_seconds": 20,
+        "channels": [],
+    }
+
+
+def normalize_scheduler_days(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return list(SCHEDULER_DAY_ORDER)
+    seen: list[str] = []
+    for item in value:
+        day = str(item or "").strip().lower()[:3]
+        if day in SCHEDULER_DAY_ORDER and day not in seen:
+            seen.append(day)
+    return seen or list(SCHEDULER_DAY_ORDER)
+
+
+def sanitize_scheduler_time(value: Any, *, fallback: str) -> str:
+    text = str(value or "").strip()
+    if re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", text):
+        return text
+    return fallback
+
+
+def normalize_scheduler_settings(config: dict[str, Any]) -> dict[str, Any]:
+    raw = config.get("scheduler")
+    scheduler = dict(raw) if isinstance(raw, dict) else {}
+    defaults = default_scheduler_settings()
+    scheduler["enabled"] = bool(scheduler.get("enabled", defaults["enabled"]))
+    scheduler["timezone"] = str(scheduler.get("timezone") or defaults["timezone"]).strip() or "local"
+    scheduler["poll_seconds"] = max(10, int(scheduler.get("poll_seconds") or defaults["poll_seconds"]))
+    raw_channels = scheduler.get("channels")
+    normalized_channels: list[dict[str, Any]] = []
+    if isinstance(raw_channels, list):
+        for item in raw_channels:
+            if not isinstance(item, dict):
+                continue
+            channel_name = str(item.get("channel") or item.get("channel_name") or "").strip()
+            if not channel_name:
+                continue
+            normalized_channels.append(
+                {
+                    "channel": channel_name,
+                    "enabled": bool(item.get("enabled", False)),
+                    "start_time": sanitize_scheduler_time(item.get("start_time"), fallback="09:00"),
+                    "stop_time": sanitize_scheduler_time(item.get("stop_time"), fallback="17:00"),
+                    "days": normalize_scheduler_days(item.get("days")),
+                }
+            )
+    scheduler["channels"] = normalized_channels
+    config["scheduler"] = scheduler
+    return scheduler
 
 
 def looks_like_rtmp_url(value: Any) -> bool:
@@ -1007,11 +1335,26 @@ def youtube_status(config_name: str) -> dict[str, Any]:
     }
 
 
+def storage_provider_status(provider: dict[str, Any]) -> dict[str, Any]:
+    provider_type = str(provider.get("type") or "")
+    if provider_type == "googleDrive":
+        status = google_drive_provider.GoogleDriveProvider(ROOT, provider).status()
+        status["redirect_uri"] = active_storage_oauth_redirect_uri(provider)
+        status["configured_redirect_uri"] = google_drive_provider.provider_oauth(provider).get("redirect_uri")
+        return status
+    return storage_providers.provider_status(ROOT, provider)
+
+
 def storage_status(config_name: str) -> dict[str, Any]:
     config, error = load_config_or_none(config_name)
     if not config:
         raise ValueError(error or "Config not found.")
-    return storage_providers.storage_status(ROOT, config)
+    storage = storage_providers.normalize_storage_config(config)
+    return {
+        "ok": True,
+        "source_proxy": storage.get("source_proxy", {}),
+        "providers": [storage_provider_status(provider) for provider in storage.get("providers", [])],
+    }
 
 
 def storage_files(config_name: str, provider_id: str, folder_id: str | None = None) -> dict[str, Any]:
@@ -1027,9 +1370,399 @@ def storage_files(config_name: str, provider_id: str, folder_id: str | None = No
     return {
         "ok": False,
         "provider_id": provider.get("id"),
-        "files": [],
+        "items": [],
         "message": f"{provider_type or 'Storage'} browsing is not wired yet.",
     }
+
+
+def storage_oauth_popup_html(status: str, message: str, details: dict[str, Any] | None = None) -> str:
+    payload_data = {"type": "storage-auth", "status": status, "message": message}
+    if isinstance(details, dict):
+        payload_data.update(details)
+    payload = json.dumps(payload_data).replace("</", "<\\/")
+    safe_message = message.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return f"""<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Storage Connection</title>
+    <style>
+      body {{ font-family: Segoe UI, Tahoma, sans-serif; margin: 0; background: #f6f2e9; color: #25231e; }}
+      .shell {{ max-width: 520px; margin: 36px auto; background: #fffaf0; border: 1px solid #ded5c6; border-radius: 18px; padding: 20px; }}
+      h1 {{ margin: 0 0 8px; font-size: 1.2rem; }}
+      p {{ margin: 0 0 12px; color: #555046; }}
+    </style>
+  </head>
+  <body>
+    <main class="shell">
+      <h1>Storage connection {status}</h1>
+      <p>{safe_message}</p>
+      <p>You can close this window.</p>
+    </main>
+    <script>
+      (() => {{
+        const payload = {payload};
+        if (window.opener) {{
+          window.opener.postMessage(payload, "*");
+        }}
+        setTimeout(() => window.close(), 300);
+      }})();
+    </script>
+  </body>
+</html>
+"""
+
+
+def create_storage_auth_start(config_name: str, provider_id: str) -> dict[str, Any]:
+    config, error = load_config_or_none(config_name)
+    if not config:
+        raise ValueError(error or "Config not found.")
+    provider = storage_providers.find_provider(config, provider_id)
+    if not provider:
+        raise ValueError(f"Unknown storage provider: {provider_id}")
+    provider_type = str(provider.get("type") or "")
+    if provider_type != "googleDrive":
+        raise ValueError(f"{provider_type or 'Storage'} connection is not wired yet.")
+    if not google_drive_provider.credentials_ready(provider):
+        raise ValueError("Google Drive client ID is missing in Settings > Storage.")
+
+    oauth = google_drive_provider.provider_oauth(provider)
+    redirect_uri = active_storage_oauth_redirect_uri(provider)
+    code_verifier = ""
+    code_challenge = ""
+    if bool(oauth.get("use_pkce", True)):
+        code_verifier, code_challenge = youtube_service.pkce_pair()
+
+    oauth_state = secrets.token_urlsafe(24)
+    cleanup_expired_oauth_states()
+    with STATE.lock:
+        STATE.storage_oauth_states[oauth_state] = {
+            "created_at": time.time(),
+            "config_name": config_name,
+            "provider_id": str(provider.get("id") or ""),
+            "redirect_uri": redirect_uri,
+            "code_verifier": code_verifier,
+        }
+    return {
+        "ok": True,
+        "state": oauth_state,
+        "provider_id": str(provider.get("id") or ""),
+        "url": google_drive_provider.build_auth_url(
+            provider,
+            oauth_state,
+            redirect_uri,
+            code_challenge=code_challenge or None,
+        ),
+    }
+
+
+def handle_storage_oauth_callback(query: dict[str, list[str]]) -> str:
+    oauth_state = str(query.get("state", [""])[0] or "")
+    error_code = str(query.get("error", [""])[0] or "")
+    auth_code = str(query.get("code", [""])[0] or "")
+
+    cleanup_expired_oauth_states()
+    with STATE.lock:
+        state_payload = STATE.storage_oauth_states.pop(oauth_state, None)
+    if not state_payload:
+        return storage_oauth_popup_html("error", "OAuth state is missing or expired. Please connect again.")
+
+    config_name = str(state_payload.get("config_name") or DEFAULT_CONFIG)
+    provider_id = str(state_payload.get("provider_id") or "")
+    config, error = load_config_or_none(config_name)
+    if not config:
+        return storage_oauth_popup_html("error", error or "Config not found.")
+    provider = storage_providers.find_provider(config, provider_id)
+    if not provider:
+        return storage_oauth_popup_html("error", f"Unknown storage provider: {provider_id}")
+    if error_code:
+        return storage_oauth_popup_html("error", f"Google returned: {error_code}")
+    if not auth_code:
+        return storage_oauth_popup_html("error", "Google did not return an authorization code.")
+
+    try:
+        code_verifier = str(state_payload.get("code_verifier") or "").strip() or None
+        redirect_uri = str(state_payload.get("redirect_uri") or "").strip() or active_storage_oauth_redirect_uri(provider)
+        google_drive_provider.exchange_code_for_tokens(
+            ROOT,
+            provider,
+            auth_code,
+            redirect_uri,
+            code_verifier=code_verifier,
+        )
+        access_token, _tokens = google_drive_provider.valid_access_token(ROOT, provider)
+        profile = google_drive_provider.connected_account_profile(access_token)
+        provider["account_email"] = str(profile.get("email") or "")
+        provider["status"] = "connected"
+        save_config(config_name, config)
+    except Exception as exc:
+        return storage_oauth_popup_html("error", str(exc), {"provider_id": provider_id})
+
+    title = str(provider.get("display_name") or "Google Drive")
+    account_label = str(profile.get("email") or profile.get("name") or "").strip()
+    message = f"Connected {title}{f' as {account_label}' if account_label else ''}."
+    return storage_oauth_popup_html(
+        "ok",
+        message,
+        {
+            "provider_id": provider_id,
+            "display_name": title,
+            "account_email": str(profile.get("email") or ""),
+            "account_name": str(profile.get("name") or ""),
+        },
+    )
+
+
+def provider_cloud_source_uri(provider_id: str, file_id: str) -> str:
+    return f"castarro://cloud/{provider_id}/{file_id}"
+
+
+def probe_cache(root: Path, config: dict[str, Any]) -> cloud_probe.CloudProbeCache:
+    defaults = config.get("defaults") if isinstance(config.get("defaults"), dict) else {}
+    runtime_dir = stream_manager.resolve_path(root, defaults.get("runtime_dir", ".runtime"))
+    return cloud_probe.CloudProbeCache(runtime_dir / "cloud-probe-cache.json")
+
+
+def ensure_cloud_proxy(config: dict[str, Any]) -> cloud_source_proxy.CloudSourceProxy:
+    storage = storage_providers.normalize_storage_config(config)
+    proxy_settings = dict(storage.get("source_proxy", {}))
+    desired = {
+        "host": str(proxy_settings.get("host") or "127.0.0.1"),
+        "port": int(proxy_settings.get("port") or 8876),
+        "cache_dir": str(proxy_settings.get("cache_dir") or ".runtime/cloud-cache"),
+    }
+    cache_dir = storage_providers.resolve_config_path(ROOT, desired["cache_dir"])
+
+    with STATE.lock:
+        current = STATE.cloud_proxy
+        same_settings = bool(current and current.is_running and STATE.cloud_proxy_settings == desired)
+        if same_settings:
+            return current
+
+        running_streams = any(stream.running.process.poll() is None for stream in STATE.streams.values())
+        if current and current.is_running and running_streams:
+            return current
+
+        if current:
+            current.stop()
+
+        proxy = cloud_source_proxy.CloudSourceProxy(
+            host=desired["host"],
+            port=desired["port"],
+            cache_dir=cache_dir,
+            retry_wait_seconds=0.35,
+        )
+        proxy.start()
+        STATE.cloud_proxy = proxy
+        STATE.cloud_proxy_settings = desired
+        return proxy
+
+
+def cloud_video_timestamp(existing: dict[str, Any] | None, *keys: str) -> str:
+    if isinstance(existing, dict):
+        for key in keys:
+            value = str(existing.get(key) or "").strip()
+            if value:
+                return value
+    return ""
+
+
+def prepare_google_drive_cloud_video(
+    config: dict[str, Any],
+    provider: dict[str, Any],
+    file_id: str,
+    existing: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    drive = google_drive_provider.GoogleDriveProvider(ROOT, provider)
+    metadata = drive.get_file_metadata(file_id)
+    google_drive_provider.validate_drive_file_metadata(metadata)
+
+    provider_id = str(provider.get("id") or "")
+    display_name = str(metadata.get("name") or file_id).strip() or file_id
+    mime_type = str(metadata.get("mimeType") or "video/mp4").strip() or "video/mp4"
+    size_text = str(metadata.get("size") or "").strip()
+    size_bytes = int(size_text) if size_text else 0
+    etag = str(metadata.get("modifiedTime") or metadata.get("md5Checksum") or "").strip() or None
+    checksum = str(metadata.get("md5Checksum") or "").strip()
+    checksum_value = f"md5:{checksum}" if checksum else None
+    source_uri = provider_cloud_source_uri(provider_id, file_id)
+    now_text = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    created_at = cloud_video_timestamp(existing, "created_at", "createdAt") or now_text
+
+    try:
+        range_sample = drive.read_range(file_id, 0, 0)
+        range_readable = len(range_sample) == 1 if size_bytes > 0 else True
+    except Exception as exc:
+        range_readable = False
+        report = {
+            "compatibilityStatus": "blocked",
+            "compatibilityMessage": f"This provider does not support reliable range reads for this file. {exc}",
+            "durationMs": 0,
+            "container": Path(display_name).suffix.lstrip(".").lower() or "unknown",
+            "videoCodec": "unknown",
+            "audioCodec": "unknown",
+            "width": None,
+            "height": None,
+            "fps": None,
+            "audioSampleRate": None,
+            "audioChannels": None,
+        }
+    else:
+        cache = probe_cache(ROOT, config)
+        cache_key = cloud_probe.probe_cache_key(provider_id, file_id, size_bytes, etag)
+        report = cache.get(cache_key)
+        if not report:
+            proxy = ensure_cloud_proxy(config)
+            asset_id = f"probe-{provider_id}-{file_id}-{secrets.token_hex(4)}"
+            proxy_url = proxy.register_asset(
+                cloud_source_proxy.ProxyAsset(
+                    asset_id=asset_id,
+                    size_bytes=size_bytes,
+                    content_type=mime_type,
+                    read_range=lambda start, end: drive.read_range(file_id, start, end),
+                    display_name=display_name,
+                )
+            )
+            try:
+                ffprobe_path = str((config.get("defaults") or {}).get("ffprobe_path") or "ffprobe")
+                payload = cloud_probe.ffprobe_url(ffprobe_path, proxy_url)
+                report = cloud_probe.report_from_ffprobe_payload(
+                    payload,
+                    display_name=display_name,
+                    source_uri=source_uri,
+                    size_bytes=size_bytes,
+                    range_readable=range_readable,
+                )
+            except Exception as exc:
+                report = {
+                    "compatibilityStatus": "blocked",
+                    "compatibilityMessage": f"Could not inspect this Google Drive video: {exc}",
+                    "durationMs": 0,
+                    "container": Path(display_name).suffix.lstrip(".").lower() or "unknown",
+                    "videoCodec": "unknown",
+                    "audioCodec": "unknown",
+                    "width": None,
+                    "height": None,
+                    "fps": None,
+                    "audioSampleRate": None,
+                    "audioChannels": None,
+                }
+            finally:
+                proxy.unregister_asset(asset_id)
+            if not str(report.get("compatibilityMessage") or "").startswith("Could not inspect this Google Drive video:"):
+                cache.put(cache_key, report)
+
+    return {
+        "id": f"{provider_id}:{file_id}",
+        "provider_id": provider_id,
+        "providerId": provider_id,
+        "file_id": file_id,
+        "provider_file_id": file_id,
+        "providerFileId": file_id,
+        "display_name": display_name,
+        "displayName": display_name,
+        "source_uri": source_uri,
+        "sourceUri": source_uri,
+        "size_bytes": size_bytes,
+        "sizeBytes": size_bytes,
+        "mime_type": mime_type,
+        "mimeType": mime_type,
+        "etag": etag,
+        "checksum": checksum_value,
+        "range_readable": range_readable,
+        "rangeReadable": range_readable,
+        "duration_ms": int(report.get("durationMs") or 0),
+        "durationMs": int(report.get("durationMs") or 0),
+        "container": str(report.get("container") or "unknown"),
+        "video_codec": str(report.get("videoCodec") or "unknown"),
+        "videoCodec": str(report.get("videoCodec") or "unknown"),
+        "audio_codec": str(report.get("audioCodec") or "unknown"),
+        "audioCodec": str(report.get("audioCodec") or "unknown"),
+        "width": report.get("width"),
+        "height": report.get("height"),
+        "fps": report.get("fps"),
+        "audio_sample_rate": report.get("audioSampleRate"),
+        "audioSampleRate": report.get("audioSampleRate"),
+        "audio_channels": report.get("audioChannels"),
+        "compatibility_status": str(report.get("compatibilityStatus") or "unknown"),
+        "compatibilityStatus": str(report.get("compatibilityStatus") or "unknown"),
+        "compatibility_message": str(report.get("compatibilityMessage") or ""),
+        "compatibilityMessage": str(report.get("compatibilityMessage") or ""),
+        "created_at": created_at,
+        "createdAt": created_at,
+        "updated_at": now_text,
+        "updatedAt": now_text,
+    }
+
+
+def prepare_storage_video(config_name: str, provider_id: str, file_id: str) -> dict[str, Any]:
+    config, error = load_config_or_none(config_name)
+    if not config:
+        raise ValueError(error or "Config not found.")
+    provider = storage_providers.find_provider(config, provider_id)
+    if not provider:
+        raise ValueError(f"Unknown storage provider: {provider_id}")
+    provider_type = str(provider.get("type") or "")
+    if provider_type != "googleDrive":
+        raise ValueError(f"{provider_type or 'Storage'} video preparation is not wired yet.")
+    item = prepare_google_drive_cloud_video(config, provider, file_id)
+    return {"ok": True, "item": item}
+
+
+def prepare_channel_cloud_playlist(config: dict[str, Any], channel: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    raw_items = channel.get("cloud_playlist", [])
+    if not isinstance(raw_items, list) or not raw_items:
+        return channel, []
+
+    prepared_channel = {**channel, "cloud_playlist": []}
+    asset_ids: list[str] = []
+    proxy = ensure_cloud_proxy(config)
+
+    for raw_item in raw_items:
+        if not isinstance(raw_item, dict):
+            continue
+        provider_id = str(raw_item.get("provider_id") or raw_item.get("providerId") or "").strip()
+        file_id = str(raw_item.get("file_id") or raw_item.get("provider_file_id") or raw_item.get("providerFileId") or "").strip()
+        if not provider_id or not file_id:
+            continue
+
+        provider = storage_providers.find_provider(config, provider_id)
+        if not provider:
+            raise ValueError(f"Unknown storage provider: {provider_id}")
+        provider_type = str(provider.get("type") or "")
+        if provider_type != "googleDrive":
+            raise ValueError(f"{provider_type or 'Storage'} streaming is not wired yet.")
+
+        prepared_item = prepare_google_drive_cloud_video(config, provider, file_id, existing=raw_item)
+        status = str(prepared_item.get("compatibility_status") or prepared_item.get("compatibilityStatus") or "")
+        if status != "ready":
+            label = str(prepared_item.get("display_name") or prepared_item.get("displayName") or file_id)
+            message = str(prepared_item.get("compatibility_message") or prepared_item.get("compatibilityMessage") or "Cloud video is not ready.")
+            raise ValueError(f"Cloud video '{label}' is not ready. {message}")
+
+        drive = google_drive_provider.GoogleDriveProvider(ROOT, provider)
+        display_name = str(prepared_item.get("display_name") or prepared_item.get("displayName") or file_id)
+        mime_type = str(prepared_item.get("mime_type") or prepared_item.get("mimeType") or "video/mp4")
+        size_bytes = int(prepared_item.get("size_bytes") or prepared_item.get("sizeBytes") or 0)
+        asset_id = f"stream-{provider_id}-{file_id}-{secrets.token_hex(4)}"
+        proxy_url = proxy.register_asset(
+            cloud_source_proxy.ProxyAsset(
+                asset_id=asset_id,
+                size_bytes=size_bytes,
+                content_type=mime_type,
+                read_range=lambda start, end, drive=drive, file_id=file_id: drive.read_range(file_id, start, end),
+                display_name=display_name,
+            )
+        )
+        merged = dict(raw_item)
+        merged.update(prepared_item)
+        merged["proxy_url"] = proxy_url
+        merged["proxyUrl"] = proxy_url
+        prepared_channel["cloud_playlist"].append(merged)
+        asset_ids.append(asset_id)
+
+    return prepared_channel, asset_ids
 
 
 def disconnect_storage_provider(config_name: str, provider_id: str) -> dict[str, Any]:
@@ -1045,13 +1778,20 @@ def disconnect_storage_provider(config_name: str, provider_id: str) -> dict[str,
 def cleanup_expired_oauth_states() -> None:
     now = time.time()
     with STATE.lock:
-        stale = [
+        stale_youtube = [
             key
             for key, payload in STATE.youtube_oauth_states.items()
             if now - float(payload.get("created_at") or 0) > 20 * 60
         ]
-        for key in stale:
+        stale_storage = [
+            key
+            for key, payload in STATE.storage_oauth_states.items()
+            if now - float(payload.get("created_at") or 0) > 20 * 60
+        ]
+        for key in stale_youtube:
             STATE.youtube_oauth_states.pop(key, None)
+        for key in stale_storage:
+            STATE.storage_oauth_states.pop(key, None)
 
 
 def create_youtube_auth_start(config_name: str, account_id: str, label: str = "", channel_name: str = "") -> dict[str, Any]:
@@ -1852,6 +2592,16 @@ def normalized_media_is_ready(config: dict[str, Any], path: Path) -> bool:
     return ready
 
 
+def unregister_cloud_assets(asset_ids: list[str]) -> None:
+    if not asset_ids:
+        return
+    proxy = STATE.cloud_proxy
+    if not proxy:
+        return
+    for asset_id in asset_ids:
+        proxy.unregister_asset(asset_id)
+
+
 def raw_video_files(config_name: str, channel_name: str | None) -> list[dict[str, str]]:
     config, error = load_config_or_none(config_name)
     if not config:
@@ -2214,32 +2964,241 @@ def clear_activity_logs(
     return {"tasks": removed_task_count, "events": removed_event_count}
 
 
+def local_timezone_label(now_local: datetime | None = None) -> str:
+    current = now_local or datetime.now().astimezone()
+    offset = current.strftime("%z")
+    if offset and len(offset) == 5:
+        offset = f"{offset[:3]}:{offset[3:]}"
+    return f"{current.tzname() or 'Local'} ({offset or '+00:00'})"
+
+
+def parse_daily_minutes(value: Any) -> int | None:
+    text = str(value or "").strip()
+    if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", text):
+        return None
+    hour_text, minute_text = text.split(":", 1)
+    return int(hour_text) * 60 + int(minute_text)
+
+
+def schedule_entry_for_channel(config: dict[str, Any], channel_name: str) -> dict[str, Any] | None:
+    scheduler = normalize_scheduler_settings(config)
+    for item in scheduler.get("channels", []):
+        if str(item.get("channel") or "").strip() == str(channel_name or "").strip():
+            return item
+    return None
+
+
+def schedule_is_active(entry: dict[str, Any], now_local: datetime | None = None) -> bool:
+    if not entry or not entry.get("enabled"):
+        return False
+    current = now_local or datetime.now().astimezone()
+    days = normalize_scheduler_days(entry.get("days"))
+    start_minutes = parse_daily_minutes(entry.get("start_time"))
+    stop_minutes = parse_daily_minutes(entry.get("stop_time"))
+    if start_minutes is None or stop_minutes is None:
+        return False
+    current_minutes = current.hour * 60 + current.minute
+    today = SCHEDULER_DAY_ORDER[current.weekday()]
+    if start_minutes == stop_minutes:
+        return today in days
+    if start_minutes < stop_minutes:
+        return today in days and start_minutes <= current_minutes < stop_minutes
+    previous_day = SCHEDULER_DAY_ORDER[(current.weekday() - 1) % 7]
+    return (today in days and current_minutes >= start_minutes) or (previous_day in days and current_minutes < stop_minutes)
+
+
+def schedule_transition_datetime(base_date: datetime, minutes: int) -> datetime:
+    hour = minutes // 60
+    minute = minutes % 60
+    return base_date.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+
+def next_schedule_boundary(entry: dict[str, Any], *, now_local: datetime, boundary: str) -> datetime | None:
+    days = normalize_scheduler_days(entry.get("days"))
+    start_minutes = parse_daily_minutes(entry.get("start_time"))
+    stop_minutes = parse_daily_minutes(entry.get("stop_time"))
+    if start_minutes is None or stop_minutes is None or not days:
+        return None
+    overnight = start_minutes > stop_minutes
+    start_of_today = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    candidates: list[datetime] = []
+    for day_offset in range(0, 9):
+        day = start_of_today + timedelta(days=day_offset)
+        weekday = SCHEDULER_DAY_ORDER[day.weekday()]
+        if weekday not in days:
+            continue
+        if boundary == "start":
+            candidate = schedule_transition_datetime(day, start_minutes)
+        else:
+            stop_day = day + timedelta(days=1 if overnight else 0)
+            candidate = schedule_transition_datetime(stop_day, stop_minutes)
+        if candidate > now_local:
+            candidates.append(candidate)
+    return min(candidates) if candidates else None
+
+
+def scheduler_status(config_name: str, config: dict[str, Any] | None = None) -> dict[str, Any]:
+    config = config or load_config_or_none(config_name)[0] or {}
+    scheduler = normalize_scheduler_settings(config)
+    channels = config.get("channels", []) if isinstance(config.get("channels"), list) else []
+    now_local = datetime.now().astimezone()
+    with STATE.lock:
+        running_names = {
+            name
+            for name, stream in STATE.streams.items()
+            if stream.running.process.poll() is None
+        }
+        runtime_snapshot = dict(STATE.scheduler_channels)
+    channel_rows: list[dict[str, Any]] = []
+    for channel in channels:
+        if not isinstance(channel, dict):
+            continue
+        name = str(channel.get("name") or "").strip()
+        if not name:
+            continue
+        entry = schedule_entry_for_channel(config, name)
+        active = schedule_is_active(entry or {}, now_local) if entry else False
+        next_start = next_schedule_boundary(entry or {}, now_local=now_local, boundary="start") if entry else None
+        next_stop = next_schedule_boundary(entry or {}, now_local=now_local, boundary="stop") if entry else None
+        runtime = runtime_snapshot.get((config_name, name), {})
+        channel_rows.append(
+            {
+                "channel": name,
+                "enabled": bool(entry and entry.get("enabled")),
+                "start_time": str(entry.get("start_time") or "") if entry else "",
+                "stop_time": str(entry.get("stop_time") or "") if entry else "",
+                "days": normalize_scheduler_days(entry.get("days")) if entry else [],
+                "in_window": active,
+                "running": name in running_names,
+                "controlled_run": bool(runtime.get("controlled_run")),
+                "last_action": str(runtime.get("last_action") or ""),
+                "next_start_at": next_start.isoformat(timespec="seconds") if next_start else "",
+                "next_stop_at": next_stop.isoformat(timespec="seconds") if next_stop else "",
+            }
+        )
+    return {
+        "enabled": bool(scheduler.get("enabled")),
+        "timezone": str(scheduler.get("timezone") or "local"),
+        "timezone_label": local_timezone_label(now_local),
+        "poll_seconds": int(scheduler.get("poll_seconds") or 20),
+        "channels": channel_rows,
+        "generated_at": now_local.isoformat(timespec="seconds"),
+    }
+
+
+def recent_alert_events(
+    config_name: str | None,
+    channel_name: str | None = None,
+    *,
+    limit: int = 12,
+) -> list[dict[str, Any]]:
+    events = app_db.recent_app_events(config_name, channel_name=channel_name, limit=max(limit * 4, 40))
+    alerts: list[dict[str, Any]] = []
+    for event in events:
+        if str(event.get("event_type") or "") != "alert_raised":
+            continue
+        details = event.get("details") if isinstance(event.get("details"), dict) else {}
+        alerts.append(
+            {
+                "id": int(event.get("id") or 0),
+                "channel_name": str(event.get("channel_name") or ""),
+                "config_name": str(event.get("config_name") or ""),
+                "created_at": str(event.get("created_at") or ""),
+                "key": str(details.get("key") or ""),
+                "severity": str(details.get("severity") or "info"),
+                "title": str(details.get("title") or "Alert"),
+                "message": str(details.get("message") or ""),
+                "desktop_enabled": bool(details.get("desktop_enabled", True)),
+                "mobile_enabled": bool(details.get("mobile_enabled", True)),
+            }
+        )
+        if len(alerts) >= limit:
+            break
+    return alerts
+
+
+def alerts_status(config_name: str, config: dict[str, Any] | None = None) -> dict[str, Any]:
+    config = config or load_config_or_none(config_name)[0] or {}
+    settings = normalize_alert_settings(config)
+    recent = recent_alert_events(config_name, limit=10)
+    return {
+        "desktop_notifications_enabled": bool(settings.get("desktop_notifications_enabled")),
+        "mobile_notifications_enabled": bool(settings.get("mobile_notifications_enabled")),
+        "cooldown_seconds": int(settings.get("cooldown_seconds") or 300),
+        "rules": dict(settings.get("rules") or {}),
+        "recent": recent,
+    }
+
+
+def emit_alert(
+    config: dict[str, Any],
+    config_name: str,
+    channel_name: str | None,
+    key: str,
+    severity: str,
+    title: str,
+    message: str,
+) -> None:
+    settings = normalize_alert_settings(config)
+    if not bool((settings.get("rules") or {}).get(key, False)):
+        return
+    cooldown_seconds = max(30, int(settings.get("cooldown_seconds") or 300))
+    cooldown_key = (config_name, channel_name, key)
+    now_monotonic = time.monotonic()
+    with STATE.lock:
+        last_sent = float(STATE.alert_cooldowns.get(cooldown_key) or 0.0)
+        if last_sent and now_monotonic - last_sent < cooldown_seconds:
+            return
+        STATE.alert_cooldowns[cooldown_key] = now_monotonic
+    app_db.record_event(
+        "alert_raised",
+        config_name,
+        channel_name,
+        {
+            "key": key,
+            "severity": severity,
+            "title": title,
+            "message": message,
+            "desktop_enabled": bool(settings.get("desktop_notifications_enabled")),
+            "mobile_enabled": bool(settings.get("mobile_notifications_enabled")),
+        },
+    )
+
+
 def start_stream(config_name: str, channel_name: str | None) -> list[str]:
     config, config_dir = stream_manager.load_config((ROOT / config_name).resolve())
+    normalize_scheduler_settings(config)
     channels = stream_manager.enabled_channels(config, channel_name)
     started: list[str] = []
-    with STATE.lock:
-        for channel in channels:
-            name = str(channel["name"])
+    for channel in channels:
+        name = str(channel["name"])
+        with STATE.lock:
             existing = STATE.streams.get(name)
-            if existing and existing.running.process.poll() is None:
-                continue
+        if existing and existing.running.process.poll() is None:
+            continue
+        prepared_channel, cloud_asset_ids = prepare_channel_cloud_playlist(config, channel)
+        try:
             running = stream_manager.start_stream(
                 config_dir,
                 config,
-                channel,
+                prepared_channel,
             )
-            STATE.streams[name] = StreamState(config_name, running)
-            app_db.record_stream_start(
-                config_name,
-                name,
-                running.process.pid,
-                subprocess.list2cmdline(running.command),
-                str(Path(running.log_handle.name)),
-                stream_live_title(channel),
-            )
-            app_db.record_event("stream_started", config_name, name, {"pid": running.process.pid})
-            started.append(name)
+        except Exception:
+            unregister_cloud_assets(cloud_asset_ids)
+            raise
+        with STATE.lock:
+            STATE.streams[name] = StreamState(config_name, running, cloud_asset_ids=cloud_asset_ids)
+            STATE.stream_exit_recorded.discard((config_name, name))
+        app_db.record_stream_start(
+            config_name,
+            name,
+            running.process.pid,
+            subprocess.list2cmdline(running.command),
+            str(Path(running.log_handle.name)),
+            stream_live_title(prepared_channel),
+        )
+        app_db.record_event("stream_started", config_name, name, {"pid": running.process.pid})
+        started.append(name)
     return started
 
 
@@ -2336,7 +3295,9 @@ def stop_stream(channel_name: str | None) -> list[str]:
             stream_manager.stop_stream(state.running)
             if state.running.preview_manifest:
                 stream_manager.clear_directory(state.running.preview_manifest.parent)
+            unregister_cloud_assets(state.cloud_asset_ids)
             transferred_bytes = state.transferred_bytes()
+            STATE.stream_exit_recorded.add((state.config_name, name))
             app_db.record_stream_stop(state.config_name, name, state.running.process.returncode, transferred_bytes)
             app_db.record_event(
                 "stream_stopped",
@@ -2369,6 +3330,25 @@ def status_payload(config_name: str) -> dict[str, Any]:
         streams = {name: state.as_dict() for name, state in STATE.streams.items()}
         tasks = [task.as_dict() for task in list(STATE.tasks)]
         preview = STATE.preview.as_dict() if STATE.preview else None
+    channel_map = {
+        str(channel.get("name") or ""): channel
+        for channel in channels
+        if str(channel.get("name") or "").strip()
+    }
+    for name, stream in streams.items():
+        channel = channel_map.get(name)
+        if not channel:
+            continue
+        stats = stream.get("stream_stats") if isinstance(stream.get("stream_stats"), dict) else {}
+        target_fps = float(stream_manager.live_profile(config, channel).get("fps") or 0) if config else 0.0
+        if target_fps > 0:
+            refreshed = parse_stream_stats(stream.get("log_tail", ""), running=bool(stream.get("running")), target_fps=target_fps)
+            stream["stream_stats"] = refreshed
+        else:
+            stream["stream_stats"] = {
+                **stats,
+                "target_fps": None,
+            }
     if preview:
         preview_channel = str(preview.get("channel") or "")
         if preview_channel in streams:
@@ -2421,6 +3401,8 @@ def status_payload(config_name: str) -> dict[str, Any]:
         "streams": streams,
         "preview": preview or {"channel": "", "running": False, "preview_url": None, "preview_ready": False, "preview_warning": None},
         "stream_history": stream_history,
+        "alerts": alerts_status(config_name, config) if config else {"recent": []},
+        "scheduler": scheduler_status(config_name, config) if config else default_scheduler_settings(),
         "usage": {
             "stream_transfer_today_bytes": app_db.stream_transfer_today_bytes(config_name) + active_transfer_bytes,
             "active_stream_transfer_bytes": active_transfer_bytes,
@@ -2433,6 +3415,164 @@ def status_payload(config_name: str) -> dict[str, Any]:
         "tasks": tasks,
         "activity_events": app_db.recent_app_events(config_name, limit=60),
     }
+
+
+def finalize_stream_lifecycle() -> None:
+    with STATE.lock:
+        items = list(STATE.streams.items())
+    for channel_name, state in items:
+        process = state.running.process
+        if process.poll() is None:
+            continue
+        key = (state.config_name, channel_name)
+        with STATE.lock:
+            if key in STATE.stream_exit_recorded:
+                continue
+            STATE.stream_exit_recorded.add(key)
+        unregister_cloud_assets(state.cloud_asset_ids)
+        transferred_bytes = state.transferred_bytes()
+        app_db.record_stream_stop(state.config_name, channel_name, process.returncode, transferred_bytes)
+        reason = stream_manager.describe_returncode(process.returncode, stop_requested=state.running.stop_requested)
+        app_db.record_event(
+            "stream_stopped" if state.running.stop_requested else "stream_exited",
+            state.config_name,
+            channel_name,
+            {
+                "returncode": process.returncode,
+                "signed_returncode": stream_manager.signed_returncode(process.returncode),
+                "reason": reason,
+                "transferred_bytes": transferred_bytes,
+            },
+        )
+        if not state.running.stop_requested:
+            config, _error = load_config_or_none(state.config_name)
+            if config:
+                emit_alert(
+                    config,
+                    state.config_name,
+                    channel_name,
+                    "stream_stopped",
+                    "danger",
+                    f"{channel_name} stopped unexpectedly",
+                    reason,
+                )
+
+
+def evaluate_stream_connection_health() -> None:
+    with STATE.lock:
+        items = list(STATE.streams.items())
+    for channel_name, state in items:
+        if state.running.process.poll() is not None:
+            continue
+        log_tail = tail_file(state.log_path)
+        config, _error = load_config_or_none(state.config_name)
+        target_fps = float(stream_manager.live_profile(config or {}, state.running.channel).get("fps") or 0)
+        stats = parse_stream_stats(log_tail, running=True, target_fps=target_fps or None)
+        label = str(stats.get("health_label") or "")
+        severity = "danger" if label == "Behind" else "warn" if label == "Watch" else ""
+        watch_key = (state.config_name, channel_name)
+        with STATE.lock:
+            watch = dict(STATE.connection_watch.get(watch_key) or {})
+        if severity:
+            bad_count = int(watch.get("bad_count") or 0) + 1
+            watch["bad_count"] = bad_count
+            watch["last_label"] = label
+            if bad_count >= 2:
+                config, _error = load_config_or_none(state.config_name)
+                if config:
+                    emit_alert(
+                        config,
+                        state.config_name,
+                        channel_name,
+                        "poor_connection",
+                        severity,
+                        f"{channel_name} connection needs attention",
+                        str(stats.get("detail") or "FFmpeg is reporting degraded live delivery."),
+                    )
+        else:
+            watch = {"bad_count": 0, "last_label": label}
+        with STATE.lock:
+            STATE.connection_watch[watch_key] = watch
+
+
+def evaluate_scheduler_for_config(config_name: str, config: dict[str, Any]) -> None:
+    scheduler = normalize_scheduler_settings(config)
+    if not scheduler.get("enabled"):
+        return
+    with STATE.lock:
+        running_names = {
+            name
+            for name, stream in STATE.streams.items()
+            if stream.config_name == config_name and stream.running.process.poll() is None
+        }
+        runtime_snapshot = dict(STATE.scheduler_channels)
+    now_local = datetime.now().astimezone()
+    for channel in config.get("channels", []):
+        if not isinstance(channel, dict):
+            continue
+        channel_name = str(channel.get("name") or "").strip()
+        if not channel_name:
+            continue
+        entry = schedule_entry_for_channel(config, channel_name)
+        if not entry or not entry.get("enabled"):
+            continue
+        runtime_key = (config_name, channel_name)
+        runtime = dict(runtime_snapshot.get(runtime_key) or {})
+        should_run = schedule_is_active(entry, now_local)
+        is_running = channel_name in running_names
+        runtime["last_evaluated_at"] = now_local.isoformat(timespec="seconds")
+        if should_run and not is_running:
+            try:
+                assert_youtube_channel_keys_match(config_name, channel_name)
+                started = start_stream(config_name, channel_name)
+                if started:
+                    runtime["controlled_run"] = True
+                    runtime["last_action"] = "started"
+                    emit_alert(
+                        config,
+                        config_name,
+                        channel_name,
+                        "scheduler_started",
+                        "info",
+                        f"Scheduler started {channel_name}",
+                        f"Daily schedule opened at {entry.get('start_time')}.",
+                    )
+            except Exception as exc:
+                app_db.record_event(
+                    "scheduler_start_failed",
+                    config_name,
+                    channel_name,
+                    {"message": str(exc)},
+                )
+        elif not should_run and is_running and bool(runtime.get("controlled_run")):
+            stopped = stop_stream(channel_name)
+            if stopped:
+                runtime["controlled_run"] = False
+                runtime["last_action"] = "stopped"
+                emit_alert(
+                    config,
+                    config_name,
+                    channel_name,
+                    "scheduler_stopped",
+                    "info",
+                    f"Scheduler stopped {channel_name}",
+                    f"Daily schedule ended at {entry.get('stop_time')}.",
+                )
+        with STATE.lock:
+            STATE.scheduler_channels[runtime_key] = runtime
+
+
+def automation_loop() -> None:
+    while not STATE.stop_event.wait(15):
+        try:
+            finalize_stream_lifecycle()
+            evaluate_stream_connection_health()
+            for config_name in available_configs():
+                config, _error = load_config_or_none(config_name)
+                if config:
+                    evaluate_scheduler_for_config(config_name, config)
+        except Exception as exc:
+            print(f"[automation] {exc}")
 
 
 def content_type(path: Path) -> str:
@@ -2551,6 +3691,18 @@ def sync_token_record(token: str) -> dict[str, Any]:
         record = STATE.sync_tokens.get(token)
     if not record or time.time() >= float(record.get("expiresAt") or 0):
         raise ValueError("Sync session expired. Scan the QR code again.")
+    device = record.get("device") if isinstance(record.get("device"), dict) else {}
+    account_id = str(record.get("accountId") or "")
+    device_id = str(device.get("id") or "")
+    if account_id and device_id:
+        updated = sync_service.remember_device(
+            account_id,
+            device_id,
+            str(device.get("deviceName") or device.get("name") or "Mobile device"),
+            str(device.get("platform") or "android"),
+        )
+        with STATE.lock:
+            record["device"] = updated
     return record
 
 
@@ -2629,6 +3781,89 @@ def handle_sync_pull(handler: BaseHTTPRequestHandler, token: str) -> dict[str, A
     return {"ok": True, "bundle": sync_bundle_for_record(record, token, sync_base_url(handler))}
 
 
+def remote_status_for_record(record: dict[str, Any]) -> dict[str, Any]:
+    config_name = safe_config_name(record.get("configName"))
+    payload = status_payload(config_name)
+    scheduler = payload.get("scheduler") if isinstance(payload.get("scheduler"), dict) else {}
+    scheduler_by_channel = {
+        str(item.get("channel") or ""): item
+        for item in scheduler.get("channels", [])
+        if isinstance(item, dict)
+    }
+    channels: list[dict[str, Any]] = []
+    for item in payload.get("channels", []):
+        channel_name = str(item.get("name") or "").strip()
+        if not channel_name:
+            continue
+        stream = payload.get("streams", {}).get(channel_name, {})
+        stats = stream.get("stream_stats") if isinstance(stream.get("stream_stats"), dict) else {}
+        channels.append(
+            {
+                "channelId": sync_service.channel_id(config_name, channel_name),
+                "channelName": channel_name,
+                "running": bool(stream.get("running")),
+                "healthLabel": str(stats.get("health_label") or ("Live" if stream.get("running") else "Idle")),
+                "healthDetail": str(stats.get("detail") or ""),
+                "bitrateBps": int(stats.get("average_bitrate_bps") or 0),
+                "speed": stats.get("speed"),
+                "transferredBytes": int(stream.get("transferred_bytes") or 0),
+                "scheduler": scheduler_by_channel.get(channel_name, {}),
+            }
+        )
+    alerts = payload.get("alerts", {}) if isinstance(payload.get("alerts"), dict) else {}
+    return {
+        "ok": True,
+        "desktopLabel": "Castarro Desktop",
+        "configName": config_name,
+        "generatedAt": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "channels": channels,
+        "alerts": alerts,
+        "scheduler": scheduler,
+        "syncServer": sync_public_status().get("syncServer", {}),
+        "appVersion": payload.get("app_version"),
+    }
+
+
+def handle_sync_remote_status(token: str) -> dict[str, Any]:
+    record = sync_token_record(token)
+    return remote_status_for_record(record)
+
+
+def handle_sync_remote_control(token: str, body: dict[str, Any]) -> dict[str, Any]:
+    record = sync_token_record(token)
+    config_name = safe_config_name(record.get("configName"))
+    action = str(body.get("action") or "").strip().lower()
+    channel_name = str(body.get("channelName") or body.get("channel") or "").strip()
+    if action not in {"start", "stop", "restart"}:
+        raise ValueError("Remote action must be start, stop, or restart.")
+    if not channel_name:
+        raise ValueError("Remote control requires a channel name.")
+    if action in {"start", "restart"}:
+        assert_youtube_channel_keys_match(config_name, channel_name)
+    if action == "start":
+        changed = start_stream(config_name, channel_name)
+    elif action == "stop":
+        changed = stop_stream(channel_name)
+    else:
+        stop_stream(channel_name)
+        changed = start_stream(config_name, channel_name)
+    app_db.record_event(
+        "remote_control_action",
+        config_name,
+        channel_name,
+        {
+            "action": action,
+            "device": (record.get("device") or {}).get("deviceName") or "Mobile device",
+        },
+    )
+    return {
+        "ok": True,
+        "action": action,
+        "changed": changed,
+        "status": remote_status_for_record(record),
+    }
+
+
 def sync_video_path(record: dict[str, Any], requested_path: str) -> Path:
     config_name = safe_config_name(record.get("configName"))
     config, error = load_config_or_none(config_name)
@@ -2664,6 +3899,11 @@ class SyncHandler(BaseHTTPRequestHandler):
                 token = str(query.get("syncToken", [""])[0] or "")
                 json_response(self, handle_sync_pull(self, token))
                 return
+            if parsed.path == "/sync/status":
+                query = parse_qs(parsed.query)
+                token = str(query.get("syncToken", [""])[0] or "")
+                json_response(self, handle_sync_remote_status(token))
+                return
             if parsed.path == "/sync/video":
                 query = parse_qs(parsed.query)
                 token = str(query.get("syncToken", [""])[0] or "")
@@ -2692,6 +3932,11 @@ class SyncHandler(BaseHTTPRequestHandler):
             if parsed.path.startswith("/sync/pair/"):
                 token = parsed.path.rsplit("/", 1)[-1]
                 json_response(self, handle_sync_pair_login(self, token, body if isinstance(body, dict) else {}))
+                return
+            if parsed.path == "/sync/control":
+                query = parse_qs(parsed.query)
+                token = str(query.get("syncToken", [""])[0] or "")
+                json_response(self, handle_sync_remote_control(token, body if isinstance(body, dict) else {}))
                 return
             json_response(self, {"error": "Not found"}, 404)
         except Exception as exc:
@@ -2802,6 +4047,13 @@ class Handler(BaseHTTPRequestHandler):
                 json_response(self, storage_files(config_name, provider_id, folder_id))
                 return
 
+            if parsed.path == "/api/storage/auth/start":
+                config_name = safe_config_name(query.get("config", [DEFAULT_CONFIG])[0])
+                provider_id = str(query.get("provider", [""])[0] or "").strip()
+                update_request_trace(self, config_name=config_name)
+                json_response(self, create_storage_auth_start(config_name, provider_id))
+                return
+
             if parsed.path == "/api/youtube/auth/start":
                 config_name = safe_config_name(query.get("config", [DEFAULT_CONFIG])[0])
                 account_id = str(query.get("account", [""])[0] or "").strip()
@@ -2816,8 +4068,20 @@ class Handler(BaseHTTPRequestHandler):
                 write_response(self, 200, html, "text/html; charset=utf-8")
                 return
 
+            if parsed.path == "/api/storage/oauth/callback":
+                html = handle_storage_oauth_callback(query).encode("utf-8")
+                write_response(self, 200, html, "text/html; charset=utf-8")
+                return
+
             if parsed.path == "/oauth2redirect":
-                html = handle_youtube_oauth_callback(query).encode("utf-8")
+                oauth_state = str(query.get("state", [""])[0] or "")
+                with STATE.lock:
+                    is_storage_state = oauth_state in STATE.storage_oauth_states
+                html = (
+                    handle_storage_oauth_callback(query)
+                    if is_storage_state
+                    else handle_youtube_oauth_callback(query)
+                ).encode("utf-8")
                 write_response(self, 200, html, "text/html; charset=utf-8")
                 return
 
@@ -2981,6 +4245,16 @@ class Handler(BaseHTTPRequestHandler):
                 json_response(self, disconnect_storage_provider(config_name, provider_id))
                 return
 
+            if parsed.path == "/api/storage/video/prepare":
+                provider_id = str(body.get("provider") or "").strip()
+                file_id = str(body.get("file_id") or body.get("provider_file_id") or body.get("providerFileId") or "").strip()
+                if not provider_id:
+                    raise ValueError("Storage provider is required.")
+                if not file_id:
+                    raise ValueError("Storage file ID is required.")
+                json_response(self, prepare_storage_video(config_name, provider_id, file_id))
+                return
+
             if parsed.path == "/api/youtube/schedule":
                 json_response(self, schedule_youtube(config_name, body))
                 return
@@ -3072,6 +4346,7 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path == "/api/system/shutdown":
                 stop_streams = bool(body.get("stop_streams", True))
                 stop_tasks_requested = bool(body.get("stop_tasks", True))
+                STATE.stop_event.set()
                 stopped_streams = stop_stream(None) if stop_streams else []
                 if stop_tasks_requested:
                     shutdown_tasks()
@@ -3105,12 +4380,18 @@ def shutdown_streams() -> None:
         streams = list(STATE.streams.values())
         preview = STATE.preview
         STATE.preview = None
+        proxy = STATE.cloud_proxy
+        STATE.cloud_proxy = None
+        STATE.cloud_proxy_settings = {}
     if preview:
         stream_manager.stop_stream(preview.running)
         if preview.running.preview_manifest:
             stream_manager.clear_directory(preview.running.preview_manifest.parent)
     for state in streams:
         stream_manager.stop_stream(state.running)
+        unregister_cloud_assets(state.cloud_asset_ids)
+    if proxy:
+        proxy.stop()
 
 
 def shutdown_tasks() -> None:
@@ -3141,9 +4422,13 @@ def main() -> int:
     SYNC_PORT = int(sync_server.server_address[1])
     sync_thread = threading.Thread(target=sync_server.serve_forever, daemon=True)
     sync_thread.start()
+    STATE.stop_event.clear()
+    automation_thread = threading.Thread(target=automation_loop, daemon=True)
+    automation_thread.start()
 
     def handle_stop(_signum: int, _frame: Any) -> None:
         print("\nStopping UI, tasks, and streams...")
+        STATE.stop_event.set()
         shutdown_tasks()
         shutdown_streams()
         threading.Thread(target=server.shutdown, daemon=True).start()
@@ -3157,6 +4442,7 @@ def main() -> int:
     try:
         server.serve_forever()
     finally:
+        STATE.stop_event.set()
         sync_server.shutdown()
         sync_server.server_close()
         shutdown_tasks()

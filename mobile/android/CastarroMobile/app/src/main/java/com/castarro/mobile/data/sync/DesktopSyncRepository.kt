@@ -11,6 +11,7 @@ import com.castarro.mobile.data.preferences.AppPreferences
 import com.castarro.mobile.data.preferences.castarroDataStore
 import com.castarro.mobile.data.secrets.SecretStore
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -37,6 +38,50 @@ data class DesktopDownloadableVideo(
     val sizeBytes: Long,
 )
 
+data class DesktopRemoteSession(
+    val baseUrl: String,
+    val syncToken: String,
+    val configName: String,
+    val deviceName: String,
+    val expiresAt: String?,
+)
+
+data class DesktopRemoteAlert(
+    val id: Long,
+    val channelName: String,
+    val severity: String,
+    val title: String,
+    val message: String,
+    val createdAt: String,
+    val mobileEnabled: Boolean,
+)
+
+data class DesktopRemoteChannelStatus(
+    val channelId: String,
+    val channelName: String,
+    val running: Boolean,
+    val healthLabel: String,
+    val healthDetail: String,
+    val transferredBytes: Long,
+    val bitrateBps: Long,
+    val scheduleEnabled: Boolean,
+    val scheduleInWindow: Boolean,
+    val nextStartAt: String?,
+    val nextStopAt: String?,
+)
+
+data class DesktopRemoteStatus(
+    val connected: Boolean,
+    val desktopLabel: String,
+    val configName: String,
+    val generatedAt: String,
+    val alertsEnabled: Boolean,
+    val schedulerEnabled: Boolean,
+    val channels: List<DesktopRemoteChannelStatus>,
+    val recentAlerts: List<DesktopRemoteAlert>,
+    val errorMessage: String? = null,
+)
+
 class DesktopSyncRepository(
     private val context: Context,
     private val database: CastarroDatabase,
@@ -57,7 +102,59 @@ class DesktopSyncRepository(
                         .put("platform", "android"),
                 ),
         )
+        persistRemoteSession(pairing, response)
         importBundle(response.getJSONObject("bundle"), request.includeVideos)
+    }
+
+    suspend fun currentRemoteSession(): DesktopRemoteSession? = withContext(Dispatchers.IO) {
+        val preferences = context.castarroDataStore.data.first()
+        val baseUrl = preferences[AppPreferences.DesktopRemoteBaseUrl].orEmpty().trim()
+        val syncToken = preferences[AppPreferences.DesktopRemoteSyncToken].orEmpty().trim()
+        if (baseUrl.isBlank() || syncToken.isBlank()) return@withContext null
+        DesktopRemoteSession(
+            baseUrl = baseUrl,
+            syncToken = syncToken,
+            configName = preferences[AppPreferences.DesktopRemoteConfigName].orEmpty(),
+            deviceName = preferences[AppPreferences.DesktopRemoteDeviceName].orEmpty().ifBlank { "Castarro Desktop" },
+            expiresAt = preferences[AppPreferences.DesktopRemoteExpiresAt],
+        )
+    }
+
+    suspend fun fetchRemoteStatus(): DesktopRemoteStatus = withContext(Dispatchers.IO) {
+        val session = currentRemoteSession() ?: return@withContext DesktopRemoteStatus(
+            connected = false,
+            desktopLabel = "Castarro Desktop",
+            configName = "",
+            generatedAt = "",
+            alertsEnabled = false,
+            schedulerEnabled = false,
+            channels = emptyList(),
+            recentAlerts = emptyList(),
+            errorMessage = "Pair with the desktop first.",
+        )
+        val payload = getJson("${session.baseUrl}/sync/status?syncToken=${Uri.encode(session.syncToken)}")
+        payload.toRemoteStatus()
+    }
+
+    suspend fun sendRemoteControl(action: String, channelName: String): DesktopRemoteStatus = withContext(Dispatchers.IO) {
+        val session = currentRemoteSession() ?: error("Pair with the desktop first.")
+        val payload = postJson(
+            "${session.baseUrl}/sync/control?syncToken=${Uri.encode(session.syncToken)}",
+            JSONObject()
+                .put("action", action)
+                .put("channelName", channelName),
+        )
+        payload.getJSONObject("status").toRemoteStatus()
+    }
+
+    suspend fun rememberLastRemoteAlertId(alertId: Long) {
+        context.castarroDataStore.edit { preferences ->
+            preferences[AppPreferences.DesktopRemoteLastAlertId] = alertId.toString()
+        }
+    }
+
+    suspend fun lastRemoteAlertId(): Long = withContext(Dispatchers.IO) {
+        context.castarroDataStore.data.first()[AppPreferences.DesktopRemoteLastAlertId]?.toLongOrNull() ?: 0L
     }
 
     private suspend fun importBundle(bundle: JSONObject, includeVideos: Boolean): DesktopSyncResult {
@@ -181,6 +278,40 @@ class DesktopSyncRepository(
         }
     }
 
+    private fun getJson(url: String): JSONObject {
+        val connection = URL(url).openConnection() as HttpURLConnection
+        return try {
+            connection.requestMethod = "GET"
+            connection.setRequestProperty("Accept", "application/json")
+            val stream = if (connection.responseCode in 200..299) connection.inputStream else connection.errorStream
+            val payload = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty().ifBlank { "{}" }
+            if (connection.responseCode !in 200..299) {
+                throw IllegalStateException(JSONObject(payload).optString("error").ifBlank { "Desktop remote status failed." })
+            }
+            JSONObject(payload)
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private suspend fun persistRemoteSession(pairing: DesktopPairingLink, response: JSONObject) {
+        val syncToken = response.optString("syncToken").trim()
+        if (syncToken.isBlank()) return
+        val deviceName = response.optJSONObject("device")?.optString("deviceName").orEmpty()
+            .ifBlank { response.optJSONObject("account")?.optString("displayName").orEmpty() }
+            .ifBlank { "Castarro Desktop" }
+        context.castarroDataStore.edit { preferences ->
+            preferences[AppPreferences.DesktopRemoteBaseUrl] = "http://${pairing.host}:${pairing.port}"
+            preferences[AppPreferences.DesktopRemoteSyncToken] = syncToken
+            preferences[AppPreferences.DesktopRemoteConfigName] = response.optJSONObject("bundle")?.optString("configName").orEmpty()
+            preferences[AppPreferences.DesktopRemoteDeviceName] = deviceName
+            preferences[AppPreferences.DesktopRemoteLastAlertId] = "0"
+            response.optString("expiresAt").takeIf { it.isNotBlank() }?.let {
+                preferences[AppPreferences.DesktopRemoteExpiresAt] = it
+            }
+        }
+    }
+
     private fun deviceId(): String {
         val file = File(context.filesDir, "sync-device-id.txt")
         if (file.exists()) {
@@ -213,6 +344,50 @@ private data class DesktopPairingLink(
 
 private fun JSONObject.optLongOrNull(name: String): Long? =
     if (has(name) && !isNull(name)) optLong(name) else null
+
+private fun JSONObject.toRemoteStatus(): DesktopRemoteStatus {
+    val channels = optJSONArray("channels") ?: JSONArray()
+    val alerts = optJSONObject("alerts")
+    val recentAlerts = alerts?.optJSONArray("recent") ?: JSONArray()
+    return DesktopRemoteStatus(
+        connected = optBoolean("ok", true),
+        desktopLabel = optString("desktopLabel").ifBlank { "Castarro Desktop" },
+        configName = optString("configName"),
+        generatedAt = optString("generatedAt"),
+        alertsEnabled = alerts?.optBoolean("mobile_notifications_enabled", false) == true,
+        schedulerEnabled = optJSONObject("scheduler")?.optBoolean("enabled", false) == true,
+        channels = List(channels.length()) { index ->
+            val item = channels.getJSONObject(index)
+            val schedule = item.optJSONObject("scheduler")
+            DesktopRemoteChannelStatus(
+                channelId = item.optString("channelId"),
+                channelName = item.optString("channelName"),
+                running = item.optBoolean("running", false),
+                healthLabel = item.optString("healthLabel").ifBlank { if (item.optBoolean("running", false)) "Live" else "Idle" },
+                healthDetail = item.optString("healthDetail"),
+                transferredBytes = item.optLongOrNull("transferredBytes") ?: 0L,
+                bitrateBps = item.optLongOrNull("bitrateBps") ?: 0L,
+                scheduleEnabled = schedule?.optBoolean("enabled", false) == true,
+                scheduleInWindow = schedule?.optBoolean("in_window", false) == true,
+                nextStartAt = schedule?.optString("next_start_at")?.ifBlank { null },
+                nextStopAt = schedule?.optString("next_stop_at")?.ifBlank { null },
+            )
+        },
+        recentAlerts = List(recentAlerts.length()) { index ->
+            val item = recentAlerts.getJSONObject(index)
+            DesktopRemoteAlert(
+                id = item.optLong("id"),
+                channelName = item.optString("channel_name"),
+                severity = item.optString("severity").ifBlank { "info" },
+                title = item.optString("title"),
+                message = item.optString("message"),
+                createdAt = item.optString("created_at"),
+                mobileEnabled = item.optBoolean("mobile_enabled", true),
+            )
+        },
+        errorMessage = optString("errorMessage").ifBlank { null },
+    )
+}
 
 private fun String.toMobileProfileMode(): String =
     when (trim()) {

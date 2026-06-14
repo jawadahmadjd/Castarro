@@ -44,6 +44,10 @@ fun HomeScreen(
     state: MobileUiState,
     onStartStream: () -> Unit,
     onStopStream: () -> Unit,
+    onStartDesktopRemoteStream: () -> Unit,
+    onStopDesktopRemoteStream: () -> Unit,
+    onRestartDesktopRemoteStream: () -> Unit,
+    onRefreshDesktopRemoteStatus: () -> Unit,
     onStreamProtectionAction: (StreamProtectionAction) -> Unit,
     onScanSyncPairing: () -> Unit,
     onToggleDesktopVideoDownload: (String, Boolean) -> Unit,
@@ -64,6 +68,10 @@ fun HomeScreen(
     val syncSummary = state.syncMessage ?: state.desktopSyncLastSummary
     val downloadableVideos = state.videos.filter { it.localPath.isNullOrBlank() && it.sourceUri.startsWith("http") }
     val downloadTask = state.desktopVideoDownloadTask
+    val remoteChannel = state.remoteStatus.channels.firstOrNull { it.channelId == state.channel?.id }
+    val remoteAlerts = state.remoteStatus.recentAlerts
+        .filter { it.channelName.isBlank() || it.channelName == channelName }
+        .take(3)
 
     Column(
         modifier = modifier
@@ -193,6 +201,66 @@ fun HomeScreen(
                                 Text("Cancel")
                             }
                         }
+                    }
+                }
+            }
+
+            SurfaceCard {
+                Text("Desktop remote control", fontWeight = FontWeight.Bold)
+                Text(
+                    state.remoteStatus.errorMessage
+                        ?: if (state.remoteStatus.connected) {
+                            "${state.remoteStatus.desktopLabel} is ready for health monitoring and channel control."
+                        } else {
+                            "Pair the desktop QR to monitor and control this channel from your phone."
+                        },
+                    color = Colors.Muted,
+                )
+                remoteChannel?.let { remote ->
+                    Text(
+                        "${remote.channelName} - ${if (remote.running) "Running" else "Idle"} - ${remote.healthLabel}",
+                        fontWeight = FontWeight.Bold,
+                    )
+                    Text(remote.healthDetail.ifBlank {
+                        if (remote.scheduleEnabled) {
+                            if (remote.scheduleInWindow) "Inside the scheduled daily window." else "Outside the scheduled daily window."
+                        } else {
+                            "No desktop schedule is active for this channel."
+                        }
+                    }, color = Colors.Muted)
+                }
+                if (remoteAlerts.isNotEmpty()) {
+                    remoteAlerts.forEach { alert ->
+                        Text("${alert.title}: ${alert.message}", color = if (alert.severity == "danger") Colors.Danger else Colors.Muted)
+                    }
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Button(
+                        onClick = onRefreshDesktopRemoteStatus,
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Text("Refresh")
+                    }
+                    Button(
+                        onClick = if (remoteChannel?.running == true) onStopDesktopRemoteStream else onStartDesktopRemoteStream,
+                        enabled = remoteChannel != null && !state.isRemoteActionBusy,
+                        colors = ButtonDefaults.buttonColors(containerColor = if (remoteChannel?.running == true) Colors.Danger else Colors.Green),
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        if (state.isRemoteActionBusy) {
+                            CircularProgressIndicator(modifier = Modifier.padding(end = 8.dp))
+                        }
+                        Text(if (remoteChannel?.running == true) "Stop desktop" else "Start desktop")
+                    }
+                    Button(
+                        onClick = onRestartDesktopRemoteStream,
+                        enabled = remoteChannel != null && !state.isRemoteActionBusy,
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Text("Restart")
                     }
                 }
             }

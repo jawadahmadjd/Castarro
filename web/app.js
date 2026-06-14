@@ -62,9 +62,23 @@ const state = {
   youtubeSelectedAccountId: "",
   youtubeImportedBroadcastId: "",
   youtubeScheduleDraft: null,
+  storageConnectBusyProviderId: "",
+  cloudBrowser: {
+    open: false,
+    channelIndex: -1,
+    providerId: "",
+    folderId: "root",
+    folderName: "Google Drive",
+    parentId: "",
+    items: [],
+    loading: false,
+    error: "",
+    addingFileId: "",
+  },
   localActivityEvents: [],
   activityRenderedItems: [],
   activityExportedSignature: "",
+  deliveredAlertIds: [],
   settingsLiveHistory: {
     sessions: [],
     filter: "last_28",
@@ -88,6 +102,7 @@ const DASHBOARD_CACHE_KEY = "castarro.dashboard.frontPage.v1";
 const YOUTUBE_STATUS_CACHE_KEY = "castarro.youtube.status.v1";
 const PREVIEW_ENABLED_KEY = "castarro.preview.enabled.v1";
 const WORKSPACE_ROUTES = ["overview", "encoder", "youtube", "history", "troubleshoot"];
+const SCHEDULE_DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
 const routeToSettingsTab = {
   encoder: "normalize",
   youtube: "youtube",
@@ -111,6 +126,32 @@ function formatBytes(value) {
 function formatCpuUsage(value) {
   const percent = Math.max(0, Number(value) || 0);
   return `${percent >= 10 ? percent.toFixed(0) : percent.toFixed(1)}%`;
+}
+
+function formatFps(value) {
+  const fps = Number(value);
+  if (!Number.isFinite(fps) || fps < 0) return "Unavailable";
+  return `${fps >= 10 ? fps.toFixed(1) : fps.toFixed(2)} fps`;
+}
+
+function formatSpeed(value) {
+  const speed = Number(value);
+  if (!Number.isFinite(speed) || speed < 0) return "Unavailable";
+  return `${speed.toFixed(2)}x`;
+}
+
+function formatBitrate(value) {
+  const bps = Number(value);
+  if (!Number.isFinite(bps) || bps <= 0) return "Unavailable";
+  const units = ["bps", "Kbps", "Mbps", "Gbps"];
+  let amount = bps;
+  let unitIndex = 0;
+  while (amount >= 1000 && unitIndex < units.length - 1) {
+    amount /= 1000;
+    unitIndex += 1;
+  }
+  const decimals = amount >= 10 || unitIndex === 0 ? 1 : 2;
+  return `${amount.toFixed(decimals)} ${units[unitIndex]}`;
 }
 
 function usageProcessPids(payload) {
@@ -193,18 +234,31 @@ const defaultYoutubeSettings = () => ({
   default_auto_stop: true,
 });
 
-const defaultStorageSettings = () => ({
-  providers: [
-    {
-      id: "google-drive-main",
-      type: "googleDrive",
-      display_name: "Google Drive",
-      auth_mode: "oauth",
-      tokens_file: ".runtime/google_drive_tokens_google-drive-main.json",
-      account_email: "",
-      status: "",
-    },
+const defaultStorageProviderOauth = () => ({
+  client_id: "",
+  client_secret: "",
+  redirect_uri: "http://127.0.0.1:8765/oauth2redirect",
+  oauth_client_type: "desktop",
+  use_pkce: true,
+  scopes: [
+    "https://www.googleapis.com/auth/drive.readonly",
+    "https://www.googleapis.com/auth/userinfo.email",
   ],
+});
+
+const defaultStorageProvider = () => ({
+  id: "google-drive-main",
+  type: "googleDrive",
+  display_name: "Google Drive",
+  auth_mode: "oauth",
+  tokens_file: ".runtime/google_drive_tokens_google-drive-main.json",
+  account_email: "",
+  status: "",
+  oauth: defaultStorageProviderOauth(),
+});
+
+const defaultStorageSettings = () => ({
+  providers: [defaultStorageProvider()],
   source_proxy: {
     host: "127.0.0.1",
     port: 8876,
@@ -213,6 +267,25 @@ const defaultStorageSettings = () => ({
     max_cache_mb: 2048,
     spool_before_start: false,
   },
+});
+
+const defaultAlertSettings = () => ({
+  desktop_notifications_enabled: true,
+  mobile_notifications_enabled: true,
+  cooldown_seconds: 300,
+  rules: {
+    stream_stopped: true,
+    poor_connection: true,
+    scheduler_started: true,
+    scheduler_stopped: true,
+  },
+});
+
+const defaultSchedulerSettings = () => ({
+  enabled: false,
+  timezone: "local",
+  poll_seconds: 20,
+  channels: [],
 });
 
 const defaultConfigData = () => ({
@@ -245,12 +318,36 @@ const defaultConfigData = () => ({
   live_profile: defaultLiveProfile(),
   youtube: defaultYoutubeSettings(),
   storage: defaultStorageSettings(),
+  alerts: defaultAlertSettings(),
+  scheduler: defaultSchedulerSettings(),
   ui: {
     channel_workspace_enabled: true,
     legacy_tabs_enabled: false,
   },
   channels: [],
 });
+
+function normalizedStorageProviders(config) {
+  const storage = { ...defaultStorageSettings(), ...(config?.storage || {}) };
+  const raw = Array.isArray(storage.providers) ? storage.providers : defaultStorageSettings().providers;
+  return raw.map((provider, index) => {
+    const fallback = index === 0 ? defaultStorageProvider() : {
+      ...defaultStorageProvider(),
+      id: String(provider?.id || `storage-${index + 1}`).trim() || `storage-${index + 1}`,
+      display_name: String(provider?.display_name || provider?.displayName || `Storage ${index + 1}`).trim() || `Storage ${index + 1}`,
+      type: String(provider?.type || "googleDrive").trim() || "googleDrive",
+      tokens_file: String(provider?.tokens_file || provider?.tokensFile || "").trim() || `.runtime/storage_tokens_${index + 1}.json`,
+    };
+    return {
+      ...fallback,
+      ...(provider || {}),
+      oauth: {
+        ...defaultStorageProviderOauth(),
+        ...((provider && typeof provider.oauth === "object") ? provider.oauth : {}),
+      },
+    };
+  });
+}
 
 const defaultChannel = (index) => ({
   name: `channel_${index}`,
@@ -709,8 +806,14 @@ async function api(path, options = {}) {
 async function refresh() {
   const payload = await api(`/api/status?config=${encodeURIComponent(state.config)}`);
   const visiblePayload = applyPendingChannelRemovalToStatus(payload);
+  const hadStatus = Boolean(state.status);
   state.status = visiblePayload;
   state.storageStatus = visiblePayload.storage || state.storageStatus;
+  if (hadStatus) {
+    deliverDesktopAlerts(visiblePayload);
+  } else {
+    rememberDeliveredAlertIds((visiblePayload?.alerts?.recent || []).map((item) => Number(item?.id || 0)));
+  }
 
   const previousConfig = state.config;
   if (!visiblePayload.configs.includes(state.config)) {
@@ -1621,8 +1724,11 @@ function renderChannelTools() {
 
 function renderOverviewPanels(payload, channel) {
   const readinessNode = $("workspaceReadinessPanel");
+  const metricsNode = $("workspaceLiveMetricsPanel");
+  renderAlertsPanel(payload);
   if (!channel) {
     if (readinessNode) readinessNode.innerHTML = `<div class="notice warn">Select a channel to see readiness.</div>`;
+    if (metricsNode) metricsNode.innerHTML = `<div class="notice warn">Select a channel to inspect live stream frame delivery.</div>`;
     return;
   }
   if (readinessNode) {
@@ -1647,6 +1753,64 @@ function renderOverviewPanels(payload, channel) {
       </div>
     `;
   }
+  if (metricsNode) {
+    const stream = payload?.streams?.[channel.name] || null;
+    const stats = stream?.stream_stats || {};
+    const targetFps = Number(stats.target_fps);
+    const outputFps = Number(stats.output_fps);
+    const badgeTone = ["success", "warn", "danger"].includes(String(stats.health_tone || "")) ? stats.health_tone : "";
+    const badgeLabel = String(stats.health_label || (stream?.running ? "Collecting" : "Idle"));
+    const outputLabel = Number.isFinite(outputFps)
+      ? `${formatFps(outputFps)}${Number.isFinite(targetFps) ? ` / ${formatFps(targetFps)} target` : ""}`
+      : stream?.running
+        ? "Collecting live FPS"
+        : "Stream is idle";
+    const realtimeSpeed = Number.isFinite(Number(stats.speed)) ? formatSpeed(stats.speed) : stream?.running ? "Collecting" : "Idle";
+    const bitrateLabel = Number.isFinite(Number(stats.average_bitrate_bps)) ? formatBitrate(stats.average_bitrate_bps) : "Unavailable";
+    const sentDataLabel = Number.isFinite(Number(stats.total_size_bytes)) && Number(stats.total_size_bytes) > 0
+      ? formatBytes(stats.total_size_bytes)
+      : stream?.running
+        ? "Collecting"
+        : "0 B";
+    const dropFrames = Number.isFinite(Number(stats.drop_frames)) ? Number(stats.drop_frames) : 0;
+    const dupFrames = Number.isFinite(Number(stats.dup_frames)) ? Number(stats.dup_frames) : 0;
+    metricsNode.innerHTML = `
+      <div class="section-head compact">
+        <div>
+          <h2>Live Stream Stats</h2>
+          <p class="helper">What FFmpeg is sending for ${escapeHtml(channel.name)} right now.</p>
+        </div>
+        <span class="badge ${escapeAttr(badgeTone)}">${escapeHtml(badgeLabel)}</span>
+      </div>
+      ${stream?.running ? `
+        <div class="live-metrics-grid">
+          <article class="live-metrics-stat">
+            <span class="field-hint">Output FPS</span>
+            <strong>${escapeHtml(outputLabel)}</strong>
+            <small>${escapeHtml(stats.detail || "Measured from FFmpeg live progress.")}</small>
+          </article>
+          <article class="live-metrics-stat">
+            <span class="field-hint">Realtime Speed</span>
+            <strong>${escapeHtml(realtimeSpeed)}</strong>
+            <small>Below 1.00x usually means the stream is falling behind live.</small>
+          </article>
+          <article class="live-metrics-stat">
+            <span class="field-hint">Avg Output Bitrate</span>
+            <strong>${escapeHtml(bitrateLabel)}</strong>
+            <small>Approximate bitrate based on bytes FFmpeg has already pushed.</small>
+          </article>
+          <article class="live-metrics-stat">
+            <span class="field-hint">Sent So Far</span>
+            <strong>${escapeHtml(sentDataLabel)}</strong>
+            <small>Dropped: ${escapeHtml(String(dropFrames))} frame(s) • Duplicated: ${escapeHtml(String(dupFrames))}</small>
+          </article>
+        </div>
+        <p class="helper live-metrics-note">${escapeHtml(stats.youtube_ingest_detail || "YouTube ingest stats are not available here.")}</p>
+      ` : `
+        <div class="notice">Start the channel to watch live output FPS, realtime speed, and delivery health.</div>
+      `}
+    `;
+  }
 }
 
 function applyLegacyTabView(tab) {
@@ -1661,11 +1825,13 @@ function applySettingsSection(tab) {
   $("settingsNormalizeTab")?.classList.toggle("active", tab === "normalize");
   $("settingsStorageTab")?.classList.toggle("active", tab === "storage");
   $("settingsYoutubeTab")?.classList.toggle("active", tab === "youtube");
+  $("settingsAutomationTab")?.classList.toggle("active", tab === "automation");
   $("settingsLiveHistoryTab")?.classList.toggle("active", tab === "liveHistory");
   $("settingsTroubleshootingTab")?.classList.toggle("active", tab === "troubleshooting");
   $("settingsNormalizeView")?.classList.toggle("active", tab === "normalize");
   $("settingsStorageView")?.classList.toggle("active", tab === "storage");
   $("settingsYoutubeView")?.classList.toggle("active", tab === "youtube");
+  $("settingsAutomationView")?.classList.toggle("active", tab === "automation");
   $("settingsLiveHistoryView")?.classList.toggle("active", tab === "liveHistory");
   $("settingsTroubleshootingView")?.classList.toggle("active", tab === "troubleshooting");
 }
@@ -3288,13 +3454,23 @@ function normalizeConfigShape() {
   config.live_profile = { ...defaultLiveProfile(), ...(config.live_profile || {}) };
   config.youtube = { ...defaultYoutubeSettings(), ...(config.youtube || {}) };
   config.storage = { ...defaultStorageSettings(), ...(config.storage || {}) };
+  config.alerts = {
+    ...defaultAlertSettings(),
+    ...(config.alerts || {}),
+    rules: {
+      ...defaultAlertSettings().rules,
+      ...((config.alerts && config.alerts.rules) || {}),
+    },
+  };
+  config.scheduler = {
+    ...defaultSchedulerSettings(),
+    ...(config.scheduler || {}),
+  };
   config.storage.source_proxy = {
     ...defaultStorageSettings().source_proxy,
     ...(config.storage.source_proxy || {}),
   };
-  config.storage.providers = Array.isArray(config.storage.providers)
-    ? config.storage.providers
-    : defaultStorageSettings().providers;
+  config.storage.providers = normalizedStorageProviders(config);
   config.youtube.accounts = normalizedYoutubeAccounts(config);
   config.youtube.default_account_id = normalizeAccountId(config.youtube.default_account_id || "");
   if (!config.youtube.default_account_id && config.youtube.accounts.length) {
@@ -3440,13 +3616,23 @@ function renderSettingsForms() {
   config.normalize_profile = config.normalize_profile || {};
   config.youtube = { ...defaultYoutubeSettings(), ...(config.youtube || {}) };
   config.storage = { ...defaultStorageSettings(), ...(config.storage || {}) };
+  config.alerts = {
+    ...defaultAlertSettings(),
+    ...(config.alerts || {}),
+    rules: {
+      ...defaultAlertSettings().rules,
+      ...((config.alerts && config.alerts.rules) || {}),
+    },
+  };
+  config.scheduler = {
+    ...defaultSchedulerSettings(),
+    ...(config.scheduler || {}),
+  };
   config.storage.source_proxy = {
     ...defaultStorageSettings().source_proxy,
     ...(config.storage.source_proxy || {}),
   };
-  config.storage.providers = Array.isArray(config.storage.providers)
-    ? config.storage.providers
-    : defaultStorageSettings().providers;
+  config.storage.providers = normalizedStorageProviders(config);
   config.youtube.accounts = normalizedYoutubeAccounts(config);
   config.youtube.default_account_id = normalizeAccountId(config.youtube.default_account_id || "");
   if (!config.youtube.default_account_id && config.youtube.accounts.length) {
@@ -3468,6 +3654,7 @@ function renderSettingsForms() {
     $("folderSettingsFields").innerHTML = folderSettingsMarkup(config.defaults);
   }
   renderStorageSettingsPanel(config);
+  renderAutomationSettingsPanel(config);
 
   const activeNormalizeIndex = selectedSettingsChannelIndex(config);
   $("normalizationChannels").innerHTML = activeNormalizeIndex >= 0
@@ -3484,16 +3671,19 @@ function renderStorageSettingsPanel(config = state.configData || defaultConfigDa
   if (!container) return;
   const storage = { ...defaultStorageSettings(), ...(config.storage || {}) };
   const proxy = { ...defaultStorageSettings().source_proxy, ...(storage.source_proxy || {}) };
-  const providers = Array.isArray(storage.providers) ? storage.providers : [];
+  const providers = normalizedStorageProviders(config);
   const statusProviders = Array.isArray(state.storageStatus?.providers) ? state.storageStatus.providers : [];
   const statusById = new Map(statusProviders.map((item) => [String(item.id || ""), item]));
   const providerMarkup = providers.length
     ? providers.map((provider) => {
         const id = String(provider.id || "").trim();
+        const oauth = { ...defaultStorageProviderOauth(), ...(provider.oauth || {}) };
         const status = statusById.get(id) || provider;
         const connected = Boolean(status.connected || status.status === "connected");
         const statusLabel = connected ? "Connected" : (status.status || "Disconnected");
         const tokenText = status.tokens_present ? "Token stored" : "No token";
+        const connectBusy = state.storageConnectBusyProviderId === id;
+        const connectLabel = connected ? "Reconnect Google Drive" : "Connect Google Drive";
         return `
           <section class="channel-settings storage-provider-card">
             <div class="section-head compact">
@@ -3516,9 +3706,33 @@ function renderStorageSettingsPanel(config = state.configData || defaultConfigDa
                 <span class="field-hint">Token file</span>
                 <input value="${escapeAttr(provider.tokens_file || "")}" readonly>
               </label>
+              <label>
+                <span class="field-hint">Google client ID</span>
+                <input data-storage-provider-index="${escapeAttr(String(providers.indexOf(provider)))}" data-storage-provider-oauth-field="client_id" value="${escapeAttr(oauth.client_id || "")}" placeholder="Desktop OAuth client ID">
+              </label>
+              <label>
+                <span class="field-hint">Client secret</span>
+                <input data-storage-provider-index="${escapeAttr(String(providers.indexOf(provider)))}" data-storage-provider-oauth-field="client_secret" value="${escapeAttr(oauth.client_secret || "")}" placeholder="Optional for desktop OAuth">
+              </label>
+              <label>
+                <span class="field-hint">Redirect URI</span>
+                <input data-storage-provider-index="${escapeAttr(String(providers.indexOf(provider)))}" data-storage-provider-oauth-field="redirect_uri" value="${escapeAttr(oauth.redirect_uri || defaultStorageProviderOauth().redirect_uri)}" placeholder="http://127.0.0.1:8765/oauth2redirect">
+              </label>
+              <label>
+                <span class="field-hint">OAuth client type</span>
+                <select data-storage-provider-index="${escapeAttr(String(providers.indexOf(provider)))}" data-storage-provider-oauth-field="oauth_client_type">
+                  <option value="desktop" ${String(oauth.oauth_client_type || "desktop") === "desktop" ? "selected" : ""}>Desktop app (Recommended)</option>
+                  <option value="web" ${String(oauth.oauth_client_type || "desktop") === "web" ? "selected" : ""}>Web application</option>
+                </select>
+              </label>
+              <label class="checkbox">
+                <input type="checkbox" data-storage-provider-index="${escapeAttr(String(providers.indexOf(provider)))}" data-storage-provider-oauth-field="use_pkce" ${oauth.use_pkce !== false ? "checked" : ""}>
+                <span>Use PKCE</span>
+              </label>
             </div>
+            ${status.message ? `<div class="meta">${escapeHtml(status.message)}</div>` : ""}
             <div class="row wrap">
-              <button class="pill" type="button" onclick="connectStorageProvider('${escapeJs(id)}')">Connect Google Drive</button>
+              <button class="pill" type="button" onclick="connectStorageProvider('${escapeJs(id)}').catch((error) => toast(error.message))" ${connectBusy ? "disabled" : ""}>${escapeHtml(connectBusy ? "Opening..." : connectLabel)}</button>
               <button class="pill ghost" type="button" onclick="disconnectStorageProvider('${escapeJs(id)}')" ${connected || status.tokens_present ? "" : "disabled"}>Disconnect</button>
             </div>
           </section>
@@ -3576,9 +3790,84 @@ async function refreshStorageStatus() {
   return payload;
 }
 
-function connectStorageProvider(providerId) {
-  toast("Google Drive connection UI is next in the checklist.");
-  logLocalActivityEvent("storage_connect_pending", "Google Drive connection UI is next in the checklist.", { provider_id: providerId }, "info");
+async function waitForStorageExternalAuth(providerId) {
+  const normalizedProviderId = String(providerId || "").trim();
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < 120000) {
+    await new Promise((resolve) => window.setTimeout(resolve, 2000));
+    const payload = await refreshStorageStatus();
+    const providers = Array.isArray(payload?.providers) ? payload.providers : [];
+    const provider = providers.find((item) => String(item?.id || "").trim() === normalizedProviderId) || null;
+    if (provider?.connected || provider?.status === "connected") {
+      return true;
+    }
+    if (provider?.status === "expired" || provider?.status === "error") {
+      throw new Error(provider.message || "Google Drive connection failed.");
+    }
+  }
+  return false;
+}
+
+async function connectStorageProvider(providerId) {
+  const bridge = desktopBridge();
+  const openExternal = bridge && typeof bridge.openExternal === "function" ? bridge.openExternal.bind(bridge) : null;
+  const popup = openExternal ? null : window.open("about:blank", "storageConnect", "popup=yes,width=780,height=840");
+  if (!openExternal) {
+    if (!popup) {
+      throw new Error("Popup blocked. Please allow popups and try again.");
+    }
+    try {
+      popup.document.title = "Google Drive Connection";
+      popup.document.body.innerHTML = `
+        <main style="font-family: Segoe UI, Tahoma, sans-serif; padding: 24px;">
+          <h1 style="font-size: 18px; margin: 0 0 8px;">Opening Google Drive sign-in...</h1>
+          <p style="margin: 0; color: #555;">You can continue in this window once Google sign-in loads.</p>
+        </main>
+      `;
+    } catch {
+      // Ignore restricted popup document writes.
+    }
+  }
+
+  state.storageConnectBusyProviderId = providerId;
+  renderStorageSettingsPanel(state.configData || defaultConfigData());
+  try {
+    const data = collectSettingsData();
+    await saveConfigData(data);
+    const query = new URLSearchParams({ config: state.config, provider: providerId });
+    const payload = await api(`/api/storage/auth/start?${query.toString()}`, { action: "storage.connect.start" });
+    if (openExternal) {
+      await openExternal(payload.url);
+      toast("Complete the Google sign-in in your browser.");
+      waitForStorageExternalAuth(providerId).then((completed) => {
+        if (!completed) {
+          toast("Google Drive sign-in is still pending. Return here after completing it in your browser.");
+          return;
+        }
+        refreshStorageStatus()
+          .then(() => loadConfigText())
+          .then(() => toast("Google Drive connected."))
+          .catch((error) => toast(error.message));
+      }).catch((error) => {
+        toast(error.message || "Google Drive connection refresh failed.");
+      });
+    } else {
+      popup.location.href = payload.url;
+      toast("Complete the Google sign-in in the popup window.");
+    }
+  } catch (error) {
+    if (popup) {
+      try {
+        popup.close();
+      } catch {
+        // Ignore popup close failures.
+      }
+    }
+    throw error;
+  } finally {
+    state.storageConnectBusyProviderId = "";
+    renderStorageSettingsPanel(state.configData || defaultConfigData());
+  }
 }
 
 async function disconnectStorageProvider(providerId) {
@@ -4059,6 +4348,7 @@ function renderYoutubeSettingsPanel(config) {
     ? [selectedKeyCheck.account_label ? `Account: ${selectedKeyCheck.account_label}` : "", verificationSubscriberText].filter(Boolean).join(" | ")
     : "";
   const activeLiveIndex = selectedSettingsChannelIndex(config);
+  const activeLiveChannel = activeLiveIndex >= 0 ? config.channels[activeLiveIndex] : null;
   const streamSettingsMarkup = activeLiveIndex >= 0
     ? streamSettingsCard(config.channels[activeLiveIndex], activeLiveIndex)
     : `<section class="nested-card">No channels yet. Click <strong>Add Channel</strong> to create one.</section>`;
@@ -4070,6 +4360,28 @@ function renderYoutubeSettingsPanel(config) {
   const selectedStreamAction = selectedStreamRunning ? "stopStream" : "startStream";
   const selectedStreamButtonClass = selectedStreamRunning ? "pill danger" : "pill success";
   const selectedStreamButtonLabel = selectedStreamRunning ? "Stop Stream" : "Start Stream";
+  const storageProviders = Array.isArray(state.storageStatus?.providers) ? state.storageStatus.providers : [];
+  const storageById = new Map(storageProviders.map((item) => [String(item.id || ""), item]));
+  const selectedCloud = selectedCloudVideos(activeLiveChannel);
+  const selectedUsesCloud = Boolean(selectedCloud.length && !(Array.isArray(activeLiveChannel?.playlist) && activeLiveChannel.playlist.length));
+  const blockedCloudItem = selectedUsesCloud
+    ? selectedCloud.find((item) => cloudVideoCompatibilityStatus(item) !== "ready")
+    : null;
+  const disconnectedCloudItem = selectedUsesCloud
+    ? selectedCloud.find((item) => {
+        const providerStatus = storageById.get(cloudVideoProviderId(item));
+        return providerStatus && !(providerStatus.connected || providerStatus.status === "connected");
+      })
+    : null;
+  const streamStartDisabledReason = selectedStreamRunning
+    ? ""
+    : (!selectedChannelName
+      ? "Pick a channel to start."
+      : (disconnectedCloudItem
+        ? "Reconnect Google Drive before starting this cloud playlist."
+        : (blockedCloudItem
+          ? cloudVideoCompatibilityMessage(blockedCloudItem) || "A selected cloud video is not ready."
+          : "")));
 
   container.innerHTML = `
     <div class="youtube-page-stack">
@@ -4104,8 +4416,9 @@ function renderYoutubeSettingsPanel(config) {
             <h3>Go Live</h3>
             <p class="helper">Broadcast details used when you go live now or schedule a YouTube broadcast.</p>
           </div>
-          <button class="${selectedStreamButtonClass}" type="button" onclick="${selectedStreamAction}('${escapeJs(selectedChannelName)}').catch((error) => toast(error.message))" ${selectedChannelName ? "" : "disabled"}>${selectedStreamButtonLabel}</button>
+          <button class="${selectedStreamButtonClass}" type="button" onclick="${selectedStreamAction}('${escapeJs(selectedChannelName)}').catch((error) => toast(error.message))" ${(selectedChannelName && !streamStartDisabledReason) || selectedStreamRunning ? "" : "disabled"}>${selectedStreamButtonLabel}</button>
         </div>
+        ${streamStartDisabledReason ? `<div class="notice warn">${escapeHtml(streamStartDisabledReason)}</div>` : ""}
         <div class="form-grid youtube-go-live-form">
           <label>
             Title
@@ -5167,6 +5480,154 @@ function streamSettingsCard(channel, index) {
   `;
 }
 
+function selectedCloudVideos(channel) {
+  return Array.isArray(channel?.cloud_playlist) ? channel.cloud_playlist : [];
+}
+
+function cloudVideoProviderId(item) {
+  return String(item?.provider_id || item?.providerId || "").trim();
+}
+
+function cloudVideoFileId(item) {
+  return String(item?.file_id || item?.provider_file_id || item?.providerFileId || "").trim();
+}
+
+function cloudVideoDisplayName(item) {
+  return String(item?.display_name || item?.displayName || cloudVideoFileId(item) || "Cloud video").trim() || "Cloud video";
+}
+
+function cloudVideoCompatibilityStatus(item) {
+  return String(item?.compatibility_status || item?.compatibilityStatus || "unknown").trim() || "unknown";
+}
+
+function cloudVideoCompatibilityMessage(item) {
+  return String(item?.compatibility_message || item?.compatibilityMessage || "").trim();
+}
+
+function formatOptionalBytes(value) {
+  const bytes = Number(value);
+  return Number.isFinite(bytes) && bytes > 0 ? formatBytes(bytes) : "";
+}
+
+function cloudVideosSection(channel, index) {
+  const providers = normalizedStorageProviders(state.configData || defaultConfigData())
+    .filter((provider) => String(provider?.type || "") === "googleDrive");
+  const statusProviders = Array.isArray(state.storageStatus?.providers) ? state.storageStatus.providers : [];
+  const statusById = new Map(statusProviders.map((item) => [String(item.id || ""), item]));
+  const selectedItems = selectedCloudVideos(channel);
+  const browser = state.cloudBrowser;
+  const activeBrowser = browser.open && browser.channelIndex === index;
+  const activeProviderId = activeBrowser
+    ? String(browser.providerId || "")
+    : String(selectedItems[0]?.provider_id || selectedItems[0]?.providerId || providers[0]?.id || "");
+  const activeStatus = statusById.get(activeProviderId) || null;
+  const activeConnected = Boolean(activeStatus?.connected || activeStatus?.status === "connected");
+  const providerSelect = providers.length
+    ? `
+        <select onchange="setCloudBrowserProvider(${index}, this.value)">
+          ${providers.map((provider) => {
+            const providerId = String(provider.id || "");
+            const providerStatus = statusById.get(providerId) || provider;
+            const connected = Boolean(providerStatus?.connected || providerStatus?.status === "connected");
+            return `<option value="${escapeAttr(providerId)}" ${providerId === activeProviderId ? "selected" : ""}>${escapeHtml(provider.display_name || providerId)}${connected ? "" : " (Disconnected)"}</option>`;
+          }).join("")}
+        </select>
+      `
+    : `<span class="meta">No Google Drive provider is configured.</span>`;
+  const selectedMarkup = selectedItems.length
+    ? selectedItems.map((item) => {
+        const providerId = cloudVideoProviderId(item);
+        const fileId = cloudVideoFileId(item);
+        const status = cloudVideoCompatibilityStatus(item);
+        const badgeClass = status === "ready" ? "badge ok" : status === "needsDesktopPrep" ? "badge warn" : "badge warn";
+        const sizeText = formatOptionalBytes(item?.size_bytes ?? item?.sizeBytes);
+        const metaParts = [
+          String(item?.mime_type || item?.mimeType || "").trim(),
+          sizeText,
+        ].filter(Boolean);
+        return `
+          <div class="file-option cloud-video-option">
+            <span class="video-option-text">
+              <span class="video-option-name">${escapeHtml(cloudVideoDisplayName(item))}</span>
+              <span class="video-option-path">${escapeHtml(metaParts.join(" - ") || providerId)}</span>
+              ${cloudVideoCompatibilityMessage(item) ? `<span class="meta">${escapeHtml(cloudVideoCompatibilityMessage(item))}</span>` : ""}
+            </span>
+            <span class="${badgeClass}">${escapeHtml(status)}</span>
+            <button class="file-remove-button live-video-remove-button" type="button" title="Remove cloud video" aria-label="Remove ${escapeAttr(cloudVideoDisplayName(item))}" onclick="removeCloudVideo(${index}, '${escapeJs(providerId)}', '${escapeJs(fileId)}').catch((error) => toast(error.message))">x</button>
+          </div>
+        `;
+      }).join("")
+    : `<div class="meta">No cloud videos selected yet for this channel.</div>`;
+  const browserItems = activeBrowser
+    ? (
+      browser.loading
+        ? `<div class="meta">Loading Google Drive files...</div>`
+        : browser.error
+          ? `<div class="notice warn">${escapeHtml(browser.error)}</div>`
+          : (Array.isArray(browser.items) && browser.items.length
+            ? browser.items.map((item) => {
+                const kind = String(item?.kind || "");
+                const id = String(item?.id || "");
+                const name = String(item?.name || id || "Untitled");
+                if (kind === "folder") {
+                  return `
+                    <div class="file-option cloud-video-option">
+                      <span class="video-option-text">
+                        <span class="video-option-name">${escapeHtml(name)}</span>
+                        <span class="video-option-path">Folder</span>
+                      </span>
+                      <button class="pill ghost" type="button" onclick="browseCloudFolder(${index}, '${escapeJs(id)}').catch((error) => toast(error.message))">Open</button>
+                    </div>
+                  `;
+                }
+                const sizeText = formatOptionalBytes(item?.sizeBytes);
+                const disabled = !activeConnected || browser.addingFileId === id || item?.canDownload === false;
+                return `
+                  <div class="file-option cloud-video-option">
+                    <span class="video-option-text">
+                      <span class="video-option-name">${escapeHtml(name)}</span>
+                      <span class="video-option-path">${escapeHtml([String(item?.mimeType || "").trim(), sizeText].filter(Boolean).join(" - "))}</span>
+                    </span>
+                    <button class="pill" type="button" ${disabled ? "disabled" : ""} onclick="addCloudVideo(${index}, '${escapeJs(activeProviderId)}', '${escapeJs(id)}').catch((error) => toast(error.message))">${escapeHtml(browser.addingFileId === id ? "Adding..." : "Add")}</button>
+                  </div>
+                `;
+              }).join("")
+            : `<div class="meta">No folders or video files found here.</div>`)
+    )
+    : "";
+  const localOverrideNote = Array.isArray(channel?.playlist) && channel.playlist.length
+    ? `<div class="notice warn">This channel has a local playlist override. Clear the local videos list if you want the selected cloud videos to be used instead.</div>`
+    : `<div class="meta">When cloud videos are selected, Castarro uses them instead of the Go Live folder for this channel.</div>`;
+  return `
+    <section class="nested-card live-videos-card channel-settings">
+      <div class="section-head compact">
+        <div>
+          <h3>Cloud Videos</h3>
+          <p class="helper">Browse Google Drive and add copy-ready videos for direct streaming.</p>
+        </div>
+      </div>
+      <div class="row wrap">
+        ${providerSelect}
+        <button class="pill" type="button" onclick="${activeConnected ? `toggleCloudBrowser(${index})` : `connectStorageProvider('${escapeJs(activeProviderId)}').catch((error) => toast(error.message))`}" ${activeProviderId ? "" : "disabled"}>${escapeHtml(activeConnected ? (activeBrowser ? "Hide Drive Browser" : "Browse Google Drive") : "Connect Google Drive")}</button>
+      </div>
+      ${activeStatus?.message ? `<div class="meta">${escapeHtml(activeStatus.message)}</div>` : ""}
+      ${localOverrideNote}
+      <div class="file-picker">
+        <div class="file-list">${selectedMarkup}</div>
+      </div>
+      ${activeBrowser ? `
+        <div class="file-picker">
+          <div class="row wrap">
+            <span class="badge">${escapeHtml(browser.folderName || "Google Drive")}</span>
+            ${browser.parentId ? `<button class="pill ghost" type="button" onclick="browseCloudFolder(${index}, '${escapeJs(browser.parentId)}').catch((error) => toast(error.message))">Up One Folder</button>` : ""}
+          </div>
+          <div class="file-list">${browserItems}</div>
+        </div>
+      ` : ""}
+    </section>
+  `;
+}
+
 function liveVideosCard(channel, index) {
   const files = orderedLiveFilesForDisplay(channel, state.normalizedFilesByChannel[channel.name] || [])
     .filter((file) => !isActiveEncodingOutput(channel.name || "", file));
@@ -5174,15 +5635,18 @@ function liveVideosCard(channel, index) {
     ? files.map((file) => liveVideoOption(file, index, channel.name || "")).join("")
     : `<div class="meta">No normalized videos found yet in Go Live/${escapeHtml(channel.name || "")}. Normalize videos first.</div>`;
   return `
-    <section class="nested-card live-videos-card channel-settings selected-live-videos" data-index="${index}" data-channel-name="${escapeAttr(channel.name || "")}">
-        <div class="section-head compact">
-          <div>
-            <h3>Videos</h3>
-            <p class="helper">Drag normalized videos into the live order. Remove anything you do not want to stream.</p>
+    <div class="channel-settings-stack">
+      <section class="nested-card live-videos-card channel-settings selected-live-videos" data-index="${index}" data-channel-name="${escapeAttr(channel.name || "")}">
+          <div class="section-head compact">
+            <div>
+              <h3>Videos</h3>
+              <p class="helper">Drag normalized videos into the live order. Remove anything you do not want to stream.</p>
+            </div>
           </div>
-        </div>
-        <div class="file-list live-video-list" data-live-video-list>${fileOptions}</div>
-    </section>
+          <div class="file-list live-video-list" data-live-video-list>${fileOptions}</div>
+      </section>
+      ${cloudVideosSection(channel, index)}
+    </div>
   `;
 }
 
@@ -5367,6 +5831,159 @@ function removeLiveVideoEntry(index, liveFile) {
   state.configData = config;
   $("configEditor").value = JSON.stringify(config, null, 2) + "\n";
   scheduleSettingsAutosave?.(200);
+  renderSettingsForms();
+}
+
+async function loadCloudBrowser(index, providerId, folderId = "root") {
+  if (!providerId) {
+    throw new Error("Choose a Google Drive provider first.");
+  }
+  state.cloudBrowser = {
+    ...state.cloudBrowser,
+    open: true,
+    channelIndex: index,
+    providerId,
+    folderId,
+    loading: true,
+    error: "",
+  };
+  renderSettingsFormsUnlessPaused();
+  try {
+    const query = new URLSearchParams({
+      config: state.config,
+      provider: providerId,
+      folder: folderId,
+    });
+    const payload = await api(`/api/storage/files?${query.toString()}`, { action: "storage.files" });
+    state.cloudBrowser = {
+      ...state.cloudBrowser,
+      open: true,
+      channelIndex: index,
+      providerId,
+      folderId: String(payload?.folder?.id || folderId || "root"),
+      folderName: String(payload?.folder?.name || "Google Drive"),
+      parentId: String(payload?.folder?.parent_id || payload?.folder?.parentId || ""),
+      items: Array.isArray(payload?.items) ? payload.items : [],
+      loading: false,
+      error: payload?.ok === false ? String(payload?.message || "Could not load Google Drive files.") : "",
+    };
+  } catch (error) {
+    state.cloudBrowser = {
+      ...state.cloudBrowser,
+      open: true,
+      channelIndex: index,
+      providerId,
+      folderId,
+      items: [],
+      loading: false,
+      error: error.message || "Could not load Google Drive files.",
+    };
+    throw error;
+  } finally {
+    renderSettingsFormsUnlessPaused();
+  }
+}
+
+function toggleCloudBrowser(index) {
+  const config = state.configData || defaultConfigData();
+  const providers = normalizedStorageProviders(config).filter((provider) => String(provider?.type || "") === "googleDrive");
+  const providerId = String(state.cloudBrowser.providerId || providers[0]?.id || "").trim();
+  if (!providerId) {
+    toast("Configure a Google Drive provider in Storage settings first.");
+    return;
+  }
+  if (state.cloudBrowser.open && state.cloudBrowser.channelIndex === index) {
+    state.cloudBrowser = {
+      ...state.cloudBrowser,
+      open: false,
+      channelIndex: -1,
+      items: [],
+      error: "",
+    };
+    renderSettingsForms();
+    return;
+  }
+  loadCloudBrowser(index, providerId, "root").catch((error) => toast(error.message));
+}
+
+function setCloudBrowserProvider(index, providerId) {
+  state.cloudBrowser = {
+    ...state.cloudBrowser,
+    providerId,
+    channelIndex: index,
+  };
+  renderSettingsFormsUnlessPaused();
+  if (state.cloudBrowser.open && state.cloudBrowser.channelIndex === index) {
+    loadCloudBrowser(index, providerId, "root").catch((error) => toast(error.message));
+  }
+}
+
+async function browseCloudFolder(index, folderId) {
+  const providerId = String(state.cloudBrowser.providerId || "").trim();
+  if (!providerId) {
+    throw new Error("Choose a Google Drive provider first.");
+  }
+  await loadCloudBrowser(index, providerId, folderId || "root");
+}
+
+async function addCloudVideo(index, providerId, fileId) {
+  state.cloudBrowser = {
+    ...state.cloudBrowser,
+    addingFileId: fileId,
+  };
+  renderSettingsFormsUnlessPaused();
+  try {
+    const payload = await api("/api/storage/video/prepare", {
+      method: "POST",
+      action: "storage.video.prepare",
+      body: JSON.stringify({
+        config: state.config,
+        provider: providerId,
+        file_id: fileId,
+      }),
+    });
+    const item = payload?.item;
+    if (!item) {
+      throw new Error("Google Drive did not return a prepared cloud video item.");
+    }
+    const config = collectSettingsData();
+    const channel = config.channels?.[index];
+    if (!channel) {
+      throw new Error("Channel was not found.");
+    }
+    const current = Array.isArray(channel.cloud_playlist) ? channel.cloud_playlist : [];
+    const next = current.filter((entry) => !(
+      cloudVideoProviderId(entry) === providerId
+      && cloudVideoFileId(entry) === fileId
+    ));
+    next.push(item);
+    channel.cloud_playlist = next;
+    state.configData = config;
+    syncConfigEditor();
+    await saveConfigData(config, { render: false, refresh: false, reloadFiles: false });
+    renderSettingsForms();
+    toast(`Added ${cloudVideoDisplayName(item)} from Google Drive.`);
+  } finally {
+    state.cloudBrowser = {
+      ...state.cloudBrowser,
+      addingFileId: "",
+    };
+    renderSettingsFormsUnlessPaused();
+  }
+}
+
+async function removeCloudVideo(index, providerId, fileId) {
+  const config = collectSettingsData();
+  const channel = config.channels?.[index];
+  if (!channel) return;
+  const current = Array.isArray(channel.cloud_playlist) ? channel.cloud_playlist : [];
+  channel.cloud_playlist = current.filter((entry) => !(
+    cloudVideoProviderId(entry) === providerId
+    && cloudVideoFileId(entry) === fileId
+  ));
+  state.configData = config;
+  syncConfigEditor();
+  await saveConfigData(config, { render: false, refresh: false, reloadFiles: false });
   renderSettingsForms();
 }
 
@@ -5641,9 +6258,7 @@ function collectSettingsData() {
     ...defaultStorageSettings().source_proxy,
     ...(config.storage.source_proxy || {}),
   };
-  config.storage.providers = Array.isArray(config.storage.providers)
-    ? config.storage.providers
-    : defaultStorageSettings().providers;
+  config.storage.providers = normalizedStorageProviders(config);
   config.ui = { ...defaultConfigData().ui, ...(config.ui || {}) };
   config.ui.channel_workspace_enabled = true;
   config.ui.legacy_tabs_enabled = false;
@@ -5670,6 +6285,17 @@ function collectSettingsData() {
     config.storage.source_proxy[field] = input.type === "checkbox"
       ? input.checked
       : coerceValue(input.value, input.type);
+  });
+
+  document.querySelectorAll("[data-storage-provider-oauth-field]").forEach((input) => {
+    const index = Number(input.dataset.storageProviderIndex);
+    const field = input.dataset.storageProviderOauthField;
+    if (!Number.isInteger(index) || index < 0 || !field || !config.storage.providers?.[index]) return;
+    const provider = config.storage.providers[index];
+    provider.oauth = { ...defaultStorageProviderOauth(), ...(provider.oauth || {}) };
+    provider.oauth[field] = input.type === "checkbox"
+      ? input.checked
+      : input.value;
   });
 
   config.youtube.default_account_id = normalizeAccountId(config.youtube.default_account_id || "");
@@ -5851,6 +6477,7 @@ function settingsAutosaveTargetChanged(target) {
     "[data-profile-field]",
     "[data-youtube-field]",
     "[data-storage-proxy-field]",
+    "[data-storage-provider-oauth-field]",
     "[data-normalize-index][data-normalize-field]",
     "[data-channel-field]",
     "[data-live-profile-field]",
@@ -6233,6 +6860,9 @@ function showSettingsTab(tab) {
       })
       .catch((error) => toast(error.message));
   }
+  if (tab === "storage") {
+    refreshStorageStatus().catch((error) => toast(error.message));
+  }
 }
 
 async function refreshSyncStatus() {
@@ -6269,6 +6899,293 @@ function renderSyncPanel() {
         `).join("")
       : `<p class="helper">No mobile devices paired yet.</p>`;
   }
+}
+
+function selectedSchedulerChannelName(config = state.configData || defaultConfigData()) {
+  return String(
+    state.workspace.selectedChannelName
+    || config.channels?.[selectedSettingsChannelIndex(config)]?.name
+    || config.channels?.[0]?.name
+    || ""
+  ).trim();
+}
+
+function findSchedulerChannelEntry(config, channelName) {
+  const scheduler = { ...defaultSchedulerSettings(), ...(config?.scheduler || {}) };
+  const channels = Array.isArray(scheduler.channels) ? scheduler.channels : [];
+  return channels.find((item) => String(item?.channel || "").trim() === String(channelName || "").trim()) || null;
+}
+
+function ensureSchedulerChannelEntry(config, channelName) {
+  const scheduler = config.scheduler = {
+    ...defaultSchedulerSettings(),
+    ...(config.scheduler || {}),
+    channels: Array.isArray(config?.scheduler?.channels) ? [...config.scheduler.channels] : [],
+  };
+  let entry = scheduler.channels.find((item) => String(item?.channel || "").trim() === String(channelName || "").trim());
+  if (!entry) {
+    entry = {
+      channel: channelName,
+      enabled: false,
+      start_time: "09:00",
+      stop_time: "17:00",
+      days: [...SCHEDULE_DAYS],
+    };
+    scheduler.channels.push(entry);
+  }
+  entry.days = Array.isArray(entry.days) ? entry.days : [...SCHEDULE_DAYS];
+  return entry;
+}
+
+function updateAlertToggle(key, value) {
+  normalizeConfigShape();
+  const alerts = state.configData.alerts = {
+    ...defaultAlertSettings(),
+    ...(state.configData.alerts || {}),
+    rules: {
+      ...defaultAlertSettings().rules,
+      ...((state.configData.alerts && state.configData.alerts.rules) || {}),
+    },
+  };
+  if (key.startsWith("rules.")) {
+    alerts.rules[key.slice(6)] = Boolean(value);
+  } else {
+    alerts[key] = typeof alerts[key] === "number" ? Math.max(30, Number(value) || 300) : Boolean(value);
+  }
+  renderAutomationSettingsPanel(state.configData);
+  scheduleSettingsAutosave(200);
+}
+
+function updateSchedulerSetting(key, value) {
+  normalizeConfigShape();
+  const scheduler = state.configData.scheduler = {
+    ...defaultSchedulerSettings(),
+    ...(state.configData.scheduler || {}),
+    channels: Array.isArray(state.configData?.scheduler?.channels) ? [...state.configData.scheduler.channels] : [],
+  };
+  if (key === "enabled") {
+    scheduler.enabled = Boolean(value);
+  } else if (key === "poll_seconds") {
+    scheduler.poll_seconds = Math.max(10, Number(value) || 20);
+  }
+  renderAutomationSettingsPanel(state.configData);
+  scheduleSettingsAutosave(200);
+}
+
+function updateChannelSchedulerSetting(field, value) {
+  normalizeConfigShape();
+  const channelName = selectedSchedulerChannelName(state.configData);
+  if (!channelName) return;
+  const entry = ensureSchedulerChannelEntry(state.configData, channelName);
+  if (field === "enabled") {
+    entry.enabled = Boolean(value);
+  } else if (field === "start_time" || field === "stop_time") {
+    entry[field] = String(value || "");
+  }
+  renderAutomationSettingsPanel(state.configData);
+  scheduleSettingsAutosave(200);
+}
+
+function toggleChannelSchedulerDay(day, checked) {
+  normalizeConfigShape();
+  const channelName = selectedSchedulerChannelName(state.configData);
+  if (!channelName) return;
+  const entry = ensureSchedulerChannelEntry(state.configData, channelName);
+  const current = new Set(Array.isArray(entry.days) ? entry.days : []);
+  if (checked) {
+    current.add(day);
+  } else {
+    current.delete(day);
+  }
+  entry.days = SCHEDULE_DAYS.filter((item) => current.has(item));
+  renderAutomationSettingsPanel(state.configData);
+  scheduleSettingsAutosave(200);
+}
+
+function renderAlertsPanel(payload = state.status) {
+  const badge = $("workspaceAlertsBadge");
+  const list = $("workspaceAlertsList");
+  if (!list) return;
+  const selectedChannel = selectedWorkspaceChannelName();
+  const recent = Array.isArray(payload?.alerts?.recent) ? payload.alerts.recent : [];
+  const items = recent.filter((item) => {
+    const channel = String(item?.channel_name || "").trim();
+    return !selectedChannel || !channel || channel === selectedChannel;
+  }).slice(0, 4);
+  if (badge) {
+    badge.textContent = `${items.length} alert${items.length === 1 ? "" : "s"}`;
+    badge.className = items.some((item) => String(item?.severity || "") === "danger")
+      ? "badge warn"
+      : items.length
+        ? "badge"
+        : "badge live";
+  }
+  list.innerHTML = items.length
+    ? `<div class="alerts-list">${items.map((item) => `
+        <article class="alert-card ${escapeAttr(item.severity || "info")}">
+          <div class="alert-card-head">
+            <strong>${escapeHtml(item.title || "Alert")}</strong>
+            <span class="badge ${item.severity === "danger" ? "warn" : ""}">${escapeHtml(item.channel_name || "All channels")}</span>
+          </div>
+          <div>${escapeHtml(item.message || "")}</div>
+          <div class="helper">${escapeHtml(formatDateTime(item.created_at || ""))}</div>
+        </article>
+      `).join("")}</div>`
+    : `<p class="helper">No recent alerts for this workspace.</p>`;
+}
+
+async function showDesktopAlertNotification(alert) {
+  const title = String(alert?.title || "Castarro alert");
+  const body = String(alert?.message || "");
+  const bridge = desktopBridge();
+  if (bridge && typeof bridge.showNotification === "function") {
+    await bridge.showNotification({ title, body });
+    return;
+  }
+  if ("Notification" in window) {
+    if (Notification.permission === "default") {
+      try {
+        await Notification.requestPermission();
+      } catch {
+        return;
+      }
+    }
+    if (Notification.permission === "granted") {
+      new Notification(title, { body });
+    }
+  }
+}
+
+function rememberDeliveredAlertIds(nextIds) {
+  state.deliveredAlertIds = Array.from(new Set([...(state.deliveredAlertIds || []), ...nextIds])).slice(-40);
+}
+
+function deliverDesktopAlerts(payload = state.status) {
+  const alerts = payload?.alerts || {};
+  const recent = Array.isArray(alerts.recent) ? alerts.recent : [];
+  const enabled = alerts.desktop_notifications_enabled !== false;
+  if (!enabled || !recent.length) return;
+  const seen = new Set(state.deliveredAlertIds || []);
+  const fresh = recent
+    .filter((item) => item?.desktop_enabled !== false && !seen.has(Number(item?.id || 0)))
+    .sort((a, b) => Number(a?.id || 0) - Number(b?.id || 0));
+  if (!fresh.length) return;
+  rememberDeliveredAlertIds(fresh.map((item) => Number(item?.id || 0)));
+  fresh.forEach((item) => {
+    showDesktopAlertNotification(item).catch(() => {});
+  });
+}
+
+function renderAutomationSettingsPanel(config = state.configData || defaultConfigData()) {
+  const container = $("automationSettingsPanel");
+  if (!container) return;
+  const alerts = {
+    ...defaultAlertSettings(),
+    ...(config.alerts || {}),
+    rules: {
+      ...defaultAlertSettings().rules,
+      ...((config.alerts && config.alerts.rules) || {}),
+    },
+  };
+  const scheduler = {
+    ...defaultSchedulerSettings(),
+    ...(config.scheduler || {}),
+  };
+  const channelName = selectedSchedulerChannelName(config);
+  const channelEntry = findSchedulerChannelEntry(config, channelName) || {
+    channel: channelName,
+    enabled: false,
+    start_time: "09:00",
+    stop_time: "17:00",
+    days: [...SCHEDULE_DAYS],
+  };
+  const schedulerStatus = Array.isArray(state.status?.scheduler?.channels)
+    ? state.status.scheduler.channels.find((item) => String(item?.channel || "") === channelName)
+    : null;
+  container.innerHTML = `
+    <div class="automation-grid">
+      <section class="automation-card">
+        <div>
+          <h3>Alerts and notifications</h3>
+          <p class="helper">Choose which major events should surface on desktop and paired phones.</p>
+        </div>
+        <div class="automation-toggle-grid">
+          <div class="automation-toggle">
+            <label><input type="checkbox" ${alerts.desktop_notifications_enabled ? "checked" : ""} onchange="updateAlertToggle('desktop_notifications_enabled', this.checked)"> Desktop system notifications</label>
+            <span class="helper">Uses the desktop shell to surface critical stream alerts outside the app window.</span>
+          </div>
+          <div class="automation-toggle">
+            <label><input type="checkbox" ${alerts.mobile_notifications_enabled ? "checked" : ""} onchange="updateAlertToggle('mobile_notifications_enabled', this.checked)"> Mobile remote notifications</label>
+            <span class="helper">Paired phones can surface new desktop alerts while remote monitoring is active.</span>
+          </div>
+          <div class="automation-toggle">
+            <label><input type="checkbox" ${alerts.rules.stream_stopped ? "checked" : ""} onchange="updateAlertToggle('rules.stream_stopped', this.checked)"> Unexpected stream stop</label>
+            <span class="helper">Warn when FFmpeg exits unexpectedly.</span>
+          </div>
+          <div class="automation-toggle">
+            <label><input type="checkbox" ${alerts.rules.poor_connection ? "checked" : ""} onchange="updateAlertToggle('rules.poor_connection', this.checked)"> Poor connection</label>
+            <span class="helper">Warn when live delivery falls behind or drops frames.</span>
+          </div>
+          <div class="automation-toggle">
+            <label><input type="checkbox" ${alerts.rules.scheduler_started ? "checked" : ""} onchange="updateAlertToggle('rules.scheduler_started', this.checked)"> Scheduler started stream</label>
+            <span class="helper">Confirm when a daily schedule starts a channel.</span>
+          </div>
+          <div class="automation-toggle">
+            <label><input type="checkbox" ${alerts.rules.scheduler_stopped ? "checked" : ""} onchange="updateAlertToggle('rules.scheduler_stopped', this.checked)"> Scheduler stopped stream</label>
+            <span class="helper">Confirm when a daily schedule ends a channel.</span>
+          </div>
+        </div>
+      </section>
+      <section class="automation-card">
+        <div>
+          <h3>Programming scheduler</h3>
+          <p class="helper">Daily local-time windows for automatic stream start and stop.</p>
+        </div>
+        <div class="schedule-grid">
+          <label>
+            <span class="field-hint">Enable scheduler</span>
+            <input type="checkbox" ${scheduler.enabled ? "checked" : ""} onchange="updateSchedulerSetting('enabled', this.checked)">
+          </label>
+          <label>
+            <span class="field-hint">Poll every</span>
+            <input type="number" min="10" step="5" value="${escapeAttr(String(scheduler.poll_seconds || 20))}" onchange="updateSchedulerSetting('poll_seconds', this.value)">
+          </label>
+          <div>
+            <span class="field-hint">Timezone</span>
+            <div>${escapeHtml(state.status?.scheduler?.timezone_label || "Local timezone")}</div>
+          </div>
+        </div>
+        ${channelName ? `
+          <div class="automation-toggle">
+            <strong>${escapeHtml(channelName)}</strong>
+            <span class="helper">${schedulerStatus?.in_window ? "Currently inside the scheduled window." : "Currently outside the scheduled window."} ${schedulerStatus?.next_start_at ? `Next start ${escapeHtml(formatDateTime(schedulerStatus.next_start_at))}.` : ""} ${schedulerStatus?.next_stop_at ? `Next stop ${escapeHtml(formatDateTime(schedulerStatus.next_stop_at))}.` : ""}</span>
+          </div>
+          <div class="schedule-grid">
+            <label>
+              <span class="field-hint">Enable for channel</span>
+              <input type="checkbox" ${channelEntry.enabled ? "checked" : ""} onchange="updateChannelSchedulerSetting('enabled', this.checked)">
+            </label>
+            <label>
+              <span class="field-hint">Start time</span>
+              <input type="time" value="${escapeAttr(channelEntry.start_time || "09:00")}" onchange="updateChannelSchedulerSetting('start_time', this.value)">
+            </label>
+            <label>
+              <span class="field-hint">Stop time</span>
+              <input type="time" value="${escapeAttr(channelEntry.stop_time || "17:00")}" onchange="updateChannelSchedulerSetting('stop_time', this.value)">
+            </label>
+          </div>
+          <div class="schedule-days">
+            ${SCHEDULE_DAYS.map((day) => `
+              <label>
+                <input type="checkbox" ${Array.isArray(channelEntry.days) && channelEntry.days.includes(day) ? "checked" : ""} onchange="toggleChannelSchedulerDay('${day}', this.checked)">
+                ${escapeHtml(day.toUpperCase())}
+              </label>
+            `).join("")}
+          </div>
+        ` : `<p class="helper">Create or select a channel to configure its daily schedule.</p>`}
+      </section>
+    </div>
+  `;
 }
 
 async function startSyncPairing() {
@@ -6361,6 +7278,9 @@ if ($("settingsTroubleshootingTab")) {
 }
 if ($("settingsYoutubeTab")) {
   $("settingsYoutubeTab").addEventListener("click", () => showSettingsTab("youtube"));
+}
+if ($("settingsAutomationTab")) {
+  $("settingsAutomationTab").addEventListener("click", () => showSettingsTab("automation"));
 }
 if ($("syncStartPairing")) {
   $("syncStartPairing").addEventListener("click", () => startSyncPairing().catch((error) => toast(error.message)));
@@ -6572,14 +7492,24 @@ if ($("stopAndExit")) {
   $("stopAndExit").addEventListener("click", () => stopStreamsAndExit().catch((error) => toast(error.message)));
 }
 
-function isTrustedYoutubeAuthOrigin(origin) {
+function isTrustedGoogleAuthOrigin(origin) {
   if (origin === window.location.origin) return true;
   try {
     const incoming = new URL(origin);
     const current = new URL(window.location.href);
-    const redirectUri = String((state.configData || {}).youtube?.redirect_uri || defaultYoutubeSettings().redirect_uri || "");
-    const redirect = redirectUri ? new URL(redirectUri) : null;
-    if (redirect && incoming.origin === redirect.origin) return true;
+    const redirectCandidates = [
+      String((state.configData || {}).youtube?.redirect_uri || defaultYoutubeSettings().redirect_uri || ""),
+      ...normalizedStorageProviders(state.configData || defaultConfigData()).map((provider) => String(provider?.oauth?.redirect_uri || "")),
+    ].filter(Boolean);
+    if (redirectCandidates.some((redirectUri) => {
+      try {
+        return new URL(redirectUri).origin === incoming.origin;
+      } catch {
+        return false;
+      }
+    })) {
+      return true;
+    }
     const localHosts = new Set(["127.0.0.1", "localhost"]);
     return localHosts.has(incoming.hostname)
       && localHosts.has(current.hostname)
@@ -6591,8 +7521,21 @@ function isTrustedYoutubeAuthOrigin(origin) {
 
 window.addEventListener("message", (event) => {
   const payload = event.data || {};
+  if (!isTrustedGoogleAuthOrigin(event.origin)) return;
+  if (payload.type === "storage-auth") {
+    refreshStorageStatus()
+      .then(() => loadConfigText())
+      .then(() => {
+        const accountLabel = String(payload.account_email || payload.account_name || "").trim();
+        const message = payload.status === "ok"
+          ? `${payload.display_name || "Google Drive"} connected${accountLabel ? ` as ${accountLabel}` : ""}.`
+          : (payload.message || "Google Drive connection failed.");
+        toast(message);
+      })
+      .catch((error) => toast(error.message));
+    return;
+  }
   if (payload.type !== "youtube-auth") return;
-  if (!isTrustedYoutubeAuthOrigin(event.origin)) return;
   if (payload.status === "ok") {
     loadConfigText()
       .then(() => refreshYoutubeStatus())
@@ -6637,6 +7580,7 @@ refresh()
     }
     return refreshYoutubeStatus();
   })
+  .then(() => refreshStorageStatus())
   .catch((error) => {
     markBootReady();
     toast(error.message);

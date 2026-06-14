@@ -17,6 +17,20 @@ DEFAULT_SOURCE_PROXY = {
     "spool_before_start": False,
 }
 
+DEFAULT_PROVIDER_OAUTH = {
+    "client_id": "",
+    "client_secret": "",
+    "redirect_uri": "http://127.0.0.1:8765/oauth2redirect",
+    "oauth_client_type": "desktop",
+    "use_pkce": True,
+    "scopes": [],
+}
+
+DEFAULT_GOOGLE_DRIVE_SCOPES = [
+    "https://www.googleapis.com/auth/drive.readonly",
+    "https://www.googleapis.com/auth/userinfo.email",
+]
+
 
 def normalize_provider_id(value: Any) -> str:
     text = str(value or "").strip().lower()
@@ -36,6 +50,34 @@ def provider_tokens_file(provider_id: str, provider_type: str = "googleDrive") -
     safe_id = normalize_provider_id(provider_id) or "provider"
     prefix = "google_drive" if provider_type == "googleDrive" else "storage"
     return f".runtime/{prefix}_tokens_{safe_id}.json"
+
+
+def default_provider_oauth(provider_type: str) -> dict[str, Any]:
+    scopes = list(DEFAULT_GOOGLE_DRIVE_SCOPES) if provider_type == "googleDrive" else []
+    return {
+        **DEFAULT_PROVIDER_OAUTH,
+        "scopes": scopes,
+    }
+
+
+def normalize_provider_oauth(provider_type: str, raw: Any) -> dict[str, Any]:
+    oauth = {**default_provider_oauth(provider_type), **(raw if isinstance(raw, dict) else {})}
+    oauth["client_id"] = str(oauth.get("client_id") or "").strip()
+    oauth["client_secret"] = str(oauth.get("client_secret") or "").strip()
+    oauth["redirect_uri"] = str(oauth.get("redirect_uri") or DEFAULT_PROVIDER_OAUTH["redirect_uri"]).strip() or DEFAULT_PROVIDER_OAUTH["redirect_uri"]
+    client_type = str(oauth.get("oauth_client_type") or "desktop").strip().lower()
+    oauth["oauth_client_type"] = "web" if client_type == "web" else "desktop"
+    oauth["use_pkce"] = bool(oauth.get("use_pkce", True))
+
+    scopes = oauth.get("scopes")
+    if isinstance(scopes, str):
+        scopes = [part.strip() for part in scopes.split() if part.strip()]
+    elif isinstance(scopes, list):
+        scopes = [str(scope).strip() for scope in scopes if str(scope).strip()]
+    else:
+        scopes = []
+    oauth["scopes"] = scopes or list(default_provider_oauth(provider_type).get("scopes") or [])
+    return oauth
 
 
 def normalize_storage_config(config: dict[str, Any]) -> dict[str, Any]:
@@ -80,6 +122,7 @@ def normalize_storage_config(config: dict[str, Any]) -> dict[str, Any]:
                     "tokens_file": tokens_file,
                     "account_email": str(item.get("account_email") or item.get("accountEmail") or "").strip(),
                     "status": str(item.get("status") or "").strip(),
+                    "oauth": normalize_provider_oauth(provider_type, item.get("oauth")),
                 }
             )
     storage["providers"] = providers

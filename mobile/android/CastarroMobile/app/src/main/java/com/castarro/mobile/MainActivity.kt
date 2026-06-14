@@ -74,6 +74,10 @@ class MainActivity : ComponentActivity() {
                     },
                     onStartStream = mobileViewModel::startStream,
                     onStopStream = mobileViewModel::stopStream,
+                    onStartDesktopRemoteStream = mobileViewModel::startDesktopRemoteStream,
+                    onStopDesktopRemoteStream = mobileViewModel::stopDesktopRemoteStream,
+                    onRestartDesktopRemoteStream = mobileViewModel::restartDesktopRemoteStream,
+                    onRefreshDesktopRemoteStatus = mobileViewModel::refreshDesktopRemoteStatusNow,
                     onStreamProtectionAction = { action ->
                         mobileViewModel.openStreamProtectionAction(this, action)
                     },
