@@ -191,6 +191,20 @@ def remember_device(account_id: str, device_id: str, device_name: str, platform:
     return existing
 
 
+def forget_device(device_id: Any) -> dict[str, Any] | None:
+    target_id = str(device_id or "").strip()
+    if not target_id:
+        return None
+    store = _load_store()
+    devices = [device for device in store.get("devices", []) if isinstance(device, dict)]
+    removed = next((device for device in devices if str(device.get("id") or "") == target_id), None)
+    if not removed:
+        return None
+    store["devices"] = [device for device in devices if str(device.get("id") or "") != target_id]
+    _save_store(store)
+    return removed
+
+
 def local_lan_ip() -> str:
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:

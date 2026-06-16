@@ -3631,6 +3631,28 @@ def login_sync_account(body: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "account": account, **sync_public_status()}
 
 
+def disconnect_sync_device(body: dict[str, Any]) -> dict[str, Any]:
+    device_id = str(body.get("deviceId") or body.get("device_id") or "").strip()
+    if not device_id:
+        raise ValueError("Device ID is required.")
+    removed = sync_service.forget_device(device_id)
+    with STATE.lock:
+        STATE.sync_tokens = {
+            token: record
+            for token, record in STATE.sync_tokens.items()
+            if str(((record.get("device") or {}) if isinstance(record, dict) else {}).get("id") or "") != device_id
+        }
+    if removed:
+        app_db.record_event(
+            "sync_device_disconnected",
+            details={
+                "device_id": device_id,
+                "device_name": removed.get("deviceName") or "Mobile device",
+            },
+        )
+    return {"ok": True, "removed": bool(removed), **sync_public_status()}
+
+
 def start_sync_pairing(config_name: str, body: dict[str, Any]) -> dict[str, Any]:
     if not SYNC_PORT:
         raise ValueError("Sync server is not running.")
@@ -4215,6 +4237,10 @@ class Handler(BaseHTTPRequestHandler):
 
             if parsed.path == "/api/sync/pairing/start":
                 json_response(self, start_sync_pairing(config_name, body))
+                return
+
+            if parsed.path == "/api/sync/device/disconnect":
+                json_response(self, disconnect_sync_device(body))
                 return
 
             if parsed.path == "/api/youtube/disconnect":

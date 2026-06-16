@@ -274,6 +274,17 @@ async function captureScreenshots(page) {
   await page.setViewportSize({ width: 1490, height: 900 });
 }
 
+async function openYoutubeCard(page, title, exact = true) {
+  const heading = page.getByRole("heading", { name: title, exact });
+  const card = page.locator("#youtubeSettingsPanel details", { has: heading }).first();
+  await card.waitFor();
+  await card.evaluate((node) => {
+    if (!node.open) {
+      node.querySelector("summary")?.click();
+    }
+  });
+}
+
 async function runUiChecks(page, tempRoot) {
   await page.goto(URL, { waitUntil: "networkidle" });
   await page.waitForSelector("#channelWorkspaceRail:not(.hidden)");
@@ -329,16 +340,16 @@ async function runUiChecks(page, tempRoot) {
   assert.equal(await page.getByRole("button", { name: "Add Slot" }).count(), 0);
   assert.equal(await page.locator("#youtubeScheduleChannel").count(), 0);
   assert.equal(await page.locator("#youtubeScheduleThumbnail").count(), 1);
-  await page.getByRole("heading", { name: "Go Live" }).waitFor();
+  await page.getByRole("heading", { name: "Live Settings" }).waitFor();
   await page.getByRole("heading", { name: "YouTube Account" }).waitFor();
   await page.getByRole("heading", { name: "Stream Settings" }).waitFor();
   await page.getByRole("heading", { name: "Schedule Stream" }).waitFor();
-  await page.getByRole("heading", { name: "Videos" }).waitFor();
+  await page.getByRole("heading", { name: "Videos", exact: true }).waitFor();
   await page.getByRole("heading", { name: "Upcoming Streams" }).waitFor();
   const youtubeHeadings = await page.locator("#youtubeSettingsPanel h3").evaluateAll((nodes) => (
     nodes.map((node) => node.textContent.trim()).filter(Boolean)
   ));
-  const liveFlowOrder = ["Go Live", "Stream Settings", "Videos", "Schedule Stream", "Upcoming Streams"];
+  const liveFlowOrder = ["Live Settings", "Stream Settings", "Videos", "Schedule Stream", "Upcoming Streams"];
   const liveFlowIndexes = liveFlowOrder.map((label) => youtubeHeadings.indexOf(label));
   assert.deepEqual(liveFlowIndexes, [...liveFlowIndexes].sort((a, b) => a - b));
   assert.equal(liveFlowIndexes.every((index) => index >= 0), true);
@@ -346,6 +357,8 @@ async function runUiChecks(page, tempRoot) {
   assert.equal(await page.locator("#youtubeScheduleDuration").count(), 0);
   assert.equal(await page.locator(".youtube-connection-summary").count(), 1);
   assert.equal(await page.locator(".youtube-account-row").count(), 0);
+  assert.equal(await page.locator("#youtubeSettingsPanel .youtube-go-live-card").getByRole("button", { name: "Start Stream", exact: true }).count(), 0);
+  assert.equal(await page.locator("#youtubeSettingsPanel .youtube-go-live-card").getByRole("button", { name: "Stop Stream", exact: true }).count(), 0);
   await page.evaluate(() => {
     state.youtubeStatus = {
       connected: true,
@@ -381,7 +394,8 @@ async function runUiChecks(page, tempRoot) {
   await page.screenshot({ path: path.join(OUT_DIR, "workspace-youtube-account-states.png"), fullPage: true });
   assert.equal(await page.locator(".youtube-connection-summary").count(), 1);
   assert.equal(await page.locator(".youtube-account-row").count(), 0);
-  await page.getByText("B / Wrong Channel").waitFor();
+  await openYoutubeCard(page, "YouTube Account");
+  await page.locator(".youtube-connection-summary strong", { hasText: "B / Wrong Channel" }).waitFor();
   await page.locator(".youtube-connection-summary .badge", { hasText: "Wrong" }).waitFor();
   assert.equal(await page.getByRole("button", { name: "Disconnect", exact: true }).isEnabled(), true);
   const railConnection = await page.locator('#channelWorkspaceRail [data-channel-name="B"] .workspace-channel-item-meta').innerText();
@@ -393,6 +407,7 @@ async function runUiChecks(page, tempRoot) {
     renderChannelWorkspace(state.status);
   });
   await page.waitForTimeout(250);
+  await openYoutubeCard(page, "YouTube Account");
   await page.locator(".youtube-connection-summary strong", { hasText: "C" }).waitFor();
   await page.locator(".youtube-connection-summary .badge", { hasText: "Disconnected" }).waitFor();
   assert.equal(await page.getByRole("button", { name: "Connect", exact: true }).isEnabled(), true);
@@ -448,6 +463,7 @@ async function runUiChecks(page, tempRoot) {
   });
   await page.waitForTimeout(250);
   await page.screenshot({ path: path.join(OUT_DIR, "workspace-youtube-connected-state.png"), fullPage: true });
+  await openYoutubeCard(page, "YouTube Account");
   await page.locator(".youtube-connection-summary .badge", { hasText: "Connected" }).waitFor();
   await page.locator(".youtube-connection-summary .badge", { hasText: "Stream key matched" }).waitFor();
   await page.locator(".youtube-connection-summary .badge", { hasText: "Key ends: 9145" }).waitFor();
@@ -463,8 +479,9 @@ async function runUiChecks(page, tempRoot) {
   await page.locator("#railOpenYoutube").click();
   await page.waitForSelector("#settingsYoutubeView.active");
   await page.waitForSelector("#channelSettings .selected-live-settings");
+  await openYoutubeCard(page, "Stream Settings");
   assert.equal(await page.locator("#channelSettings .channel-settings").count(), 1);
-  assert.equal(await page.locator("#channelSettings details.channel-settings").count(), 0);
+  assert.equal(await page.locator("#channelSettings details.channel-settings").count(), 1);
   const selectedLiveCard = await page.locator("#channelSettings .selected-live-settings h3").first().innerText();
   assert.equal(selectedLiveCard.trim(), "Stream Settings");
   assert.equal(await page.locator(".selected-live-videos").count(), 1);
@@ -477,6 +494,7 @@ async function runUiChecks(page, tempRoot) {
     ];
     renderYoutubeSettingsPanel(state.configData);
   });
+  await openYoutubeCard(page, "Videos");
   await page.locator(".selected-live-videos .live-video-option").first().waitFor();
   assert.equal(await page.locator(".selected-live-videos .live-video-drag-handle").count(), 3);
   assert.equal(await page.locator(".selected-live-videos .live-video-remove-button").count(), 3);
@@ -607,7 +625,7 @@ async function runApiChecks() {
     console.log("channel-workspace-e2e: PASS");
   } finally {
     await stopServer(server);
-    fs.rmSync(tempRoot, { recursive: true, force: true });
+    fs.rmSync(tempRoot, { recursive: true, force: true, maxRetries: 6, retryDelay: 250 });
     if (stderr.length) {
       fs.writeFileSync(path.join(OUT_DIR, "workspace-e2e.stderr.log"), stderr.join(""), "utf8");
     }
