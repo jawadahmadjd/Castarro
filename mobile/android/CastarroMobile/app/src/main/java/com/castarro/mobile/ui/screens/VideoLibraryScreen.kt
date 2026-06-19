@@ -33,7 +33,6 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
 import com.castarro.mobile.domain.model.CompatibilityStatus
 import com.castarro.mobile.domain.model.VideoAsset
@@ -43,6 +42,7 @@ import com.castarro.mobile.ui.components.ChannelHeader
 import com.castarro.mobile.ui.components.SurfaceCard
 import com.castarro.mobile.ui.components.VideoAssetRow
 import com.castarro.mobile.ui.theme.CastarroColors as Colors
+import com.castarro.mobile.ui.theme.CastarroUiMaster as Ui
 import kotlin.math.roundToInt
 
 @Composable
@@ -75,8 +75,8 @@ fun VideoLibraryScreen(
         Column(
             modifier = Modifier
                 .verticalScroll(rememberScrollState())
-                .padding(14.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+                .padding(Ui.Space.Page),
+            verticalArrangement = Arrangement.spacedBy(Ui.Space.Xl),
         ) {
             state.errorMessage?.let { message ->
                 SurfaceCard {
@@ -91,7 +91,7 @@ fun VideoLibraryScreen(
             SurfaceCard {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    horizontalArrangement = Arrangement.spacedBy(Ui.Space.Lg),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text("Phone videos", fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
@@ -114,11 +114,11 @@ fun VideoLibraryScreen(
                             val isDragged = activeVideoDrag?.videoId == video.id
                             val animatedOffsetY by animateFloatAsState(
                                 targetValue = rowOffsetY,
-                                animationSpec = tween(durationMillis = 140),
+                                animationSpec = tween(durationMillis = Ui.Motion.RowDragMillis),
                                 label = "video-row-drag-offset",
                             )
                             val visualOffsetY = if (isDragged) rowOffsetY else animatedOffsetY
-                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Column(verticalArrangement = Arrangement.spacedBy(Ui.Space.Md)) {
                                 VideoAssetRow(
                                     name = video.displayName,
                                     meta = videoAssetMeta(video),
@@ -127,15 +127,15 @@ fun VideoLibraryScreen(
                                     thumbnailPath = video.localPath,
                                     thumbnailUri = video.sourceUri,
                                     modifier = Modifier
-                                        .zIndex(if (isDragged) 1f else 0f)
+                                        .zIndex(if (isDragged) Ui.Alpha.Visible else Ui.Alpha.Hidden)
                                         .graphicsLayer {
                                             translationY = visualOffsetY
-                                            scaleX = if (isDragged) 1.01f else 1f
-                                            scaleY = if (isDragged) 1.01f else 1f
+                                            scaleX = if (isDragged) Ui.Alpha.DragScale else Ui.Alpha.Visible
+                                            scaleY = if (isDragged) Ui.Alpha.DragScale else Ui.Alpha.Visible
                                         }
                                         .shadow(
-                                            elevation = if (isDragged) 12.dp else 0.dp,
-                                            shape = androidx.compose.foundation.shape.RoundedCornerShape(8.dp),
+                                            elevation = if (isDragged) Ui.Elevation.DraggedRow else Ui.Elevation.None,
+                                            shape = androidx.compose.foundation.shape.RoundedCornerShape(Ui.Radius.Control),
                                             clip = false,
                                         ),
                                     leading = {
@@ -217,7 +217,7 @@ private fun DragHandle(
     val isEnabled = canMoveUp || canMoveDown
     Box(
         modifier = Modifier
-            .padding(end = 8.dp)
+            .padding(end = Ui.Space.Md)
             .pointerInput(videoId, canMoveUp, canMoveDown) {
                 detectDragGestures(
                     onDragStart = {
@@ -237,13 +237,13 @@ private fun DragHandle(
                     },
                 )
             }
-            .padding(horizontal = 4.dp, vertical = 10.dp),
+            .padding(horizontal = Ui.Space.Sm, vertical = Ui.Space.Lg),
     ) {
         Text("::", color = Colors.Muted, fontWeight = FontWeight.Bold)
     }
 }
 
-private val LiveVideoDragShiftDistance: Dp = 70.dp
+private val LiveVideoDragShiftDistance: Dp = Ui.Size.DragShift
 
 private data class VideoDragState(
     val videoId: String,

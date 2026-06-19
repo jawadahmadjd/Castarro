@@ -27,8 +27,8 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.dp
 import com.castarro.mobile.ui.theme.CastarroColors as Colors
+import com.castarro.mobile.ui.theme.CastarroUiMaster as Ui
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -47,10 +47,10 @@ fun VideoAssetRow(
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(8.dp))
+            .clip(RoundedCornerShape(Ui.Radius.Control))
             .background(Colors.SurfaceSoft)
-            .border(1.dp, Colors.Line, RoundedCornerShape(8.dp))
-            .padding(8.dp),
+            .border(Ui.Space.Hairline, Colors.Line, RoundedCornerShape(Ui.Radius.Control))
+            .padding(Ui.Space.Md),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         leading?.invoke()
@@ -58,13 +58,13 @@ fun VideoAssetRow(
             path = thumbnailPath,
             uri = thumbnailUri,
             modifier = Modifier
-                .width(74.dp)
-                .aspectRatio(16f / 9f)
+                .width(Ui.Size.ThumbnailWidth)
+                .aspectRatio(Ui.Aspect.Video)
         )
         Column(
             modifier = Modifier
                 .weight(1f)
-                .padding(horizontal = 10.dp),
+                .padding(horizontal = Ui.Space.Lg),
         ) {
             Text(name, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text(meta, color = Colors.Muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -88,7 +88,7 @@ private fun VideoThumbnail(path: String?, uri: String?, modifier: Modifier = Mod
     }
     Box(
         modifier = modifier
-            .clip(RoundedCornerShape(6.dp))
+            .clip(RoundedCornerShape(Ui.Radius.Thumbnail))
             .background(Colors.TealDark),
         contentAlignment = Alignment.Center,
     ) {
@@ -114,7 +114,7 @@ private fun extractVideoThumbnail(context: Context, path: String?, uri: String?)
         val frame = retriever.getFrameAtTime(0, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
             ?: retriever.getFrameAtTime()
             ?: return null
-        Bitmap.createScaledBitmap(frame, 296, 166, true).also {
+        Bitmap.createScaledBitmap(frame, Ui.Size.ThumbnailBitmapWidth, Ui.Size.ThumbnailBitmapHeight, true).also {
             if (it != frame) frame.recycle()
         }
     } catch (_: Exception) {

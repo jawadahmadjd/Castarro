@@ -36,12 +36,12 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.dp
 import com.castarro.mobile.platform.StreamProtectionAction
 import com.castarro.mobile.platform.StreamProtectionItem
 import com.castarro.mobile.platform.StreamProtectionLevel
 import com.castarro.mobile.ui.navigation.CastarroDestination
 import com.castarro.mobile.ui.theme.CastarroColors as Colors
+import com.castarro.mobile.ui.theme.CastarroUiMaster as Ui
 
 @Composable
 fun CastarroTopBar(
@@ -55,31 +55,31 @@ fun CastarroTopBar(
         modifier = Modifier
             .fillMaxWidth()
             .background(Colors.NavigationDark)
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+            .padding(Ui.Space.Shell),
+        verticalArrangement = Arrangement.spacedBy(Ui.Space.Xl),
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text(title, color = Colors.Surface, fontWeight = FontWeight.Bold)
+            Text(title, color = Colors.NavigationText, fontWeight = FontWeight.Bold)
             ToneBadge(status, "good")
         }
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .clip(RoundedCornerShape(8.dp))
+                .clip(RoundedCornerShape(Ui.Radius.Control))
                 .background(Colors.NavigationSoft)
-                .border(1.dp, Colors.GoldSoft.copy(alpha = 0.22f), RoundedCornerShape(8.dp))
+                .border(Ui.Space.Hairline, Colors.GoldSoft.copy(alpha = Ui.Alpha.LogoEmphasis), RoundedCornerShape(Ui.Radius.Control))
                 .then(if (onChannelClick == null) Modifier else Modifier.clickable(onClick = onChannelClick))
-                .padding(10.dp),
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                .padding(Ui.Space.Lg),
+            horizontalArrangement = Arrangement.spacedBy(Ui.Space.Lg),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             ChannelLogo(channelName = channelName, logoUri = logoUri)
             Column(modifier = Modifier.weight(1f)) {
-                Text(channelName, color = Colors.Surface, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(channelName, color = Colors.NavigationText, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text("Selected channel", color = Colors.GoldSoft)
             }
         }
@@ -91,16 +91,16 @@ fun ChannelLogo(channelName: String, logoUri: String?, modifier: Modifier = Modi
     val imageBitmap = rememberLogoBitmap(logoUri)
     Box(
         modifier = modifier
-            .size(38.dp)
+            .size(Ui.Size.Logo)
             .clip(CircleShape)
-            .background(Colors.Gold.copy(alpha = 0.22f)),
+            .background(Colors.Gold.copy(alpha = Ui.Alpha.LogoEmphasis)),
         contentAlignment = Alignment.Center,
     ) {
         if (imageBitmap != null) {
             Image(
                 bitmap = imageBitmap,
                 contentDescription = null,
-                modifier = Modifier.fillMaxWidth().height(38.dp),
+                modifier = Modifier.fillMaxWidth().height(Ui.Size.Logo),
                 contentScale = ContentScale.Crop,
             )
         } else {
@@ -157,11 +157,11 @@ fun SurfaceCard(content: @Composable ColumnScope.() -> Unit) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(8.dp))
+            .clip(RoundedCornerShape(Ui.Radius.Control))
             .background(Colors.Surface)
-            .border(1.dp, Colors.Line, RoundedCornerShape(8.dp))
-            .padding(14.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+            .border(Ui.Space.Hairline, Colors.Line, RoundedCornerShape(Ui.Radius.Control))
+            .padding(Ui.Space.Page),
+        verticalArrangement = Arrangement.spacedBy(Ui.Space.Xl),
         content = content,
     )
 }
@@ -179,9 +179,9 @@ fun ToneBadge(text: String, tone: String) {
         color = color,
         fontWeight = FontWeight.Bold,
         modifier = Modifier
-            .clip(RoundedCornerShape(8.dp))
-            .background(color.copy(alpha = 0.14f))
-            .padding(horizontal = 8.dp, vertical = 5.dp),
+            .clip(RoundedCornerShape(Ui.Radius.Control))
+            .background(color.copy(alpha = Ui.Alpha.Badge))
+            .padding(horizontal = Ui.Space.Md, vertical = Ui.Space.BadgeVertical),
     )
 }
 
@@ -190,11 +190,11 @@ fun ReadinessRow(label: String, value: String, badge: String, tone: String = "go
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(8.dp))
+            .clip(RoundedCornerShape(Ui.Radius.Control))
             .background(Colors.SurfaceSoft)
-            .border(1.dp, Colors.Line, RoundedCornerShape(8.dp))
-            .padding(10.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+            .border(Ui.Space.Hairline, Colors.Line, RoundedCornerShape(Ui.Radius.Control))
+            .padding(Ui.Space.Lg),
+        horizontalArrangement = Arrangement.spacedBy(Ui.Space.Md),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(modifier = Modifier.weight(1f)) {
@@ -216,7 +216,7 @@ fun StreamActionBar(isLive: Boolean, isReady: Boolean, onPrimary: () -> Unit = {
         ),
         modifier = Modifier
             .fillMaxWidth()
-            .height(48.dp),
+            .height(Ui.Size.ActionButtonHeight),
     ) {
         Text(if (isLive) "Stop Stream" else "Go Live")
     }
@@ -248,15 +248,15 @@ private fun StreamProtectionRow(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(8.dp))
+            .clip(RoundedCornerShape(Ui.Radius.Control))
             .background(Colors.SurfaceSoft)
-            .border(1.dp, Colors.Line, RoundedCornerShape(8.dp))
-            .padding(10.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
+            .border(Ui.Space.Hairline, Colors.Line, RoundedCornerShape(Ui.Radius.Control))
+            .padding(Ui.Space.Lg),
+        verticalArrangement = Arrangement.spacedBy(Ui.Space.Md),
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            horizontalArrangement = Arrangement.spacedBy(Ui.Space.Md),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Column(modifier = Modifier.weight(1f)) {

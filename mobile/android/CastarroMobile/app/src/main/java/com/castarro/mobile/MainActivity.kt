@@ -7,21 +7,40 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.compose.ui.graphics.toArgb
 import com.castarro.mobile.ui.CastarroMobileViewModel
 import com.castarro.mobile.ui.navigation.AppNavGraph
 import com.castarro.mobile.ui.theme.CastarroTheme
+import com.castarro.mobile.ui.theme.CastarroUiMaster
 import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
+
+private const val THEME_PREFERENCE_KEY = "castarro.theme.dark.v1"
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            CastarroTheme {
+            var useDarkTheme by rememberSaveable {
+                mutableStateOf(getPreferences(MODE_PRIVATE).getBoolean(THEME_PREFERENCE_KEY, false))
+            }
+            CastarroTheme(darkTheme = useDarkTheme) {
+                SideEffect {
+                    val palette = CastarroUiMaster.Colors.palette(useDarkTheme)
+                    val statusBarColor = if (useDarkTheme) palette.NavigationDark else CastarroUiMaster.Colors.NavigationDark
+                    val navigationBarColor = if (useDarkTheme) palette.Surface else CastarroUiMaster.Colors.Surface
+                    window.statusBarColor = statusBarColor.toArgb()
+                    window.navigationBarColor = navigationBarColor.toArgb()
+                }
                 val mobileViewModel: CastarroMobileViewModel = viewModel(
                     factory = CastarroMobileViewModel.factory(application),
                 )
@@ -45,6 +64,11 @@ class MainActivity : ComponentActivity() {
                 val uiState = mobileViewModel.uiState.collectAsStateWithLifecycle()
                 AppNavGraph(
                     uiState = uiState.value,
+                    isDarkTheme = useDarkTheme,
+                    onThemeChange = {
+                        useDarkTheme = it
+                        getPreferences(MODE_PRIVATE).edit().putBoolean(THEME_PREFERENCE_KEY, it).apply()
+                    },
                     onImportVideos = mobileViewModel::importVideos,
                     onDeselectVideo = mobileViewModel::deselectVideo,
                     onMoveVideo = mobileViewModel::moveSelectedVideo,

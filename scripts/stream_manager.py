@@ -69,6 +69,7 @@ class RunningStream:
     started_monotonic: float = 0.0
     kind: str = "stream"
     masked_output_url: str | None = None
+    log_redactions: tuple[tuple[str, str], ...] = ()
     playlist_path: Path | None = None
     stop_requested: bool = False
 
@@ -257,11 +258,36 @@ def output_url(channel: dict[str, Any], defaults: dict[str, Any]) -> str:
     )
 
 
-def mask_url(url: str) -> str:
+def stream_key_reference(channel_name: Any) -> str:
+    name = str(channel_name or "channel").strip() or "channel"
+    return f"[{name} stream key]"
+
+
+def mask_url(url: str, replacement: str = "***") -> str:
     if "/" not in url:
-        return "***"
+        return replacement
     prefix, _key = url.rsplit("/", 1)
-    return f"{prefix}/***"
+    return f"{prefix}/{replacement}"
+
+
+def stream_log_redactions(url: str, channel_name: Any) -> tuple[tuple[str, str], ...]:
+    key_ref = stream_key_reference(channel_name)
+    redactions: list[tuple[str, str]] = []
+    if url:
+        redactions.append((url, mask_url(url, key_ref)))
+        if "/" in url:
+            _prefix, key = url.rsplit("/", 1)
+            if key:
+                redactions.append((key, key_ref))
+    return tuple(redactions)
+
+
+def sanitize_stream_log_message(message: str, redactions: tuple[tuple[str, str], ...]) -> str:
+    safe = message
+    for secret, replacement in redactions:
+        if secret:
+            safe = safe.replace(secret, replacement)
+    return safe
 
 
 def stream_log_level(config: dict[str, Any], channel: dict[str, Any]) -> str:
@@ -295,6 +321,35 @@ def signed_returncode(returncode: int | None) -> int | None:
     if returncode > 0x7FFFFFFF:
         return returncode - 0x100000000
     return returncode
+
+
+RECOVERABLE_NETWORK_RETURNCODES = {-10053, -10054, -10060}
+RECOVERABLE_NETWORK_LOG_PATTERNS = (
+    "broken pipe",
+    "connection reset",
+    "connection timed out",
+    "connection refused",
+    "connection aborted",
+    "error writing trailer",
+    "failed to update header",
+    "i/o error",
+    "network is unreachable",
+    "no route to host",
+    "server returned 5",
+    "wsaeconnaborted",
+    "wsaeconnreset",
+    "wsaetimedout",
+)
+
+
+def is_recoverable_network_exit(returncode: int | None, log_tail: str = "") -> bool:
+    signed = signed_returncode(returncode)
+    if signed in RECOVERABLE_NETWORK_RETURNCODES:
+        return True
+    if signed == 0 or returncode is None:
+        return False
+    lowered = str(log_tail or "").lower()
+    return any(pattern in lowered for pattern in RECOVERABLE_NETWORK_LOG_PATTERNS)
 
 
 def describe_returncode(returncode: int | None, *, stop_requested: bool = False) -> str:
@@ -356,6 +411,7 @@ def pump_process_output(stream: RunningStream) -> None:
             line = raw_line.rstrip("\r\n")
             if not line:
                 continue
+            line = sanitize_stream_log_message(line, stream.log_redactions)
             write_timestamped_log_line(stream.log_handle, line)
     finally:
         try:
@@ -805,10 +861,13 @@ def start_stream(
     command, playlist_path, url, preview_warning = build_command(config_dir, config, channel, preview_manifest)
     path = log_path(config_dir, config, channel)
     log_handle = path.open("a", encoding="utf-8", buffering=1)
-    masked_url = mask_url(url)
+    channel_name = str(channel["name"])
+    key_ref = stream_key_reference(channel_name)
+    masked_url = mask_url(url, key_ref)
+    log_redactions = stream_log_redactions(url, channel_name)
 
-    print(f"[{channel['name']}] starting -> {masked_url}")
-    print(f"[{channel['name']}] log: {path}")
+    print(f"[{channel_name}] starting -> {masked_url}")
+    print(f"[{channel_name}] log: {path}")
 
     process = subprocess.Popen(
         command,
@@ -831,11 +890,12 @@ def start_stream(
         started_monotonic=time.monotonic(),
         kind="stream",
         masked_output_url=masked_url,
+        log_redactions=log_redactions,
         playlist_path=playlist_path,
     )
     log_session_header(
         running,
-        channel_name=str(channel["name"]),
+        channel_name=channel_name,
         log_path=path,
         command_text=command_as_text_with_masked_url(command, url, masked_url),
     )
@@ -843,7 +903,7 @@ def start_stream(
     running.monitor_thread = threading.Thread(target=monitor_stream_exit, args=(running,), daemon=True)
     running.log_thread.start()
     running.monitor_thread.start()
-    print(f"[{channel['name']}] pid: {process.pid}")
+    print(f"[{channel_name}] pid: {process.pid}")
     return running
 
 
@@ -982,7 +1042,7 @@ def print_commands(config_path: Path, channel_name: str | None, reveal_keys: boo
     config, config_dir = load_config(config_path)
     for channel in enabled_channels(config, channel_name):
         command, _playlist_path, url, _preview_note = build_command(config_dir, config, channel)
-        final_url = url if reveal_keys else mask_url(url)
+        final_url = url if reveal_keys else mask_url(url, stream_key_reference(channel.get("name")))
         print(f"\n[{channel['name']}]")
         print(command_as_text(command, final_url))
 

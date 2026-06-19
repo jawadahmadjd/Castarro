@@ -36,12 +36,12 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
-import androidx.compose.ui.unit.dp
 import com.castarro.mobile.ui.MobileUiState
 import com.castarro.mobile.ui.components.ChannelHeader
 import com.castarro.mobile.ui.components.ReadinessRow
 import com.castarro.mobile.ui.components.SurfaceCard
 import com.castarro.mobile.ui.theme.CastarroColors as Colors
+import com.castarro.mobile.ui.theme.CastarroUiMaster as Ui
 
 @Composable
 fun YoutubeScreen(
@@ -78,8 +78,8 @@ fun YoutubeScreen(
         Column(
             modifier = Modifier
                 .verticalScroll(rememberScrollState())
-                .padding(14.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+                .padding(Ui.Space.Page),
+            verticalArrangement = Arrangement.spacedBy(Ui.Space.Xl),
         ) {
             state.errorMessage?.let { message ->
                 SurfaceCard {
@@ -109,7 +109,7 @@ fun YoutubeScreen(
                     account.email?.let { email -> ReadinessRow("Email", email, "Verified") }
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        horizontalArrangement = Arrangement.spacedBy(Ui.Space.Lg),
                     ) {
                         Button(
                             onClick = onConnectYoutubeAccount,
@@ -149,7 +149,7 @@ fun YoutubeScreen(
                 YoutubeThumbnailPreview(thumbnailUri = state.youtubeThumbnailUri)
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    horizontalArrangement = Arrangement.spacedBy(Ui.Space.Lg),
                 ) {
                     OutlinedButton(
                         onClick = onPickYoutubeThumbnail,
@@ -169,7 +169,7 @@ fun YoutubeScreen(
                 Text("Privacy", fontWeight = FontWeight.Bold)
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(Ui.Space.Md),
                 ) {
                     listOf("private", "unlisted", "public").forEach { privacy ->
                         val selected = state.youtubePrivacyStatus == privacy
@@ -266,10 +266,10 @@ private fun YoutubeThumbnailPreview(thumbnailUri: String?) {
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .aspectRatio(16f / 9f)
-            .clip(RoundedCornerShape(8.dp))
+            .aspectRatio(Ui.Aspect.Video)
+            .clip(RoundedCornerShape(Ui.Radius.Control))
             .background(Colors.SurfaceSoft)
-            .border(1.dp, Colors.Line, RoundedCornerShape(8.dp)),
+            .border(Ui.Space.Hairline, Colors.Line, RoundedCornerShape(Ui.Radius.Control)),
         contentAlignment = Alignment.Center,
     ) {
         if (imageBitmap == null) {

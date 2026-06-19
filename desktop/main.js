@@ -5,15 +5,19 @@ const http = require("http");
 const net = require("net");
 const os = require("os");
 const path = require("path");
+const { pathToFileURL } = require("url");
 
 const HEALTHCHECK_TIMEOUT_MS = 30000;
 const HEALTHCHECK_INTERVAL_MS = 500;
 const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const TRAY_TOOLTIP_REFRESH_MS = 5000;
 const GPU_METRICS_CACHE_MS = 10000;
+const STARTUP_SNAPSHOT_MIN_INTERVAL_MS = 15000;
 const PRODUCT_NAME = "Castarro";
 const LEGACY_PRODUCT_NAME = ["FFmpeg", "Live", "Streaming"].join(" ");
 const BACKEND_INFO_FILE = "backend-info.json";
+const STARTUP_PAGE_FILE = "startup.html";
+const STARTUP_SNAPSHOT_FILE = "startup-snapshot.png";
 
 let mainWindow = null;
 let tray = null;
@@ -30,6 +34,9 @@ let updateCheckTimer = null;
 let trayStatusTimer = null;
 let lastTrayTooltip = "";
 let lastTrayStatusLabel = "";
+let startupSnapshotTimer = null;
+let startupSnapshotInFlight = false;
+let startupSnapshotLastAt = 0;
 const externalCpuSamples = new Map();
 let gpuMetricsCache = { key: "", sampledAt: 0, ok: false, items: [] };
 let gpuMetricsInFlight = null;
@@ -240,6 +247,37 @@ function diagnosticLog(message, error = null) {
   }
 }
 
+async function captureStartupSnapshot(reason = "unknown") {
+  if (!mainWindow || mainWindow.isDestroyed() || startupSnapshotInFlight) return;
+  if (!backendUrl || !mainWindow.webContents.getURL().startsWith(backendUrl)) return;
+  const force = String(reason).startsWith("quit");
+  if (!force && Date.now() - startupSnapshotLastAt < STARTUP_SNAPSHOT_MIN_INTERVAL_MS) return;
+  startupSnapshotInFlight = true;
+  try {
+    mkdirp(dataRoot());
+    const image = await mainWindow.webContents.capturePage();
+    const png = image.toPNG();
+    if (!png || png.length < 1024) return;
+    fs.writeFileSync(startupSnapshotPath(), png);
+    startupSnapshotLastAt = Date.now();
+    diagnosticLog(`startup snapshot cached reason=${reason} bytes=${png.length}`);
+  } catch (error) {
+    diagnosticLog("startup snapshot capture failed", error);
+  } finally {
+    startupSnapshotInFlight = false;
+  }
+}
+
+function scheduleStartupSnapshot(reason = "unknown", delayMs = 1200) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (startupSnapshotTimer) clearTimeout(startupSnapshotTimer);
+  startupSnapshotTimer = setTimeout(() => {
+    startupSnapshotTimer = null;
+    captureStartupSnapshot(reason).catch((error) => diagnosticLog("startup snapshot scheduled capture failed", error));
+  }, Math.max(0, Number(delayMs) || 0));
+  startupSnapshotTimer.unref();
+}
+
 function publishUpdateState() {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   mainWindow.webContents.send("desktop:update-status", { ...updateState });
@@ -310,6 +348,28 @@ function logRoot() {
 
 function backendInfoPath() {
   return path.join(dataRoot(), BACKEND_INFO_FILE);
+}
+
+function startupPagePath() {
+  return path.join(dataRoot(), STARTUP_PAGE_FILE);
+}
+
+function startupPageUrl() {
+  return pathToFileURL(startupPagePath()).toString();
+}
+
+function startupSnapshotPath() {
+  return path.join(dataRoot(), STARTUP_SNAPSHOT_FILE);
+}
+
+function readStartupSnapshotDataUrl() {
+  try {
+    const buffer = fs.readFileSync(startupSnapshotPath());
+    if (!buffer.length) return "";
+    return `data:image/png;base64,${buffer.toString("base64")}`;
+  } catch (_error) {
+    return "";
+  }
 }
 
 function readBackendInfo() {
@@ -514,6 +574,7 @@ async function requestQuit(source = "unknown", mode = "ui-only", options = {}) {
   quitRequestInFlight = true;
   diagnosticLog(`quit requested source=${source} mode=${mode}`);
   try {
+    await captureStartupSnapshot(`quit-${source}`);
     if (mode === "stop-streams-and-exit") {
       if (backendUrl) {
         await requestBackendPost(backendUrl, "/api/stream/stop", { channel: null });
@@ -570,6 +631,11 @@ async function requestQuit(source = "unknown", mode = "ui-only", options = {}) {
 ipcMain.handle("desktop:get-update-status", () => ({ ...updateState }));
 ipcMain.handle("desktop:get-app-version", () => app.getVersion());
 ipcMain.handle("desktop:get-usage-metrics", async (_event, payload) => collectUsageMetrics(payload));
+ipcMain.on("desktop:cache-startup-view", (_event, payload = {}) => {
+  const reason = String(payload?.reason || "renderer");
+  const delayMs = Number(payload?.delayMs ?? 900);
+  scheduleStartupSnapshot(reason, delayMs);
+});
 ipcMain.handle("desktop:show-notification", async (_event, payload) => {
   const title = String(payload?.title || PRODUCT_NAME).trim() || PRODUCT_NAME;
   const body = String(payload?.body || "").trim();
@@ -693,22 +759,46 @@ function htmlEscape(value) {
     .replace(/"/g, "&quot;");
 }
 
-function loadingHtml(title, message) {
+function uiMasterCss() {
+  try {
+    return fs.readFileSync(path.join(codeRoot(), "web", "ui-master.css"), "utf8");
+  } catch (error) {
+    diagnosticLog("ui master stylesheet unavailable for startup page", error);
+    return "";
+  }
+}
+
+function loadingHtml(title, message, options = {}) {
+  const snapshotDataUrl = options.snapshotDataUrl || "";
+  const snapshot = snapshotDataUrl
+    ? `<img class="startup-snapshot" src="${htmlEscape(snapshotDataUrl)}" alt="" aria-hidden="true">`
+    : "";
   return `<!doctype html>
 <html>
 <head>
   <meta charset="utf-8">
   <title>${htmlEscape(title)}</title>
-  <style>
-    body { margin: 0; font: 14px Segoe UI, sans-serif; color: #1f2937; background: #f8fafc; display: grid; min-height: 100vh; place-items: center; }
-    main { width: min(560px, calc(100vw - 48px)); }
-    h1 { font-size: 24px; margin: 0 0 10px; }
-    p { line-height: 1.5; margin: 0 0 12px; }
-    code { background: #e5e7eb; border-radius: 4px; padding: 2px 5px; }
-  </style>
+  <style>${uiMasterCss()}</style>
 </head>
-<body>
+<body class="startup-page">
+  ${snapshot}
   <main>
+    <svg class="startup-animation" viewBox="0 0 220 160" role="img" aria-label="Castarro is preparing the control room">
+      <defs>
+        <linearGradient id="startupSignalGradient" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0%" stop-color="var(--theme-primary)"></stop>
+          <stop offset="100%" stop-color="var(--theme-success)"></stop>
+        </linearGradient>
+      </defs>
+      <path class="startup-orbit startup-orbit-a" d="M45 86c22-44 108-44 130 0"></path>
+      <path class="startup-orbit startup-orbit-b" d="M61 95c18-28 80-28 98 0"></path>
+      <path class="startup-orbit startup-orbit-c" d="M78 104c13-14 51-14 64 0"></path>
+      <rect class="startup-monitor" x="74" y="48" width="72" height="46" rx="8"></rect>
+      <path class="startup-play" d="M102 60l24 11-24 11z"></path>
+      <path class="startup-scanline" d="M82 58h56"></path>
+      <circle class="startup-satellite" cx="110" cy="103" r="6"></circle>
+      <path class="startup-stand" d="M110 94v24m-22 0h44"></path>
+    </svg>
     <h1>${htmlEscape(title)}</h1>
     <p>${htmlEscape(message)}</p>
   </main>
@@ -716,15 +806,28 @@ function loadingHtml(title, message) {
 </html>`;
 }
 
+function loadStartupPage(title, message, options = {}) {
+  if (!mainWindow || mainWindow.isDestroyed()) return Promise.resolve();
+  try {
+    mkdirp(dataRoot());
+    fs.writeFileSync(startupPagePath(), loadingHtml(title, message, options), "utf8");
+    return mainWindow.loadFile(startupPagePath());
+  } catch (error) {
+    diagnosticLog("startup page write failed", error);
+    return Promise.reject(error);
+  }
+}
+
 function showLoading(message) {
-  if (!mainWindow) return;
-  mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(loadingHtml("Starting", message))}`);
+  return loadStartupPage("Starting", message, {
+    snapshotDataUrl: readStartupSnapshotDataUrl(),
+  });
 }
 
 function showError(error) {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   const message = `${error.message}\n\nLogs: ${logRoot()}\nData: ${dataRoot()}`;
-  mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(loadingHtml("Startup Failed", message))}`);
+  loadStartupPage("Startup Failed", message).catch((loadError) => diagnosticLog("startup error page failed", loadError));
 }
 
 function createMainWindow() {
@@ -745,11 +848,15 @@ function createMainWindow() {
   mainWindow.once("ready-to-show", () => mainWindow.show());
   mainWindow.webContents.on("did-finish-load", () => {
     publishUpdateState();
+    if (backendUrl && mainWindow.webContents.getURL().startsWith(backendUrl)) {
+      scheduleStartupSnapshot("backend-load", 1600);
+    }
   });
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   mainWindow.webContents.on("will-navigate", (event, url) => {
     if (backendUrl && url.startsWith(backendUrl)) return;
     if (url.startsWith("data:text/html")) return;
+    if (url === startupPageUrl()) return;
     event.preventDefault();
   });
   mainWindow.on("close", (event) => {
@@ -1080,7 +1187,7 @@ async function boot() {
   if (!mainWindow || mainWindow.isDestroyed()) {
     createMainWindow();
   }
-  showLoading("Preparing Castarro...");
+  await showLoading("Preparing Castarro...");
   await connectOrStartBackend();
   await mainWindow.loadURL(backendUrl);
 }
@@ -1116,6 +1223,7 @@ app.on("before-quit", (event) => {
   diagnosticLog(`before quit mode=${quitMode}`);
   if (updateCheckTimer) clearInterval(updateCheckTimer);
   if (trayStatusTimer) clearInterval(trayStatusTimer);
+  if (startupSnapshotTimer) clearTimeout(startupSnapshotTimer);
   if (quitMode === "full-stop") {
     stopBackend();
   }

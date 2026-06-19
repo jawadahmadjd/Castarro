@@ -11,7 +11,6 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.dp
 import com.castarro.mobile.domain.model.StreamSession
 import com.castarro.mobile.domain.model.StreamSessionStatus
 import com.castarro.mobile.ui.MobileUiState
@@ -19,6 +18,7 @@ import com.castarro.mobile.ui.components.ChannelHeader
 import com.castarro.mobile.ui.components.ReadinessRow
 import com.castarro.mobile.ui.components.SurfaceCard
 import com.castarro.mobile.ui.theme.CastarroColors as Colors
+import com.castarro.mobile.ui.theme.CastarroUiMaster as Ui
 
 @Composable
 fun HistoryScreen(
@@ -41,8 +41,8 @@ fun HistoryScreen(
         Column(
             modifier = Modifier
                 .verticalScroll(rememberScrollState())
-                .padding(14.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+                .padding(Ui.Space.Page),
+            verticalArrangement = Arrangement.spacedBy(Ui.Space.Xl),
         ) {
             SurfaceCard {
                 Text("Stream sessions", fontWeight = FontWeight.Bold)

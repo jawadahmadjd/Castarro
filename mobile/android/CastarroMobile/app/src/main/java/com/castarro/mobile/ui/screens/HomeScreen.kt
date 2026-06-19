@@ -23,8 +23,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.castarro.mobile.domain.model.CompatibilityStatus
 import com.castarro.mobile.domain.model.StreamProfile
 import com.castarro.mobile.domain.model.VideoAsset
@@ -38,6 +36,7 @@ import com.castarro.mobile.ui.components.StreamActionBar
 import com.castarro.mobile.ui.components.StreamProtectionPanel
 import com.castarro.mobile.ui.components.SurfaceCard
 import com.castarro.mobile.ui.theme.CastarroColors as Colors
+import com.castarro.mobile.ui.theme.CastarroUiMaster as Ui
 
 @Composable
 fun HomeScreen(
@@ -89,8 +88,8 @@ fun HomeScreen(
             modifier = Modifier
                 .weight(1f)
                 .verticalScroll(rememberScrollState())
-                .padding(14.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+                .padding(Ui.Space.Page),
+            verticalArrangement = Arrangement.spacedBy(Ui.Space.Xl),
         ) {
             state.errorMessage?.let { message ->
                 SurfaceCard {
@@ -116,7 +115,7 @@ fun HomeScreen(
                 Text("Bring channels, YouTube settings, and selected videos from desktop.", color = Colors.Muted)
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(Ui.Space.Md),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Button(
@@ -126,7 +125,7 @@ fun HomeScreen(
                         modifier = Modifier.weight(1f),
                     ) {
                         if (state.isSyncingDesktop) {
-                            CircularProgressIndicator(modifier = Modifier.padding(end = 8.dp))
+                            CircularProgressIndicator(modifier = Modifier.padding(end = Ui.Space.Md))
                         }
                         Text(if (state.isSyncingDesktop) "Syncing" else "Scan desktop QR")
                     }
@@ -144,7 +143,7 @@ fun HomeScreen(
                         ) {
                             Column(
                                 modifier = Modifier.weight(1f),
-                                verticalArrangement = Arrangement.spacedBy(2.dp),
+                                verticalArrangement = Arrangement.spacedBy(Ui.Space.Xxs),
                             ) {
                                 Text(video.displayName, fontWeight = FontWeight.Bold)
                                 Text(formatBytes(video.sizeBytes), color = Colors.Muted)
@@ -181,7 +180,7 @@ fun HomeScreen(
                     if (downloadTask.isActive) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            horizontalArrangement = Arrangement.spacedBy(Ui.Space.Md),
                         ) {
                             Button(
                                 onClick = if (downloadTask.phase == DesktopVideoDownloadPhase.Paused) {
@@ -236,7 +235,7 @@ fun HomeScreen(
                 }
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(Ui.Space.Md),
                 ) {
                     Button(
                         onClick = onRefreshDesktopRemoteStatus,
@@ -251,7 +250,7 @@ fun HomeScreen(
                         modifier = Modifier.weight(1f),
                     ) {
                         if (state.isRemoteActionBusy) {
-                            CircularProgressIndicator(modifier = Modifier.padding(end = 8.dp))
+                            CircularProgressIndicator(modifier = Modifier.padding(end = Ui.Space.Md))
                         }
                         Text(if (remoteChannel?.running == true) "Stop desktop" else "Start desktop")
                     }
@@ -308,7 +307,7 @@ private fun AppUsagePanel(usage: AppUsageSnapshot) {
         Text("App usage", fontWeight = FontWeight.Bold)
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            horizontalArrangement = Arrangement.spacedBy(Ui.Space.Md),
         ) {
             UsageMetric("CPU", formatCpu(usage.cpuPercent))
             UsageMetric("RAM", formatBytes(usage.ramBytes))
@@ -323,24 +322,24 @@ private fun RowScope.UsageMetric(label: String, value: String) {
     Column(
         modifier = Modifier
             .weight(1f)
-            .clip(RoundedCornerShape(8.dp))
+            .clip(RoundedCornerShape(Ui.Radius.Control))
             .background(Colors.SurfaceSoft)
-            .border(1.dp, Colors.Line, RoundedCornerShape(8.dp))
-            .padding(horizontal = 6.dp, vertical = 8.dp),
-        verticalArrangement = Arrangement.spacedBy(3.dp),
+            .border(Ui.Space.Hairline, Colors.Line, RoundedCornerShape(Ui.Radius.Control))
+            .padding(horizontal = Ui.Space.MetricHorizontal, vertical = Ui.Space.Md),
+        verticalArrangement = Arrangement.spacedBy(Ui.Space.Xs),
     ) {
         Text(
             text = label,
             color = Colors.Ink,
             fontWeight = FontWeight.Bold,
-            fontSize = 11.sp,
+            fontSize = Ui.TextSize.UsageLabel,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
         Text(
             text = value,
             color = Colors.Muted,
-            fontSize = 12.sp,
+            fontSize = Ui.TextSize.UsageValue,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )

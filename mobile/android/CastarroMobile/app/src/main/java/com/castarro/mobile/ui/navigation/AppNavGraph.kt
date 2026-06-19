@@ -36,7 +36,6 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
 import com.castarro.mobile.data.db.ChannelEntity
 import com.castarro.mobile.ui.MobileUiState
@@ -49,10 +48,13 @@ import com.castarro.mobile.ui.screens.SettingsScreen
 import com.castarro.mobile.ui.screens.VideoLibraryScreen
 import com.castarro.mobile.ui.screens.YoutubeScreen
 import com.castarro.mobile.ui.theme.CastarroColors as Colors
+import com.castarro.mobile.ui.theme.CastarroUiMaster as Ui
 
 @Composable
 fun AppNavGraph(
     uiState: MobileUiState,
+    isDarkTheme: Boolean,
+    onThemeChange: (Boolean) -> Unit,
     onImportVideos: (List<Uri>) -> Unit,
     onDeselectVideo: (String) -> Unit,
     onMoveVideo: (String, Int) -> Unit,
@@ -159,8 +161,8 @@ fun AppNavGraph(
                     val isSelected = cachedDestination == destination
                     val cachedModifier = Modifier
                         .fillMaxSize()
-                        .zIndex(if (isSelected) 1f else 0f)
-                        .graphicsLayer { alpha = if (isSelected) 1f else 0f }
+                        .zIndex(if (isSelected) Ui.Alpha.Visible else Ui.Alpha.Hidden)
+                        .graphicsLayer { alpha = if (isSelected) Ui.Alpha.Visible else Ui.Alpha.Hidden }
                         .then(if (isSelected) Modifier else Modifier.clearAndSetSemantics {})
 
                     when (cachedDestination) {
@@ -217,6 +219,8 @@ fun AppNavGraph(
                         )
                         CastarroDestination.Settings -> SettingsScreen(
                             state = uiState,
+                            isDarkTheme = isDarkTheme,
+                            onThemeChange = onThemeChange,
                             onChannelHeaderClick = { showChannelPicker = true },
                             onStreamProtectionAction = onStreamProtectionAction,
                             modifier = cachedModifier,
@@ -280,7 +284,7 @@ private fun ChannelPickerDialog(
                 modifier = Modifier
                     .fillMaxWidth()
                     .verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(Ui.Space.Md),
             ) {
                 if (channels.isEmpty()) {
                     Text("No channels yet.", color = Colors.Muted)
@@ -288,7 +292,7 @@ private fun ChannelPickerDialog(
                 channels.forEach { channel ->
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(Ui.Space.Md),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         OutlinedButton(
@@ -297,7 +301,7 @@ private fun ChannelPickerDialog(
                         ) {
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                horizontalArrangement = Arrangement.spacedBy(Ui.Space.Lg),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
                                 ChannelLogo(channel.displayName, channel.logoUri)
@@ -344,10 +348,10 @@ private fun ChannelEditorDialog(
         onDismissRequest = onDismiss,
         title = { Text(title) },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(Ui.Space.Xl)) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(Ui.Space.Xl),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     ChannelLogo(channelName, logoUri)

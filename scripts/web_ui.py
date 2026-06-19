@@ -125,6 +125,35 @@ def parse_ffmpeg_bitrate_bps(text: str) -> int | None:
     return int(value * multipliers.get(unit, 1))
 
 
+def parse_configured_bitrate_bps(value: Any) -> int | None:
+    if isinstance(value, (int, float)) and value > 0:
+        return int(value)
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return None
+    match = re.match(r"^([0-9]+(?:\.[0-9]+)?)\s*([kmgt]?)(?:b(?:it)?s?(?:/s)?)?$", raw)
+    if not match:
+        return None
+    amount = float(match.group(1))
+    suffix = match.group(2)
+    multipliers = {
+        "": 1,
+        "k": 1000,
+        "m": 1000 ** 2,
+        "g": 1000 ** 3,
+        "t": 1000 ** 4,
+    }
+    return int(amount * multipliers.get(suffix, 1))
+
+
+def live_profile_target_bitrate_bps(profile: dict[str, Any]) -> int | None:
+    video_bitrate = parse_configured_bitrate_bps(profile.get("video_bitrate"))
+    audio_bitrate = parse_configured_bitrate_bps(profile.get("audio_bitrate"))
+    if video_bitrate is None and audio_bitrate is None:
+        return None
+    return int(video_bitrate or 0) + int(audio_bitrate or 0)
+
+
 def parse_ffmpeg_clock_seconds(text: str) -> float | None:
     raw = str(text or "").strip()
     if not raw:
@@ -202,26 +231,47 @@ def stream_delivery_health(
     output_fps: float | None,
     target_fps: float | None,
     speed: float | None,
+    average_bitrate_bps: int | None,
+    target_bitrate_bps: int | None,
     drop_frames: int | None,
 ) -> tuple[str, str, str]:
     if not running:
-        return "idle", "Stopped", "Stream is not running."
-    if output_fps is None and speed is None:
-        return "pending", "Collecting", "Waiting for FFmpeg to emit live stream progress."
+        return "idle", "Offline", "Offline."
+    if output_fps is None and speed is None and average_bitrate_bps is None:
+        return "pending", "Good", "Minor issues."
 
     fps_ratio = None
     if output_fps is not None and target_fps and target_fps > 0:
         fps_ratio = output_fps / target_fps
 
+    bitrate_ratio = None
+    if average_bitrate_bps is not None and target_bitrate_bps and target_bitrate_bps > 0:
+        bitrate_ratio = average_bitrate_bps / target_bitrate_bps
+
     dropped = int(drop_frames or 0)
-    if (speed is not None and speed < 0.9) or (fps_ratio is not None and fps_ratio < 0.9):
-        return "danger", "Behind", "Output is falling behind real time. Upload bandwidth or encoder headroom may be tight."
-    if dropped > 0 or (speed is not None and speed < 0.98) or (fps_ratio is not None and fps_ratio < 0.97):
-        return "warn", "Watch", "Stream is running, but frame delivery is below target or frames are being dropped."
-    return "success", "Healthy", "Output is keeping pace with the configured live frame rate."
+    if (
+        (speed is not None and speed < 0.9)
+        or (fps_ratio is not None and fps_ratio < 0.9)
+        or (bitrate_ratio is not None and bitrate_ratio < 0.85)
+    ):
+        return "danger", "Poor", "Serious issues that need attention."
+    if (
+        dropped > 0
+        or (speed is not None and speed < 0.98)
+        or (fps_ratio is not None and fps_ratio < 0.97)
+        or (bitrate_ratio is not None and bitrate_ratio < 0.95)
+    ):
+        return "warn", "Good", "Minor issues."
+    return "success", "Excellent", "No issues."
 
 
-def parse_stream_stats(log_text: str, *, running: bool, target_fps: float | None = None) -> dict[str, Any]:
+def parse_stream_stats(
+    log_text: str,
+    *,
+    running: bool,
+    target_fps: float | None = None,
+    target_bitrate_bps: int | None = None,
+) -> dict[str, Any]:
     progress = latest_ffmpeg_progress(log_text)
     frame = None
     encoder_fps = None
@@ -283,6 +333,8 @@ def parse_stream_stats(log_text: str, *, running: bool, target_fps: float | None
         output_fps=output_fps,
         target_fps=target_fps,
         speed=speed,
+        average_bitrate_bps=average_bitrate_bps,
+        target_bitrate_bps=target_bitrate_bps,
         drop_frames=drop_frames,
     )
     return {
@@ -296,6 +348,7 @@ def parse_stream_stats(log_text: str, *, running: bool, target_fps: float | None
         "output_time_seconds": round(output_time_seconds, 2) if output_time_seconds is not None else None,
         "total_size_bytes": total_size_bytes,
         "average_bitrate_bps": average_bitrate_bps,
+        "target_bitrate_bps": int(target_bitrate_bps) if target_bitrate_bps is not None else None,
         "drop_frames": drop_frames,
         "dup_frames": dup_frames,
         "health_tone": health_tone,
@@ -468,6 +521,20 @@ class StreamState:
         self.started_at = time.time()
         self.log_path = Path(running.log_handle.name)
         self.cloud_asset_ids = list(cloud_asset_ids or [])
+        self.recovering = False
+        self.reconnect_attempts = 0
+        self.next_reconnect_at = 0.0
+        self.last_reconnect_error = ""
+        self.last_reconnect_status = ""
+
+    def replace_running(self, running: stream_manager.RunningStream, cloud_asset_ids: list[str] | None = None) -> None:
+        self.running = running
+        self.log_path = Path(running.log_handle.name)
+        self.cloud_asset_ids = list(cloud_asset_ids or [])
+        self.recovering = False
+        self.next_reconnect_at = 0.0
+        self.last_reconnect_error = ""
+        self.last_reconnect_status = "reconnected"
 
     def transferred_bytes(self) -> int:
         return parse_ffmpeg_size_bytes(tail_file(self.log_path, max_chars=20000))
@@ -477,11 +544,18 @@ class StreamState:
         channel_name = str(self.running.channel.get("name") or "")
         log_tail = tail_file(self.log_path)
         transferred_bytes = parse_ffmpeg_size_bytes(log_tail)
-        stream_stats = parse_stream_stats(log_tail, running=process.poll() is None)
+        process_running = process.poll() is None
+        stream_stats = parse_stream_stats(log_tail, running=process_running)
         return {
             "name": channel_name,
             "pid": process.pid,
-            "running": process.poll() is None,
+            "running": process_running or self.recovering,
+            "process_running": process_running,
+            "recovering": self.recovering,
+            "reconnect_attempts": self.reconnect_attempts,
+            "next_reconnect_at": self.next_reconnect_at,
+            "last_reconnect_error": self.last_reconnect_error,
+            "last_reconnect_status": self.last_reconnect_status,
             "returncode": process.returncode,
             "started_at": self.started_at,
             "log_path": str(self.log_path),
@@ -753,6 +827,7 @@ def load_config_or_none(config_name: str) -> tuple[dict[str, Any] | None, str | 
             normalize_ui_settings(config)
             normalize_alert_settings(config)
             normalize_scheduler_settings(config)
+            normalize_youtube_channel_settings(config)
             storage_providers.normalize_storage_config(config)
             normalize_youtube_accounts(config)
             return config, None
@@ -765,6 +840,7 @@ def save_config(config_name: str, config: dict[str, Any]) -> None:
     normalize_ui_settings(config)
     normalize_alert_settings(config)
     normalize_scheduler_settings(config)
+    normalize_youtube_channel_settings(config)
     storage_providers.normalize_storage_config(config)
     normalize_youtube_accounts(config)
     for channel in config.get("channels", []):
@@ -778,6 +854,16 @@ def save_config(config_name: str, config: dict[str, Any]) -> None:
     ensure_media_folders(config)
     storage_providers.ensure_storage_dirs(config, ROOT)
     app_db.sync_config(config_name, config, "save")
+
+
+def normalize_youtube_channel_settings(config: dict[str, Any]) -> None:
+    for channel in config.get("channels", []):
+        if not isinstance(channel, dict):
+            continue
+        if "youtube_dual_stream" not in channel:
+            channel["youtube_dual_stream"] = True
+        else:
+            channel["youtube_dual_stream"] = bool(channel.get("youtube_dual_stream"))
 
 
 def normalize_ui_settings(config: dict[str, Any]) -> dict[str, Any]:
@@ -1387,15 +1473,10 @@ def storage_oauth_popup_html(status: str, message: str, details: dict[str, Any] 
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Storage Connection</title>
-    <style>
-      body {{ font-family: Segoe UI, Tahoma, sans-serif; margin: 0; background: #f6f2e9; color: #25231e; }}
-      .shell {{ max-width: 520px; margin: 36px auto; background: #fffaf0; border: 1px solid #ded5c6; border-radius: 18px; padding: 20px; }}
-      h1 {{ margin: 0 0 8px; font-size: 1.2rem; }}
-      p {{ margin: 0 0 12px; color: #555046; }}
-    </style>
+    <link rel="stylesheet" href="/ui-master.css">
   </head>
-  <body>
-    <main class="shell">
+  <body class="startup-page">
+    <main>
       <h1>Storage connection {status}</h1>
       <p>{safe_message}</p>
       <p>You can close this window.</p>
@@ -1855,15 +1936,10 @@ def youtube_oauth_popup_html(status: str, message: str, details: dict[str, Any] 
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>YouTube Connection</title>
-    <style>
-      body {{ font-family: Segoe UI, Tahoma, sans-serif; margin: 0; background: #f6f2e9; color: #25231e; }}
-      .shell {{ max-width: 520px; margin: 36px auto; background: #fffaf0; border: 1px solid #ded5c6; border-radius: 18px; padding: 20px; }}
-      h1 {{ margin: 0 0 8px; font-size: 1.2rem; }}
-      p {{ margin: 0 0 12px; color: #555046; }}
-    </style>
+    <link rel="stylesheet" href="/ui-master.css">
   </head>
-  <body>
-    <main class="shell">
+  <body class="startup-page">
+    <main>
       <h1>YouTube connection {status}</h1>
       <p>{safe_message}</p>
       <p>You can close this window.</p>
@@ -2011,6 +2087,99 @@ def youtube_broadcasts(config_name: str, account_id: str | None = None) -> dict[
         "ok": True,
         "account_id": str(target.get("id") or ""),
         "broadcasts": youtube_service.list_upcoming_broadcasts(access_token),
+    }
+
+
+def youtube_chat_context(config_name: str, channel_name: str) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], str, dict[str, Any], str]:
+    channel_name = str(channel_name or "").strip()
+    if not channel_name:
+        raise ValueError("Channel is required for YouTube live chat.")
+    config, error = load_config_or_none(config_name)
+    if not config:
+        raise ValueError(error or "Config not found.")
+    channel = next((item for item in config.get("channels", []) if str(item.get("name") or "") == channel_name), None)
+    if not isinstance(channel, dict):
+        raise ValueError(f"Unknown channel: {channel_name}")
+    account_id = normalize_account_id(channel.get("youtube_account_id") or "")
+    if not account_id:
+        raise ValueError("Link a YouTube account to this channel before using live chat.")
+    account = find_youtube_account(config, account_id)
+    if not account:
+        raise ValueError(f"Unknown YouTube account slot: {account_id}")
+    broadcast_id = str(channel.get("youtube_broadcast_id") or "").strip()
+    if not broadcast_id:
+        raise ValueError("Link or schedule a YouTube broadcast for this channel before using live chat.")
+
+    scoped_config = account_config_view(config, account)
+    access_token, _tokens = youtube_service.valid_access_token(ROOT, scoped_config)
+    profile = youtube_service.connected_account_profile(access_token)
+    mismatch_message = youtube_profile_mismatch_message(youtube_account_expected_channel_name(config, account), profile)
+    if mismatch_message:
+        raise ValueError(mismatch_message)
+    broadcast = youtube_service.broadcast_chat_details_by_id(access_token, broadcast_id)
+    if not broadcast:
+        raise ValueError("The linked YouTube broadcast was not found.")
+    live_chat_id = str(broadcast.get("live_chat_id") or "").strip()
+    if not live_chat_id:
+        raise ValueError("Live chat is not enabled or available for this YouTube broadcast yet.")
+    return config, channel, account, access_token, broadcast, live_chat_id
+
+
+def live_chat_local_timestamp() -> str:
+    return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def stamp_live_chat_message(message: Any, timestamp: str, field_name: str) -> Any:
+    if not isinstance(message, dict):
+        return message
+    stamped = dict(message)
+    stamped[field_name] = str(stamped.get(field_name) or timestamp)
+    return stamped
+
+
+def youtube_live_chat(config_name: str, channel_name: str, page_token: str = "") -> dict[str, Any]:
+    _config, channel, account, access_token, broadcast, live_chat_id = youtube_chat_context(config_name, channel_name)
+    received_at = live_chat_local_timestamp()
+    chat = youtube_service.list_live_chat_messages(
+        access_token,
+        live_chat_id=live_chat_id,
+        page_token=page_token,
+    )
+    chat["messages"] = [
+        stamp_live_chat_message(message, received_at, "received_at")
+        for message in chat.get("messages", [])
+    ]
+    return {
+        "ok": True,
+        "channel": str(channel.get("name") or ""),
+        "account_id": str(account.get("id") or ""),
+        "broadcast_id": str(broadcast.get("id") or ""),
+        "broadcast_title": str(broadcast.get("title") or ""),
+        "live_chat_id": live_chat_id,
+        **chat,
+    }
+
+
+def send_youtube_live_chat(config_name: str, body: dict[str, Any]) -> dict[str, Any]:
+    channel_name = str(body.get("channel") or "").strip()
+    message_text = str(body.get("message") or "").strip()
+    if not message_text:
+        raise ValueError("Message text is required.")
+    _config, channel, account, access_token, broadcast, live_chat_id = youtube_chat_context(config_name, channel_name)
+    message = youtube_service.send_live_chat_message(
+        access_token,
+        live_chat_id=live_chat_id,
+        message_text=message_text,
+    )
+    sent_at = live_chat_local_timestamp()
+    return {
+        "ok": True,
+        "channel": str(channel.get("name") or ""),
+        "account_id": str(account.get("id") or ""),
+        "broadcast_id": str(broadcast.get("id") or ""),
+        "broadcast_title": str(broadcast.get("title") or ""),
+        "live_chat_id": live_chat_id,
+        "message": stamp_live_chat_message(message, sent_at, "sent_at"),
     }
 
 
@@ -2392,6 +2561,8 @@ def schedule_youtube(config_name: str, body: dict[str, Any]) -> dict[str, Any]:
         selected_channel["youtube_account_id"] = account_id
         selected_channel["youtube_auto_start"] = auto_start
         selected_channel["youtube_auto_stop"] = auto_stop
+        if "youtube_dual_stream" not in selected_channel:
+            selected_channel["youtube_dual_stream"] = True
         selected_channel["youtube_studio_url"] = created.get("broadcast", {}).get("studio_url", "")
         selected_channel["youtube_broadcast_id"] = created.get("broadcast", {}).get("id", "")
         selected_channel["youtube_stream_id"] = created.get("stream", {}).get("id", "")
@@ -2468,6 +2639,8 @@ def use_existing_youtube_broadcast(config_name: str, body: dict[str, Any]) -> di
         selected_channel["youtube_auto_start"] = bool(broadcast.get("auto_start"))
     if isinstance(broadcast.get("auto_stop"), bool):
         selected_channel["youtube_auto_stop"] = bool(broadcast.get("auto_stop"))
+    if "youtube_dual_stream" not in selected_channel:
+        selected_channel["youtube_dual_stream"] = True
     selected_channel["youtube_studio_url"] = str(broadcast.get("studio_url") or "")
     selected_channel["youtube_broadcast_id"] = broadcast_id
     selected_channel["youtube_stream_id"] = str(broadcast.get("bound_stream_id") or "")
@@ -2787,6 +2960,24 @@ def register_raw_video(config_name: str, channel_name: str, saved_path: Path) ->
     raise ValueError(f"Unknown channel: {channel_name}")
 
 
+def register_normalized_video(config_name: str, channel_name: str, saved_path: Path) -> None:
+    config, error = load_config_or_none(config_name)
+    if not config:
+        raise ValueError(error or "Config not found.")
+    saved = relative_or_absolute(saved_path)
+    for channel in config.get("channels", []):
+        if channel.get("name") == channel_name:
+            existing = channel.get("playlist")
+            if isinstance(existing, list) and existing and saved not in existing:
+                existing.append(saved)
+                channel["playlist"] = existing
+                save_config(config_name, config)
+            app_db.upsert_video(config_name, channel_name, saved, "normalized", "ready", True)
+            app_db.record_event("live_video_imported", config_name, channel_name, {"path": saved})
+            return
+    raise ValueError(f"Unknown channel: {channel_name}")
+
+
 def upload_raw_video(handler: BaseHTTPRequestHandler, query: dict[str, list[str]]) -> dict[str, Any]:
     config_name = safe_config_name(query.get("config", [None])[0])
     channel_name = str(query.get("channel", [""])[0]).strip()
@@ -2824,6 +3015,45 @@ def upload_raw_video(handler: BaseHTTPRequestHandler, query: dict[str, list[str]
     register_raw_video(config_name, channel_name, target)
     saved = {"name": target.name, "path": relative_or_absolute(target)}
     return {"ok": True, "saved": saved, "files": raw_video_files(config_name, channel_name)}
+
+
+def upload_normalized_video(handler: BaseHTTPRequestHandler, query: dict[str, list[str]]) -> dict[str, Any]:
+    config_name = safe_config_name(query.get("config", [None])[0])
+    channel_name = str(query.get("channel", [""])[0]).strip()
+    filename = sanitize_filename(query.get("filename", ["video.mp4"])[0])
+    if not channel_name:
+        raise ValueError("Channel is required.")
+    if Path(filename).suffix.lower() not in VIDEO_EXTENSIONS:
+        raise ValueError("Unsupported video file type.")
+
+    config, error = load_config_or_none(config_name)
+    if not config:
+        raise ValueError(error or "Config not found.")
+
+    defaults = config.get("defaults", {})
+    go_live_dir = resolve_project_path(defaults.get("normalized_dir", "Go Live"))
+    target_dir = go_live_dir / channel_name
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = unique_path(target_dir / filename)
+    remaining = int(handler.headers.get("Content-Length", "0"))
+    if remaining <= 0:
+        raise ValueError("Upload is empty.")
+
+    with target.open("wb") as fh:
+        while remaining > 0:
+            chunk = handler.rfile.read(min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            fh.write(chunk)
+            remaining -= len(chunk)
+
+    if remaining:
+        target.unlink(missing_ok=True)
+        raise ValueError("Upload ended before the full file was received.")
+
+    register_normalized_video(config_name, channel_name, target)
+    saved = {"name": target.name, "path": relative_or_absolute(target)}
+    return {"ok": True, "saved": saved, "files": normalized_video_files(config_name, channel_name)}
 
 
 def upload_youtube_thumbnail(handler: BaseHTTPRequestHandler, query: dict[str, list[str]]) -> dict[str, Any]:
@@ -3090,13 +3320,16 @@ def recent_alert_events(
     config_name: str | None,
     channel_name: str | None = None,
     *,
-    limit: int = 12,
+    limit: int = 200,
 ) -> list[dict[str, Any]]:
-    events = app_db.recent_app_events(config_name, channel_name=channel_name, limit=max(limit * 4, 40))
+    events = app_db.recent_app_events(
+        config_name,
+        channel_name=channel_name,
+        event_type="alert_raised",
+        limit=limit,
+    )
     alerts: list[dict[str, Any]] = []
     for event in events:
-        if str(event.get("event_type") or "") != "alert_raised":
-            continue
         details = event.get("details") if isinstance(event.get("details"), dict) else {}
         alerts.append(
             {
@@ -3120,7 +3353,7 @@ def recent_alert_events(
 def alerts_status(config_name: str, config: dict[str, Any] | None = None) -> dict[str, Any]:
     config = config or load_config_or_none(config_name)[0] or {}
     settings = normalize_alert_settings(config)
-    recent = recent_alert_events(config_name, limit=10)
+    recent = recent_alert_events(config_name, limit=200)
     return {
         "desktop_notifications_enabled": bool(settings.get("desktop_notifications_enabled")),
         "mobile_notifications_enabled": bool(settings.get("mobile_notifications_enabled")),
@@ -3174,7 +3407,7 @@ def start_stream(config_name: str, channel_name: str | None) -> list[str]:
         name = str(channel["name"])
         with STATE.lock:
             existing = STATE.streams.get(name)
-        if existing and existing.running.process.poll() is None:
+        if existing and (existing.running.process.poll() is None or existing.recovering):
             continue
         prepared_channel, cloud_asset_ids = prepare_channel_cloud_playlist(config, channel)
         try:
@@ -3292,6 +3525,9 @@ def stop_stream(channel_name: str | None) -> list[str]:
                     {"returncode": preview.running.process.returncode},
                 )
                 STATE.preview = None
+            state.recovering = False
+            state.last_reconnect_status = ""
+            state.running.stop_requested = True
             stream_manager.stop_stream(state.running)
             if state.running.preview_manifest:
                 stream_manager.clear_directory(state.running.preview_manifest.parent)
@@ -3339,16 +3575,14 @@ def status_payload(config_name: str) -> dict[str, Any]:
         channel = channel_map.get(name)
         if not channel:
             continue
-        stats = stream.get("stream_stats") if isinstance(stream.get("stream_stats"), dict) else {}
-        target_fps = float(stream_manager.live_profile(config, channel).get("fps") or 0) if config else 0.0
-        if target_fps > 0:
-            refreshed = parse_stream_stats(stream.get("log_tail", ""), running=bool(stream.get("running")), target_fps=target_fps)
-            stream["stream_stats"] = refreshed
-        else:
-            stream["stream_stats"] = {
-                **stats,
-                "target_fps": None,
-            }
+        profile = stream_manager.live_profile(config, channel) if config else {}
+        target_fps = float(profile.get("fps") or 0) if profile else 0.0
+        stream["stream_stats"] = parse_stream_stats(
+            stream.get("log_tail", ""),
+            running=bool(stream.get("running")),
+            target_fps=target_fps or None,
+            target_bitrate_bps=live_profile_target_bitrate_bps(profile),
+        )
     if preview:
         preview_channel = str(preview.get("channel") or "")
         if preview_channel in streams:
@@ -3390,6 +3624,7 @@ def status_payload(config_name: str) -> dict[str, Any]:
                 "stream_key_masked": mask_secret(ch.get("stream_key")),
                 "youtube_auto_start": bool(ch.get("youtube_auto_start", False)),
                 "youtube_auto_stop": bool(ch.get("youtube_auto_stop", False)),
+                "youtube_dual_stream": bool(ch.get("youtube_dual_stream", True)),
                 "youtube_account_id": str(ch.get("youtube_account_id") or ""),
                 "youtube_studio_url": ch.get("youtube_studio_url", ""),
             }
@@ -3417,22 +3652,238 @@ def status_payload(config_name: str) -> dict[str, Any]:
     }
 
 
+YOUTUBE_TERMINAL_LIFECYCLE_STATUSES = {"complete", "revoked"}
+YOUTUBE_RECOVERABLE_LIFECYCLE_STATUSES = {
+    "",
+    "created",
+    "ready",
+    "testing",
+    "teststarting",
+    "live",
+    "livestarting",
+}
+
+
+def reconnect_delay_seconds(config: dict[str, Any] | None, channel: dict[str, Any] | None = None) -> float:
+    defaults = config.get("defaults", {}) if isinstance(config, dict) else {}
+    channel = channel if isinstance(channel, dict) else {}
+    raw = channel.get("reconnect_delay_seconds", defaults.get("reconnect_delay_seconds", defaults.get("restart_delay_seconds", 10)))
+    try:
+        return max(2.0, min(float(raw), 300.0))
+    except (TypeError, ValueError):
+        return 10.0
+
+
+def is_youtube_api_network_error(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return "network error" in text or "timed out" in text or "temporary failure" in text or "name resolution" in text
+
+
+def youtube_reconnect_decision(config: dict[str, Any], channel: dict[str, Any]) -> tuple[str, str]:
+    broadcast_id = str(channel.get("youtube_broadcast_id") or "").strip()
+    if not broadcast_id:
+        return "unsupported", "No linked YouTube broadcast is available to verify."
+
+    account_id = normalize_account_id(channel.get("youtube_account_id") or "")
+    account = find_youtube_account(config, account_id)
+    if not account:
+        return "unsupported", "No linked YouTube account is available to verify the broadcast."
+
+    try:
+        scoped_config = account_config_view(config, account)
+        access_token, _tokens = youtube_service.valid_access_token(ROOT, scoped_config)
+        broadcast = youtube_service.broadcast_by_id(access_token, broadcast_id)
+    except Exception as exc:
+        if is_youtube_api_network_error(exc):
+            return "pending", f"YouTube status check is waiting for internet access: {exc}"
+        return "unsupported", f"Could not verify YouTube broadcast status: {exc}"
+
+    if not broadcast:
+        return "terminal", "The linked YouTube broadcast was not found."
+
+    lifecycle = str(broadcast.get("life_cycle_status") or "").strip().lower()
+    stream = broadcast.get("stream") if isinstance(broadcast.get("stream"), dict) else {}
+    stream_status = str(stream.get("stream_status") or "").strip().lower()
+    if lifecycle in YOUTUBE_TERMINAL_LIFECYCLE_STATUSES:
+        return "terminal", f"YouTube broadcast is {lifecycle}."
+    if lifecycle in YOUTUBE_RECOVERABLE_LIFECYCLE_STATUSES:
+        detail = f"YouTube broadcast is {lifecycle or 'not terminal'}"
+        if stream_status:
+            detail += f" and ingest is {stream_status}"
+        return "recoverable", detail + "."
+    return "pending", f"YouTube broadcast is {lifecycle}; waiting before deciding whether to close the app stream."
+
+
+def mark_stream_reconnect_wait(
+    state: StreamState,
+    config_name: str,
+    channel_name: str,
+    *,
+    status: str,
+    message: str,
+    delay_seconds: float,
+) -> None:
+    now = time.time()
+    previous_status = state.last_reconnect_status
+    previous_message = state.last_reconnect_error
+    state.recovering = True
+    state.next_reconnect_at = now + delay_seconds
+    state.last_reconnect_status = status
+    state.last_reconnect_error = message
+    if previous_status == status and previous_message == message:
+        return
+    app_db.record_event(
+        "stream_reconnect_waiting",
+        config_name,
+        channel_name,
+        {
+            "status": status,
+            "message": message,
+            "next_reconnect_at": state.next_reconnect_at,
+            "attempts": state.reconnect_attempts,
+        },
+    )
+
+
+def maybe_reconnect_youtube_stream(
+    channel_name: str,
+    state: StreamState,
+    config: dict[str, Any] | None,
+    reason: str,
+) -> bool:
+    if not config or state.running.stop_requested:
+        return False
+
+    channel = find_channel_by_name(config, channel_name)
+    if not channel:
+        return False
+    if not bool(channel.get("restart_on_exit", True)):
+        return False
+
+    log_tail = tail_file(state.log_path, max_chars=20000)
+    if not stream_manager.is_recoverable_network_exit(state.running.process.returncode, log_tail):
+        return False
+    if not str(channel.get("youtube_broadcast_id") or "").strip():
+        return False
+
+    delay_seconds = reconnect_delay_seconds(config, channel)
+    with STATE.lock:
+        current = STATE.streams.get(channel_name)
+        if current is not state:
+            return True
+        state.recovering = True
+        state.last_reconnect_status = state.last_reconnect_status or "checking_youtube"
+        if state.next_reconnect_at and time.time() < state.next_reconnect_at:
+            return True
+
+    decision, message = youtube_reconnect_decision(config, channel)
+    if decision == "terminal":
+        app_db.record_event(
+            "stream_reconnect_abandoned",
+            state.config_name,
+            channel_name,
+            {"reason": reason, "youtube_status": message},
+        )
+        with STATE.lock:
+            state.recovering = False
+            state.last_reconnect_status = "youtube_terminal"
+            state.last_reconnect_error = message
+        return False
+
+    if decision != "recoverable":
+        with STATE.lock:
+            mark_stream_reconnect_wait(
+                state,
+                state.config_name,
+                channel_name,
+                status=decision,
+                message=message,
+                delay_seconds=delay_seconds,
+            )
+        return True
+
+    config_dir = (ROOT / state.config_name).resolve().parent
+    old_running = state.running
+    old_assets = list(state.cloud_asset_ids)
+    cloud_asset_ids: list[str] = []
+    try:
+        prepared_channel, cloud_asset_ids = prepare_channel_cloud_playlist(config, channel)
+        running = stream_manager.start_stream(config_dir, config, prepared_channel)
+    except Exception as exc:
+        unregister_cloud_assets(old_assets)
+        unregister_cloud_assets(cloud_asset_ids)
+        with STATE.lock:
+            state.cloud_asset_ids = []
+            state.reconnect_attempts += 1
+            mark_stream_reconnect_wait(
+                state,
+                state.config_name,
+                channel_name,
+                status="retry_failed",
+                message=str(exc),
+                delay_seconds=delay_seconds,
+            )
+        app_db.record_event(
+            "stream_reconnect_failed",
+            state.config_name,
+            channel_name,
+            {"reason": reason, "message": str(exc), "attempts": state.reconnect_attempts},
+        )
+        return True
+
+    stream_manager.close_stream_log(old_running)
+    unregister_cloud_assets(old_assets)
+    with STATE.lock:
+        current = STATE.streams.get(channel_name)
+        if current is state:
+            state.reconnect_attempts += 1
+            state.replace_running(running, cloud_asset_ids=cloud_asset_ids)
+            STATE.stream_exit_recorded.discard((state.config_name, channel_name))
+        else:
+            stream_manager.stop_stream(running)
+            unregister_cloud_assets(cloud_asset_ids)
+            return True
+    app_db.record_event(
+        "stream_reconnected",
+        state.config_name,
+        channel_name,
+        {
+            "pid": running.process.pid,
+            "reason": reason,
+            "youtube_status": message,
+            "attempts": state.reconnect_attempts,
+        },
+    )
+    return True
+
+
 def finalize_stream_lifecycle() -> None:
     with STATE.lock:
         items = list(STATE.streams.items())
     for channel_name, state in items:
         process = state.running.process
         if process.poll() is None:
+            if state.recovering:
+                with STATE.lock:
+                    state.recovering = False
+                    state.next_reconnect_at = 0.0
             continue
         key = (state.config_name, channel_name)
         with STATE.lock:
             if key in STATE.stream_exit_recorded:
                 continue
+        reason = stream_manager.describe_returncode(process.returncode, stop_requested=state.running.stop_requested)
+        config, _error = load_config_or_none(state.config_name)
+        if maybe_reconnect_youtube_stream(channel_name, state, config, reason):
+            continue
+        with STATE.lock:
+            if key in STATE.stream_exit_recorded:
+                continue
             STATE.stream_exit_recorded.add(key)
+            state.recovering = False
         unregister_cloud_assets(state.cloud_asset_ids)
         transferred_bytes = state.transferred_bytes()
         app_db.record_stream_stop(state.config_name, channel_name, process.returncode, transferred_bytes)
-        reason = stream_manager.describe_returncode(process.returncode, stop_requested=state.running.stop_requested)
         app_db.record_event(
             "stream_stopped" if state.running.stop_requested else "stream_exited",
             state.config_name,
@@ -3445,7 +3896,6 @@ def finalize_stream_lifecycle() -> None:
             },
         )
         if not state.running.stop_requested:
-            config, _error = load_config_or_none(state.config_name)
             if config:
                 emit_alert(
                     config,
@@ -3466,10 +3916,17 @@ def evaluate_stream_connection_health() -> None:
             continue
         log_tail = tail_file(state.log_path)
         config, _error = load_config_or_none(state.config_name)
-        target_fps = float(stream_manager.live_profile(config or {}, state.running.channel).get("fps") or 0)
-        stats = parse_stream_stats(log_tail, running=True, target_fps=target_fps or None)
+        profile = stream_manager.live_profile(config or {}, state.running.channel)
+        target_fps = float(profile.get("fps") or 0)
+        stats = parse_stream_stats(
+            log_tail,
+            running=True,
+            target_fps=target_fps or None,
+            target_bitrate_bps=live_profile_target_bitrate_bps(profile),
+        )
         label = str(stats.get("health_label") or "")
-        severity = "danger" if label == "Behind" else "warn" if label == "Watch" else ""
+        tone = str(stats.get("health_tone") or "")
+        severity = "danger" if tone == "danger" else "warn" if tone == "warn" else ""
         watch_key = (state.config_name, channel_name)
         with STATE.lock:
             watch = dict(STATE.connection_watch.get(watch_key) or {})
@@ -3503,7 +3960,7 @@ def evaluate_scheduler_for_config(config_name: str, config: dict[str, Any]) -> N
         running_names = {
             name
             for name, stream in STATE.streams.items()
-            if stream.config_name == config_name and stream.running.process.poll() is None
+            if stream.config_name == config_name and (stream.running.process.poll() is None or stream.recovering)
         }
         runtime_snapshot = dict(STATE.scheduler_channels)
     now_local = datetime.now().astimezone()
@@ -3824,7 +4281,7 @@ def remote_status_for_record(record: dict[str, Any]) -> dict[str, Any]:
                 "channelId": sync_service.channel_id(config_name, channel_name),
                 "channelName": channel_name,
                 "running": bool(stream.get("running")),
-                "healthLabel": str(stats.get("health_label") or ("Live" if stream.get("running") else "Idle")),
+                "healthLabel": str(stats.get("health_label") or ("Good" if stream.get("running") else "Offline")),
                 "healthDetail": str(stats.get("detail") or ""),
                 "bitrateBps": int(stats.get("average_bitrate_bps") or 0),
                 "speed": stats.get("speed"),
@@ -4114,6 +4571,14 @@ class Handler(BaseHTTPRequestHandler):
                 json_response(self, youtube_broadcasts(config_name, account_id))
                 return
 
+            if parsed.path == "/api/youtube/live-chat":
+                config_name = safe_config_name(query.get("config", [DEFAULT_CONFIG])[0])
+                channel_name = str(query.get("channel", [""])[0] or "").strip()
+                page_token = str(query.get("pageToken", [""])[0] or "").strip()
+                update_request_trace(self, config_name=config_name, channel_name=channel_name)
+                json_response(self, youtube_live_chat(config_name, channel_name, page_token))
+                return
+
             if parsed.path == "/api/youtube/verify-channel-keys":
                 config_name = safe_config_name(query.get("config", [DEFAULT_CONFIG])[0])
                 channel_name = str(query.get("channel", [""])[0] or "").strip() or None
@@ -4191,6 +4656,10 @@ class Handler(BaseHTTPRequestHandler):
             )
             if parsed.path == "/api/raw-files/upload":
                 json_response(self, upload_raw_video(self, query))
+                return
+
+            if parsed.path == "/api/normalized-files/upload":
+                json_response(self, upload_normalized_video(self, query))
                 return
 
             if parsed.path == "/api/youtube/thumbnail":
@@ -4289,6 +4758,10 @@ class Handler(BaseHTTPRequestHandler):
                 json_response(self, use_existing_youtube_broadcast(config_name, body))
                 return
 
+            if parsed.path == "/api/youtube/live-chat/send":
+                json_response(self, send_youtube_live_chat(config_name, body))
+                return
+
             if parsed.path == "/api/channel/youtube-auto":
                 config, error = load_config_or_none(config_name)
                 if not config:
@@ -4299,6 +4772,8 @@ class Handler(BaseHTTPRequestHandler):
                     if channel.get("name") == channel_name:
                         channel["youtube_auto_start"] = bool(body.get("auto_start", True))
                         channel["youtube_auto_stop"] = bool(body.get("auto_stop", True))
+                        if "dual_stream" in body:
+                            channel["youtube_dual_stream"] = bool(body.get("dual_stream", True))
                         if "studio_url" in body:
                             channel["youtube_studio_url"] = str(body.get("studio_url") or "")
                         updated = True

@@ -55,6 +55,7 @@ def init_db() -> None:
               has_inline_key INTEGER NOT NULL DEFAULT 0,
               youtube_auto_start INTEGER NOT NULL DEFAULT 0,
               youtube_auto_stop INTEGER NOT NULL DEFAULT 0,
+              youtube_dual_stream INTEGER NOT NULL DEFAULT 1,
               youtube_studio_url TEXT,
               normalize_profile_json TEXT,
               raw_playlist_json TEXT,
@@ -180,6 +181,8 @@ def init_db() -> None:
         }
         if "cloud_playlist_json" not in channel_columns:
             db.execute("ALTER TABLE channels ADD COLUMN cloud_playlist_json TEXT")
+        if "youtube_dual_stream" not in channel_columns:
+            db.execute("ALTER TABLE channels ADD COLUMN youtube_dual_stream INTEGER NOT NULL DEFAULT 1")
 
 
 def relative_or_absolute(path: Path) -> str:
@@ -250,17 +253,18 @@ def upsert_channel(config_name: str, channel: dict[str, Any], db: sqlite3.Connec
             """
             INSERT INTO channels(
               config_name, name, enabled, stream_key_env, has_inline_key,
-              youtube_auto_start, youtube_auto_stop, youtube_studio_url,
+              youtube_auto_start, youtube_auto_stop, youtube_dual_stream, youtube_studio_url,
               normalize_profile_json, raw_playlist_json, playlist_json, cloud_playlist_json,
               created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(config_name, name) DO UPDATE SET
               enabled=excluded.enabled,
               stream_key_env=excluded.stream_key_env,
               has_inline_key=excluded.has_inline_key,
               youtube_auto_start=excluded.youtube_auto_start,
               youtube_auto_stop=excluded.youtube_auto_stop,
+              youtube_dual_stream=excluded.youtube_dual_stream,
               youtube_studio_url=excluded.youtube_studio_url,
               normalize_profile_json=excluded.normalize_profile_json,
               raw_playlist_json=excluded.raw_playlist_json,
@@ -276,6 +280,7 @@ def upsert_channel(config_name: str, channel: dict[str, Any], db: sqlite3.Connec
                 int(bool(channel.get("stream_key"))),
                 int(bool(channel.get("youtube_auto_start"))),
                 int(bool(channel.get("youtube_auto_stop"))),
+                int(bool(channel.get("youtube_dual_stream", True))),
                 channel.get("youtube_studio_url", ""),
                 json.dumps(channel.get("normalize_profile", {}), sort_keys=True),
                 json.dumps(channel.get("raw_playlist", []), sort_keys=True),
@@ -732,6 +737,7 @@ def stats() -> dict[str, Any]:
 def recent_app_events(
     config_name: str | None = None,
     channel_name: str | None = None,
+    event_type: str | None = None,
     limit: int = 40,
 ) -> list[dict[str, Any]]:
     init_db()
@@ -744,6 +750,9 @@ def recent_app_events(
     if channel_name:
         where.append("channel_name = ?")
         params.append(channel_name)
+    if event_type:
+        where.append("event_type = ?")
+        params.append(event_type)
     where_clause = f"WHERE {' AND '.join(where)}" if where else ""
     params.append(safe_limit)
     with connect() as db:

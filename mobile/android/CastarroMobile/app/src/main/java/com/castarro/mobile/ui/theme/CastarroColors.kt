@@ -1,20 +1,71 @@
 package com.castarro.mobile.ui.theme
 
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.ReadOnlyComposable
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
 
+val LocalCastarroPalette = staticCompositionLocalOf { CastarroUiMaster.Colors.Light }
+
 object CastarroColors {
-    val Background = Color(0xFFF4F0E8)
-    val Surface = Color(0xFFFFFAF0)
-    val SurfaceSoft = Color(0xFFFBF2DF)
-    val NavigationDark = Color(0xFF2F2414)
-    val NavigationSoft = Color(0xFF4B3821)
-    val Ink = Color(0xFF2A241B)
-    val Muted = Color(0xFF766B59)
-    val Line = Color(0xFFE2D5BF)
-    val Gold = Color(0xFFD99A32)
-    val GoldSoft = Color(0xFFF4DFAD)
-    val Green = Color(0xFF2F7A55)
-    val TealDark = Color(0xFF1E3430)
-    val Danger = Color(0xFFA9493D)
-    val Warning = Color(0xFFC97926)
+    val Background: Color
+        @Composable
+        @ReadOnlyComposable
+        get() = LocalCastarroPalette.current.Background
+    val Surface: Color
+        @Composable
+        @ReadOnlyComposable
+        get() = LocalCastarroPalette.current.Surface
+    val SurfaceSoft: Color
+        @Composable
+        @ReadOnlyComposable
+        get() = LocalCastarroPalette.current.SurfaceSoft
+    val NavigationDark: Color
+        @Composable
+        @ReadOnlyComposable
+        get() = LocalCastarroPalette.current.NavigationDark
+    val NavigationSoft: Color
+        @Composable
+        @ReadOnlyComposable
+        get() = LocalCastarroPalette.current.NavigationSoft
+    val NavigationText: Color
+        @Composable
+        @ReadOnlyComposable
+        get() = LocalCastarroPalette.current.NavigationText
+    val Ink: Color
+        @Composable
+        @ReadOnlyComposable
+        get() = LocalCastarroPalette.current.Ink
+    val Muted: Color
+        @Composable
+        @ReadOnlyComposable
+        get() = LocalCastarroPalette.current.Muted
+    val Line: Color
+        @Composable
+        @ReadOnlyComposable
+        get() = LocalCastarroPalette.current.Line
+    val Gold: Color
+        @Composable
+        @ReadOnlyComposable
+        get() = LocalCastarroPalette.current.Gold
+    val GoldSoft: Color
+        @Composable
+        @ReadOnlyComposable
+        get() = LocalCastarroPalette.current.GoldSoft
+    val Green: Color
+        @Composable
+        @ReadOnlyComposable
+        get() = LocalCastarroPalette.current.Green
+    val TealDark: Color
+        @Composable
+        @ReadOnlyComposable
+        get() = LocalCastarroPalette.current.TealDark
+    val Danger: Color
+        @Composable
+        @ReadOnlyComposable
+        get() = LocalCastarroPalette.current.Danger
+    val Warning: Color
+        @Composable
+        @ReadOnlyComposable
+        get() = LocalCastarroPalette.current.Warning
 }

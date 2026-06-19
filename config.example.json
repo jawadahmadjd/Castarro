@@ -160,6 +160,7 @@
       },
       "youtube_auto_start": true,
       "youtube_auto_stop": true,
+      "youtube_dual_stream": true,
       "youtube_account_id": "",
       "youtube_studio_url": "",
       "youtube_broadcast_id": "",

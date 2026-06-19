@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Castarro</title>
-    <link rel="stylesheet" href="/styles.css">
+    <link rel="stylesheet" href="/ui-master.css">
   </head>
   <body class="boot-loading">
     <main class="app-shell">
@@ -45,9 +45,7 @@
           <div class="sidebar-section-head">
             <h2>Channel Tools</h2>
           </div>
-          <button class="sidebar-tool-item active" id="railOpenDashboard" data-route="overview" type="button">Overview</button>
-          <button class="sidebar-tool-item" id="railOpenEncoder" data-route="encoder" type="button">Encoder</button>
-          <button class="sidebar-tool-item hidden" id="railOpenNormalize" data-route="encoder" type="button">Video Encoder</button>
+          <button class="sidebar-tool-item active" id="railOpenDashboard" data-route="overview" type="button">Dashboard</button>
           <button class="sidebar-tool-item" id="railOpenYoutube" data-route="youtube" type="button">YouTube</button>
           <button class="sidebar-tool-item hidden" id="railOpenLive" data-route="youtube" type="button">Live</button>
           <button class="sidebar-tool-item" id="railOpenHistory" data-route="history" type="button">History</button>
@@ -72,6 +70,40 @@
         </div>
 
         <section class="app-main-inner">
+          <section class="first-run-onboarding hidden" id="firstRunOnboarding" aria-labelledby="firstRunTitle">
+            <div class="first-run-primary">
+              <p class="workspace-breadcrumb">First setup</p>
+              <h2 id="firstRunTitle">Create your first channel</h2>
+              <p class="helper">A channel keeps your YouTube connection, stream key, videos, live settings, and history together.</p>
+              <button class="pill primary first-run-add-channel" id="firstRunAddChannel" type="button">
+                <span class="first-run-add-icon" aria-hidden="true">+</span>
+                <span>Add Channel</span>
+              </button>
+            </div>
+            <ol class="first-run-steps" aria-label="First live stream setup steps">
+              <li class="active">
+                <span class="first-run-step-number">1</span>
+                <span>Add a channel</span>
+              </li>
+              <li>
+                <span class="first-run-step-number">2</span>
+                <span>Connect YouTube or add a stream key</span>
+              </li>
+              <li>
+                <span class="first-run-step-number">3</span>
+                <span>Prepare or select videos to go live</span>
+              </li>
+              <li>
+                <span class="first-run-step-number">4</span>
+                <span>Adjust your YouTube live settings</span>
+              </li>
+              <li>
+                <span class="first-run-step-number">5</span>
+                <span>Start your first live stream</span>
+              </li>
+            </ol>
+          </section>
+
           <header class="workspace-header" id="workspaceHeader">
             <div class="workspace-header-copy">
               <p class="workspace-breadcrumb" id="workspaceBreadcrumb">Channel / Loading</p>
@@ -193,9 +225,8 @@
         <section class="panel settings-route-menu">
           <div class="settings-menu">
             <div class="tabs">
-              <button class="tab active" id="settingsNormalizeTab" type="button">Video Encoder</button>
               <button class="tab" id="settingsStorageTab" type="button">Storage</button>
-              <button class="tab" id="settingsYoutubeTab" type="button">YouTube</button>
+              <button class="tab active" id="settingsYoutubeTab" type="button">YouTube</button>
               <button class="tab" id="settingsAutomationTab" type="button">Automation</button>
               <button class="tab" id="settingsLiveHistoryTab" type="button">Live History</button>
               <button class="tab" id="settingsTroubleshootingTab" type="button">Troubleshooting</button>
@@ -203,7 +234,7 @@
           </div>
         </section>
 
-        <section id="settingsNormalizeView" class="settings-section active">
+        <section id="settingsNormalizeView" class="settings-section">
           <section class="panel">
             <div class="section-head">
               <div>
@@ -222,7 +253,7 @@
           </section>
         </section>
 
-        <section id="settingsYoutubeView" class="settings-section">
+        <section id="settingsYoutubeView" class="settings-section active">
           <section class="panel">
             <div class="section-head">
               <div>
@@ -358,9 +389,20 @@
             <input id="workspaceChannelEditName" type="text" autocomplete="off" spellcheck="false" oninput="syncWorkspaceChannelEditPreview()" onkeydown="handleWorkspaceChannelEditKey(event)">
           </label>
         </div>
-        <div class="modal-actions">
-          <button class="pill ghost" id="cancelWorkspaceChannelEdit" type="button">Cancel</button>
-          <button class="pill primary" id="saveWorkspaceChannelEditButton" type="button">Save Changes</button>
+        <div class="modal-actions channel-edit-actions">
+          <button class="pill ghost icon-only channel-delete-icon hidden" id="deleteWorkspaceChannelButton" type="button" title="Delete channel" aria-label="Delete channel">
+            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <path d="M3 6h18"></path>
+              <path d="M8 6V4h8v2"></path>
+              <path d="M6 6l1 15h10l1-15"></path>
+              <path d="M10 10v7"></path>
+              <path d="M14 10v7"></path>
+            </svg>
+          </button>
+          <div class="channel-edit-save-actions">
+            <button class="pill ghost" id="cancelWorkspaceChannelEdit" type="button">Cancel</button>
+            <button class="pill primary" id="saveWorkspaceChannelEditButton" type="button">Save Changes</button>
+          </div>
         </div>
       </section>
     </div>
@@ -384,6 +426,21 @@
         <div class="modal-actions">
           <button class="pill ghost" id="cancelDeleteChannel" type="button">Cancel</button>
           <button class="pill danger" id="confirmDeleteChannel" type="button" disabled>Remove Channel</button>
+        </div>
+      </section>
+    </div>
+    <div class="modal-backdrop hidden" id="onboardingConnectionDialog" role="dialog" aria-modal="true" aria-labelledby="onboardingConnectionTitle">
+      <section class="modal-panel onboarding-connection-modal">
+        <div class="modal-head">
+          <div>
+            <h2 id="onboardingConnectionTitle">Connect YouTube</h2>
+            <p class="helper">Choose the account connection or paste a manual stream key.</p>
+          </div>
+        </div>
+        <div id="onboardingConnectionBody"></div>
+        <div class="modal-actions">
+          <button class="pill ghost" id="cancelOnboardingConnection" type="button">Cancel</button>
+          <button class="pill primary" id="saveOnboardingConnection" type="button">Save</button>
         </div>
       </section>
     </div>

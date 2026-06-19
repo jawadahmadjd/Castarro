@@ -36,7 +36,7 @@ def assert_progress_parser_reports_live_delivery() -> None:
 2026-06-14T12:00:00.000+05:00 | speed=1.00x
 2026-06-14T12:00:00.000+05:00 | progress=continue
 """.strip()
-    stats = web_ui.parse_stream_stats(log_text, running=True, target_fps=30)
+    stats = web_ui.parse_stream_stats(log_text, running=True, target_fps=30, target_bitrate_bps=6928000)
     assert stats["available"] is True
     assert stats["source"] == "ffmpeg-progress"
     assert stats["output_fps"] == 30.0
@@ -44,7 +44,8 @@ def assert_progress_parser_reports_live_delivery() -> None:
     assert stats["target_fps"] == 30.0
     assert stats["speed"] == 1.0
     assert stats["average_bitrate_bps"] == 9600000
-    assert stats["health_label"] == "Healthy"
+    assert stats["target_bitrate_bps"] == 6928000
+    assert stats["health_label"] == "Excellent"
 
 
 def assert_timestamped_stats_line_still_parses() -> None:
@@ -52,7 +53,7 @@ def assert_timestamped_stats_line_still_parses() -> None:
 2026-06-14T12:00:01.000+05:00 | frame=  603 fps=29.9 q=-1.0 size=    6144KiB time=00:00:20.10 bitrate=2502.4kbits/s speed=0.99x
 2026-06-14T12:00:02.000+05:00 | SESSION_EXIT kind=stream channel="Inside Us" pid=4242 returncode=4294957242 signed_returncode=-10054 reason="network connection reset by remote host (WSAECONNRESET)" duration_seconds=20.500
 """.strip()
-    stats = web_ui.parse_stream_stats(log_text, running=False, target_fps=30)
+    stats = web_ui.parse_stream_stats(log_text, running=False, target_fps=30, target_bitrate_bps=6928000)
     assert stats["available"] is True
     assert stats["source"] == "ffmpeg-stats-line"
     assert stats["output_fps"] == 30.0
@@ -122,8 +123,9 @@ def assert_status_payload_includes_target_fps_for_running_stream() -> None:
             payload = web_ui.status_payload("config.ready.json")
             stats = payload["streams"]["Inside Us"]["stream_stats"]
             assert stats["target_fps"] == 30.0
+            assert stats["target_bitrate_bps"] == 6928000
             assert stats["output_fps"] == 30.0
-            assert stats["health_label"] == "Healthy"
+            assert stats["health_label"] == "Excellent"
             assert payload["streams"]["Inside Us"]["running"] is True
         finally:
             if not log_handle.closed:

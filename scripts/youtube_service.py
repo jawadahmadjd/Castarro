@@ -438,6 +438,7 @@ def broadcast_from_resource(access_token: str, item: dict[str, Any]) -> dict[str
         "thumbnails": snippet.get("thumbnails", {}),
         "scheduled_start_time": snippet.get("scheduledStartTime", ""),
         "scheduled_end_time": snippet.get("scheduledEndTime", ""),
+        "live_chat_id": snippet.get("liveChatId", ""),
         "privacy_status": status.get("privacyStatus", ""),
         "life_cycle_status": status.get("lifeCycleStatus", ""),
         "made_for_kids": status.get("selfDeclaredMadeForKids", status.get("madeForKids", "")),
@@ -478,6 +479,45 @@ def list_broadcasts_by_status(access_token: str, status: str, limit: int = 25) -
     return results
 
 
+def broadcast_by_id(access_token: str, broadcast_id: str) -> dict[str, Any] | None:
+    broadcast_id = str(broadcast_id or "").strip()
+    if not broadcast_id:
+        return None
+    payload = youtube_get(
+        access_token,
+        "https://www.googleapis.com/youtube/v3/liveBroadcasts"
+        f"?part=id,snippet,status,contentDetails&id={urllib.parse.quote(broadcast_id)}",
+    )
+    items = payload.get("items")
+    if not isinstance(items, list) or not items:
+        return None
+    first = items[0]
+    return broadcast_from_resource(access_token, first) if isinstance(first, dict) else None
+
+
+def broadcast_chat_details_by_id(access_token: str, broadcast_id: str) -> dict[str, Any] | None:
+    broadcast_id = str(broadcast_id or "").strip()
+    if not broadcast_id:
+        return None
+    payload = youtube_get(
+        access_token,
+        "https://www.googleapis.com/youtube/v3/liveBroadcasts"
+        f"?part=id,snippet,status&id={urllib.parse.quote(broadcast_id)}",
+    )
+    items = payload.get("items")
+    if not isinstance(items, list) or not items:
+        return None
+    item = items[0] if isinstance(items[0], dict) else {}
+    snippet = item.get("snippet", {}) if isinstance(item.get("snippet"), dict) else {}
+    status = item.get("status", {}) if isinstance(item.get("status"), dict) else {}
+    return {
+        "id": str(item.get("id") or ""),
+        "title": str(snippet.get("title") or ""),
+        "live_chat_id": str(snippet.get("liveChatId") or ""),
+        "life_cycle_status": str(status.get("lifeCycleStatus") or ""),
+    }
+
+
 def list_upcoming_broadcasts(access_token: str, limit: int = 25) -> list[dict[str, Any]]:
     results_by_id: dict[str, dict[str, Any]] = {}
     for status in ("upcoming", "active"):
@@ -496,6 +536,91 @@ def list_upcoming_broadcasts(access_token: str, limit: int = 25) -> list[dict[st
                 results_by_id[broadcast_id] = item
 
     return list(results_by_id.values())
+
+
+def live_chat_message_from_resource(item: dict[str, Any]) -> dict[str, Any] | None:
+    if not isinstance(item, dict):
+        return None
+    snippet = item.get("snippet", {}) if isinstance(item.get("snippet"), dict) else {}
+    author = item.get("authorDetails", {}) if isinstance(item.get("authorDetails"), dict) else {}
+    text_details = snippet.get("textMessageDetails", {}) if isinstance(snippet.get("textMessageDetails"), dict) else {}
+    message_text = str(text_details.get("messageText") or snippet.get("displayMessage") or "").strip()
+    return {
+        "id": str(item.get("id") or ""),
+        "type": str(snippet.get("type") or ""),
+        "published_at": str(snippet.get("publishedAt") or ""),
+        "display_message": str(snippet.get("displayMessage") or message_text),
+        "message_text": message_text,
+        "author_channel_id": str(author.get("channelId") or ""),
+        "author_display_name": str(author.get("displayName") or ""),
+        "author_profile_image_url": str(author.get("profileImageUrl") or ""),
+        "is_chat_owner": bool(author.get("isChatOwner")),
+        "is_chat_moderator": bool(author.get("isChatModerator")),
+        "is_chat_sponsor": bool(author.get("isChatSponsor")),
+        "is_verified": bool(author.get("isVerified")),
+    }
+
+
+def list_live_chat_messages(
+    access_token: str,
+    *,
+    live_chat_id: str,
+    page_token: str = "",
+    max_results: int = 200,
+) -> dict[str, Any]:
+    live_chat_id = str(live_chat_id or "").strip()
+    if not live_chat_id:
+        raise ValueError("Live chat ID is required.")
+    clamped_max = max(200, min(int(max_results or 200), 2000))
+    params = {
+        "part": "id,snippet,authorDetails",
+        "liveChatId": live_chat_id,
+        "maxResults": str(clamped_max),
+        "profileImageSize": "48",
+    }
+    if page_token:
+        params["pageToken"] = str(page_token)
+    payload = youtube_get(
+        access_token,
+        "https://www.googleapis.com/youtube/v3/liveChat/messages?" + urllib.parse.urlencode(params),
+    )
+    raw_items = payload.get("items")
+    if not isinstance(raw_items, list):
+        raw_items = []
+    messages = [
+        message
+        for message in (live_chat_message_from_resource(item) for item in raw_items)
+        if message
+    ]
+    return {
+        "messages": messages,
+        "next_page_token": str(payload.get("nextPageToken") or ""),
+        "polling_interval_millis": int(float(payload.get("pollingIntervalMillis") or 5000)),
+        "offline_at": str(payload.get("offlineAt") or ""),
+    }
+
+
+def send_live_chat_message(access_token: str, *, live_chat_id: str, message_text: str) -> dict[str, Any]:
+    live_chat_id = str(live_chat_id or "").strip()
+    message_text = str(message_text or "").strip()
+    if not live_chat_id:
+        raise ValueError("Live chat ID is required.")
+    if not message_text:
+        raise ValueError("Message text is required.")
+    payload = youtube_post(
+        access_token,
+        "https://www.googleapis.com/youtube/v3/liveChat/messages?part=snippet",
+        body={
+            "snippet": {
+                "liveChatId": live_chat_id,
+                "type": "textMessageEvent",
+                "textMessageDetails": {
+                    "messageText": message_text,
+                },
+            },
+        },
+    )
+    return live_chat_message_from_resource(payload) or payload
 
 
 def stream_name_from_resource(stream: dict[str, Any]) -> str:

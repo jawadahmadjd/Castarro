@@ -19,6 +19,9 @@ contextBridge.exposeInMainWorld("desktopShell", {
   getUsageMetrics(payload = {}) {
     return ipcRenderer.invoke("desktop:get-usage-metrics", payload);
   },
+  cacheStartupView(payload = {}) {
+    ipcRenderer.send("desktop:cache-startup-view", payload);
+  },
   showNotification(payload = {}) {
     return ipcRenderer.invoke("desktop:show-notification", payload);
   },

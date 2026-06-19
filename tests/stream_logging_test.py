@@ -43,10 +43,23 @@ def assert_session_command_masks_output_url() -> None:
     assert "preview.m3u8" in text
 
 
+def assert_ffmpeg_output_url_is_redacted() -> None:
+    url = "rtmp://a.rtmp.youtube.com/live2/private-stream-key"
+    redactions = stream_manager.stream_log_redactions(url, "Inside Us")
+    text = stream_manager.sanitize_stream_log_message(
+        f"[out#0/flv] Output file #0 ({url}): private-stream-key",
+        redactions,
+    )
+    assert "private-stream-key" not in text
+    assert "rtmp://a.rtmp.youtube.com/live2/[Inside Us stream key]" in text
+    assert text.endswith("[Inside Us stream key]")
+
+
 def main() -> int:
     assert_winsock_reset_is_decoded()
     assert_stop_request_overrides_signal_exit()
     assert_session_command_masks_output_url()
+    assert_ffmpeg_output_url_is_redacted()
     print("stream_logging_test: PASS")
     return 0
 
