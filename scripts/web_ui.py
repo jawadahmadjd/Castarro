@@ -2978,6 +2978,44 @@ def register_normalized_video(config_name: str, channel_name: str, saved_path: P
     raise ValueError(f"Unknown channel: {channel_name}")
 
 
+def import_raw_videos(body: dict[str, Any]) -> dict[str, Any]:
+    config_name = safe_config_name(body.get("config"))
+    channel_name = str(body.get("channel") or "").strip()
+    raw_paths = body.get("paths")
+    if not channel_name:
+        raise ValueError("Channel is required.")
+    if not isinstance(raw_paths, list) or not raw_paths:
+        raise ValueError("No videos were selected.")
+
+    config, error = load_config_or_none(config_name)
+    if not config:
+        raise ValueError(error or "Config not found.")
+
+    defaults = config.get("defaults", {})
+    raw_dir = resolve_project_path(defaults.get("raw_dir", "Raw Videos"))
+    target_dir = raw_dir / channel_name
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target_dir_resolved = target_dir.resolve()
+    saved_items: list[dict[str, str]] = []
+
+    for item in raw_paths:
+        source = resolve_project_path(str(item or "")).resolve()
+        if not source.exists() or not source.is_file():
+            raise ValueError(f"Video was not found: {source}")
+        if source.suffix.lower() not in VIDEO_EXTENSIONS:
+            raise ValueError(f"Unsupported video file type: {source.name}")
+
+        filename = sanitize_filename(source.name)
+        target = source if source.parent.resolve() == target_dir_resolved else unique_path(target_dir / filename)
+        if target != source:
+            shutil.copy2(source, target)
+
+        register_raw_video(config_name, channel_name, target)
+        saved_items.append({"name": target.name, "path": relative_or_absolute(target)})
+
+    return {"ok": True, "saved": saved_items, "files": raw_video_files(config_name, channel_name)}
+
+
 def upload_raw_video(handler: BaseHTTPRequestHandler, query: dict[str, list[str]]) -> dict[str, Any]:
     config_name = safe_config_name(query.get("config", [None])[0])
     channel_name = str(query.get("channel", [""])[0]).strip()
@@ -4678,6 +4716,10 @@ class Handler(BaseHTTPRequestHandler):
             body = body_map
             config_name = safe_config_name(body_map.get("config"))
             update_request_trace(self, config_name=config_name)
+
+            if parsed.path == "/api/raw-files/import":
+                json_response(self, import_raw_videos(body))
+                return
 
             if parsed.path == "/api/config/create":
                 target = ROOT / config_name

@@ -667,6 +667,27 @@ ipcMain.handle("desktop:select-folder", async (_event, payload) => {
   }
   return { canceled: false, path: result.filePaths[0] };
 });
+ipcMain.handle("desktop:select-videos", async (_event, payload) => {
+  const defaultPath = typeof payload?.defaultPath === "string" && payload.defaultPath.trim()
+    ? payload.defaultPath.trim()
+    : undefined;
+  const title = typeof payload?.title === "string" && payload.title.trim()
+    ? payload.title.trim()
+    : "Select videos";
+  const result = await dialog.showOpenDialog(mainWindow || undefined, {
+    title,
+    defaultPath,
+    properties: ["openFile", "multiSelections"],
+    filters: [
+      { name: "Videos", extensions: ["mp4", "m4v", "mov", "flv", "mkv"] },
+      { name: "All files", extensions: ["*"] },
+    ],
+  });
+  if (result.canceled || !result.filePaths?.length) {
+    return { canceled: true, paths: [] };
+  }
+  return { canceled: false, paths: result.filePaths };
+});
 ipcMain.handle("desktop:open-external", async (_event, rawUrl) => {
   const url = String(rawUrl || "").trim();
   let parsed = null;

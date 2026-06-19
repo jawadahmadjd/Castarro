@@ -29,6 +29,8 @@ const state = {
   normalizedFilesByChannel: {},
   rawFilesAutoRefreshBusy: false,
   rawFilesAutoRefreshLastAt: 0,
+  rawUploadBusyChannel: "",
+  liveUploadBusyChannel: "",
   settingsRenderPausedUntil: 0,
   settingsAutosaveTimer: null,
   settingsAutosaveBusy: false,
@@ -104,6 +106,7 @@ const state = {
     addingFileId: "",
   },
   localActivityEvents: [],
+  localNotifications: [],
   activityRenderedItems: [],
   activityExportedSignature: "",
   deliveredAlertIds: [],
@@ -785,15 +788,43 @@ function skipOnboarding() {
 function workspaceRecentAlerts(payload = state.status) {
   const selectedChannel = selectedWorkspaceChannelName();
   const recent = Array.isArray(payload?.alerts?.recent) ? payload.alerts.recent : [];
-  return recent.filter((item) => {
+  const backendAlerts = recent.filter((item) => {
     const channel = String(item?.channel_name || "").trim();
     return !selectedChannel || !channel || channel === selectedChannel;
   });
+  return [...(state.localNotifications || []), ...backendAlerts]
+    .sort((a, b) => new Date(b?.created_at || 0).getTime() - new Date(a?.created_at || 0).getTime())
+    .slice(0, 20);
 }
 
 function rerenderWorkspaceHeader(payload = state.status || {}) {
   const selected = getSelectedChannel({ channels: payload?.channels || [] }, state.workspace.selectedChannelName);
   renderWorkspaceHeader(payload || {}, selected);
+}
+
+function captureWorkspaceAlertsScroll() {
+  if (!state.workspace.alertsMenuOpen) return null;
+  const feed = document.querySelector("#workspaceAlertsPopover .workspace-alerts-feed");
+  if (!feed) return null;
+  return {
+    scrollTop: Number(feed.scrollTop) || 0,
+    scrollHeight: Number(feed.scrollHeight) || 0,
+  };
+}
+
+function restoreWorkspaceAlertsScroll(snapshot) {
+  if (!snapshot || !state.workspace.alertsMenuOpen) return;
+  window.requestAnimationFrame(() => {
+    const feed = document.querySelector("#workspaceAlertsPopover .workspace-alerts-feed");
+    if (!feed) return;
+    if (snapshot.scrollTop <= 4) {
+      feed.scrollTop = 0;
+      return;
+    }
+    const addedHeight = Math.max(0, (Number(feed.scrollHeight) || 0) - snapshot.scrollHeight);
+    const maxScroll = Math.max(0, (Number(feed.scrollHeight) || 0) - (Number(feed.clientHeight) || 0));
+    feed.scrollTop = Math.min(maxScroll, snapshot.scrollTop + addedHeight);
+  });
 }
 
 function taskChannelName(task) {
@@ -2084,6 +2115,7 @@ function renderWorkspaceHeader(payload, channel) {
     actionsNode.innerHTML = `<button class="pill primary" type="button" onclick="addChannel()">Add Channel</button>`;
     return;
   }
+  const alertScrollSnapshot = captureWorkspaceAlertsScroll();
   const escapedName = escapeJs(channel.name);
   const stream = payload?.streams?.[channel.name] || null;
   const streamRunning = Boolean(stream?.running);
@@ -2137,6 +2169,7 @@ function renderWorkspaceHeader(payload, channel) {
     </div>
   `;
   syncThemeToggle();
+  restoreWorkspaceAlertsScroll(alertScrollSnapshot);
 }
 
 function renderWorkspaceStatusBand(payload, channel) {
@@ -2343,7 +2376,9 @@ function pauseSettingsRender(durationMs = 1200) {
 
 function shouldDeferSettingsRender() {
   if (state.activeTab !== "settings") return false;
-  return settingsFormInteractionActive() || Date.now() < Number(state.settingsRenderPausedUntil || 0);
+  return Boolean(state.rawUploadBusyChannel || state.liveUploadBusyChannel)
+    || settingsFormInteractionActive()
+    || Date.now() < Number(state.settingsRenderPausedUntil || 0);
 }
 
 function renderSettingsFormsUnlessPaused() {
@@ -4154,7 +4189,7 @@ function normalizeFileListScrollKey(card) {
 }
 
 function rememberNormalizeFileListScroll() {
-  document.querySelectorAll("#normalizationChannels .selected-normalize-settings").forEach((card) => {
+  document.querySelectorAll("#viewSettings .selected-normalize-settings").forEach((card) => {
     const list = card.querySelector(".file-picker .file-list");
     if (!list) return;
     state.normalizeFileListScroll[normalizeFileListScrollKey(card)] = Number(list.scrollTop) || 0;
@@ -4162,7 +4197,7 @@ function rememberNormalizeFileListScroll() {
 }
 
 function restoreNormalizeFileListScroll() {
-  document.querySelectorAll("#normalizationChannels .selected-normalize-settings").forEach((card) => {
+  document.querySelectorAll("#viewSettings .selected-normalize-settings").forEach((card) => {
     const list = card.querySelector(".file-picker .file-list");
     if (!list) return;
     const scrollTop = Number(state.normalizeFileListScroll[normalizeFileListScrollKey(card)]) || 0;
@@ -4223,10 +4258,10 @@ function renderSettingsForms() {
   $("normalizationChannels").innerHTML = activeNormalizeIndex >= 0
     ? normalizationCard(config.channels[activeNormalizeIndex], activeNormalizeIndex)
     : `<div class="card">No channels yet. Click <strong>Add Channel</strong> to create one.</div>`;
-  restoreNormalizeFileListScroll();
-  window.requestAnimationFrame(restoreNormalizeFileListScroll);
 
   renderYoutubeSettingsPanel(config);
+  restoreNormalizeFileListScroll();
+  window.requestAnimationFrame(restoreNormalizeFileListScroll);
 }
 
 function renderStorageSettingsPanel(config = state.configData || defaultConfigData()) {
@@ -6440,8 +6475,8 @@ function normalizationCard(channel, index, { variant = "normalize" } = {}) {
         <span class="badge">${selected.length} selected</span>
       </div>`}
       <div class="row wrap">
-        <input class="hidden-file" id="${escapeAttr(uploadId)}" type="file" multiple accept="video/*" onchange="uploadRawVideos(${index}, this.files).catch((error) => toast(error.message))">
-        <button class="pill primary" type="button" onclick="document.getElementById('${escapeJs(uploadId)}').click()">Add Videos</button>
+        <input class="hidden-file" id="${escapeAttr(uploadId)}" type="file" multiple accept="video/*" onchange="uploadRawVideos(${index}, this.files).catch((error) => toast(error.message)); this.value = '';">
+        <button class="pill primary" type="button" ${state.rawUploadBusyChannel === channel.name ? "disabled" : ""} onclick="selectRawVideos(${index}, '${escapeJs(uploadId)}').catch((error) => toast(error.message))">${escapeHtml(state.rawUploadBusyChannel === channel.name ? "Adding..." : "Add Videos")}</button>
         <button class="pill success" type="button" onclick="startSettingsTask('normalize', ${index})">${isYoutubeVariant ? "Encode to Videos" : "Encode"}</button>
       </div>
       ${task ? taskProgressMarkup(task, index, completedCount) : ""}
@@ -6939,7 +6974,7 @@ function liveVideosCard(channel, index) {
         body: `
           <div class="row wrap">
             <input class="hidden-file" id="${escapeAttr(uploadId)}" type="file" multiple accept="video/*" onchange="uploadLiveVideos(${index}, this.files).catch((error) => toast(error.message)); this.value = '';">
-            <button class="pill" type="button" onclick="document.getElementById('${escapeJs(uploadId)}').click()">Import Videos</button>
+            <button class="pill" type="button" ${state.liveUploadBusyChannel === channel.name ? "disabled" : ""} onclick="document.getElementById('${escapeJs(uploadId)}').click()">${escapeHtml(state.liveUploadBusyChannel === channel.name ? "Importing..." : "Import Videos")}</button>
           </div>
           <div class="meta">Encoded videos appear here automatically. Import videos only for files created outside this app.</div>
           <div class="file-list live-video-list" data-live-video-list>${fileOptions}</div>
@@ -7493,8 +7528,32 @@ async function refreshLiveFiles(index) {
   renderSettingsForms();
 }
 
-async function uploadRawVideos(index, files) {
-  if (!files || !files.length) return;
+async function selectRawVideos(index, inputId) {
+  const bridge = desktopBridge();
+  if (!bridge || typeof bridge.selectVideos !== "function") {
+    const input = $(inputId);
+    input?.click();
+    return;
+  }
+
+  const config = collectSettingsData();
+  const channel = config.channels[index];
+  if (!channel || !channel.name) {
+    toast("Save a channel name before adding videos.");
+    return;
+  }
+
+  const picked = await bridge.selectVideos({
+    title: `Add videos to ${channel.name}`,
+    defaultPath: resolvedFolderPath(config.defaults?.raw_dir || "Raw Videos") || undefined,
+  });
+  const paths = Array.isArray(picked?.paths) ? picked.paths.filter(Boolean) : [];
+  if (!picked || picked.canceled || !paths.length) return;
+  await importRawVideoPaths(index, paths);
+}
+
+async function importRawVideoPaths(index, paths) {
+  if (!Array.isArray(paths) || !paths.length) return;
   state.activeSettingsChannelIndex = index;
   const config = collectSettingsData();
   const channel = config.channels[index];
@@ -7503,40 +7562,102 @@ async function uploadRawVideos(index, files) {
     return;
   }
 
-  await saveConfigData(config);
-
-  const saved = [];
-  for (const file of Array.from(files)) {
-    toast(`Adding ${file.name}...`);
-    const url = `/api/raw-files/upload?config=${encodeURIComponent(state.config)}&channel=${encodeURIComponent(channel.name)}&filename=${encodeURIComponent(file.name)}`;
-    const requestId = makeRequestId();
-    const response = await fetch(url, {
+  state.rawUploadBusyChannel = channel.name;
+  pauseSettingsRender(60000);
+  try {
+    await saveConfigData(config, { render: false, refresh: false, reloadFiles: false });
+    toast(`Adding ${paths.length} video${paths.length === 1 ? "" : "s"}...`);
+    const payload = await api("/api/raw-files/import", {
       method: "POST",
-      headers: {
-        "X-Request-ID": requestId,
-        "X-Client-Action": "raw.upload",
-      },
-      body: file,
+      action: "raw.import",
+      body: JSON.stringify({
+        config: state.config,
+        channel: channel.name,
+        paths,
+      }),
     });
-    const responseRequestId = String(response.headers.get("X-Request-ID") || requestId);
-    const payload = await response.json();
-    if (!response.ok) {
-      throw new Error(`${payload.error || "Upload failed."} [Request ID: ${responseRequestId}]`);
-    }
-    saved.push(payload.saved);
-    state.rawFilesByChannel[channel.name] = payload.files || [];
+    const saved = Array.isArray(payload.saved)
+      ? payload.saved.map((item) => item?.path || item).filter(Boolean)
+      : [];
+    state.rawFilesByChannel[channel.name] = payload.files || state.rawFilesByChannel[channel.name] || [];
+
+    const rawFiles = await loadRawFilesForChannel(channel);
+    const rawPaths = rawFiles.map((file) => file.path).filter(Boolean);
+    const currentPlaylist = Array.isArray(state.configData.channels?.[index]?.raw_playlist)
+      ? state.configData.channels[index].raw_playlist
+      : [];
+    state.configData.channels[index].raw_playlist = Array.from(new Set([...currentPlaylist, ...saved, ...rawPaths]));
+    await saveConfigData(state.configData, { render: false, refresh: false, reloadFiles: false });
+    toast(`Added ${saved.length} video${saved.length === 1 ? "" : "s"} to ${channel.name}.`);
+  } finally {
+    state.rawUploadBusyChannel = "";
+    state.settingsRenderPausedUntil = 0;
+    syncConfigEditor();
+    renderSettingsForms();
+  }
+}
+
+async function uploadRawVideos(index, files) {
+  const selectedFiles = Array.from(files || []);
+  if (!selectedFiles.length) return;
+  state.activeSettingsChannelIndex = index;
+  const config = collectSettingsData();
+  const channel = config.channels[index];
+  if (!channel || !channel.name) {
+    toast("Save a channel name before adding videos.");
+    return;
   }
 
-  await loadRawFilesForChannel(channel);
-  channel.raw_playlist = (state.rawFilesByChannel[channel.name] || []).map((file) => file.path);
-  state.configData.channels[index].raw_playlist = channel.raw_playlist;
-  $("configEditor").value = JSON.stringify(config, null, 2) + "\n";
-  renderSettingsForms();
-  toast(`Added ${saved.length} video${saved.length === 1 ? "" : "s"} to ${channel.name}.`);
+  state.rawUploadBusyChannel = channel.name;
+  pauseSettingsRender(60000);
+  const saved = [];
+  try {
+    await saveConfigData(config, { render: false, refresh: false, reloadFiles: false });
+
+    for (const file of selectedFiles) {
+      toast(`Adding ${file.name}...`);
+      const url = `/api/raw-files/upload?config=${encodeURIComponent(state.config)}&channel=${encodeURIComponent(channel.name)}&filename=${encodeURIComponent(file.name)}`;
+      const requestId = makeRequestId();
+      const response = await fetch(url, {
+        method: "POST",
+        headers: {
+          "X-Request-ID": requestId,
+          "X-Client-Action": "raw.upload",
+        },
+        body: file,
+      });
+      const responseRequestId = String(response.headers.get("X-Request-ID") || requestId);
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(`${payload.error || "Upload failed."} [Request ID: ${responseRequestId}]`);
+      }
+      if (payload.saved?.path) {
+        saved.push(payload.saved.path);
+      } else if (payload.saved) {
+        saved.push(payload.saved);
+      }
+      state.rawFilesByChannel[channel.name] = payload.files || state.rawFilesByChannel[channel.name] || [];
+    }
+
+    const rawFiles = await loadRawFilesForChannel(channel);
+    const rawPaths = rawFiles.map((file) => file.path).filter(Boolean);
+    const currentPlaylist = Array.isArray(state.configData.channels?.[index]?.raw_playlist)
+      ? state.configData.channels[index].raw_playlist
+      : [];
+    state.configData.channels[index].raw_playlist = Array.from(new Set([...currentPlaylist, ...saved, ...rawPaths]));
+    await saveConfigData(state.configData, { render: false, refresh: false, reloadFiles: false });
+    toast(`Added ${saved.length} video${saved.length === 1 ? "" : "s"} to ${channel.name}.`);
+  } finally {
+    state.rawUploadBusyChannel = "";
+    state.settingsRenderPausedUntil = 0;
+    syncConfigEditor();
+    renderSettingsForms();
+  }
 }
 
 async function uploadLiveVideos(index, files) {
-  if (!files || !files.length) return;
+  const selectedFiles = Array.from(files || []);
+  if (!selectedFiles.length) return;
   state.activeSettingsChannelIndex = index;
   const config = collectSettingsData();
   const channel = config.channels[index];
@@ -7545,41 +7666,50 @@ async function uploadLiveVideos(index, files) {
     return;
   }
 
-  await saveConfigData(config);
-
+  state.liveUploadBusyChannel = channel.name;
+  pauseSettingsRender(60000);
   const saved = [];
-  for (const file of Array.from(files)) {
-    toast(`Importing ${file.name}...`);
-    const url = `/api/normalized-files/upload?config=${encodeURIComponent(state.config)}&channel=${encodeURIComponent(channel.name)}&filename=${encodeURIComponent(file.name)}`;
-    const requestId = makeRequestId();
-    const response = await fetch(url, {
-      method: "POST",
-      headers: {
-        "X-Request-ID": requestId,
-        "X-Client-Action": "normalized.upload",
-      },
-      body: file,
-    });
-    const responseRequestId = String(response.headers.get("X-Request-ID") || requestId);
-    const payload = await response.json();
-    if (!response.ok) {
-      throw new Error(`${payload.error || "Import failed."} [Request ID: ${responseRequestId}]`);
-    }
-    if (payload.saved?.path) {
-      saved.push(payload.saved.path);
-    }
-    state.normalizedFilesByChannel[channel.name] = payload.files || [];
-  }
+  try {
+    await saveConfigData(config, { render: false, refresh: false, reloadFiles: false });
 
-  await loadNormalizedFilesForChannel(channel);
-  const liveFiles = state.normalizedFilesByChannel[channel.name] || [];
-  const livePaths = liveFiles.map((file) => file.path).filter(Boolean);
-  const currentPlaylist = Array.isArray(state.configData.channels?.[index]?.playlist)
-    ? state.configData.channels[index].playlist
-    : [];
-  state.configData.channels[index].playlist = Array.from(new Set([...currentPlaylist, ...saved, ...livePaths]));
-  await saveConfigData(state.configData);
-  toast(`Imported ${saved.length} video${saved.length === 1 ? "" : "s"} to ${channel.name}.`);
+    for (const file of selectedFiles) {
+      toast(`Importing ${file.name}...`);
+      const url = `/api/normalized-files/upload?config=${encodeURIComponent(state.config)}&channel=${encodeURIComponent(channel.name)}&filename=${encodeURIComponent(file.name)}`;
+      const requestId = makeRequestId();
+      const response = await fetch(url, {
+        method: "POST",
+        headers: {
+          "X-Request-ID": requestId,
+          "X-Client-Action": "normalized.upload",
+        },
+        body: file,
+      });
+      const responseRequestId = String(response.headers.get("X-Request-ID") || requestId);
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(`${payload.error || "Import failed."} [Request ID: ${responseRequestId}]`);
+      }
+      if (payload.saved?.path) {
+        saved.push(payload.saved.path);
+      }
+      state.normalizedFilesByChannel[channel.name] = payload.files || state.normalizedFilesByChannel[channel.name] || [];
+    }
+
+    await loadNormalizedFilesForChannel(channel);
+    const liveFiles = state.normalizedFilesByChannel[channel.name] || [];
+    const livePaths = liveFiles.map((file) => file.path).filter(Boolean);
+    const currentPlaylist = Array.isArray(state.configData.channels?.[index]?.playlist)
+      ? state.configData.channels[index].playlist
+      : [];
+    state.configData.channels[index].playlist = Array.from(new Set([...currentPlaylist, ...saved, ...livePaths]));
+    await saveConfigData(state.configData, { render: false, refresh: false, reloadFiles: false });
+    toast(`Imported ${saved.length} video${saved.length === 1 ? "" : "s"} to ${channel.name}.`);
+  } finally {
+    state.liveUploadBusyChannel = "";
+    state.settingsRenderPausedUntil = 0;
+    syncConfigEditor();
+    renderSettingsForms();
+  }
 }
 
 function collectSettingsData() {
@@ -7687,6 +7817,8 @@ function collectSettingsData() {
     });
     channel.normalize_profile.x264_profile = config.normalize_profile?.x264_profile || "high";
 
+    const liveVideoCard = liveVideosCardForIndex(index);
+    const orderedLiveFiles = liveVideoPathsFromCard(liveVideoCard);
     const checkedLiveFiles = Array.from(
       document.querySelectorAll(`#channelSettings [data-index="${index}"] [data-live-file]:checked`)
     ).map((input) => input.dataset.liveFile);
@@ -7694,7 +7826,7 @@ function collectSettingsData() {
     const existingPlaylist = Array.isArray(config.channels?.[index]?.playlist)
       ? config.channels[index].playlist
       : [];
-    channel.playlist = liveFileInputs.length ? checkedLiveFiles : existingPlaylist;
+    channel.playlist = liveVideoCard ? orderedLiveFiles : liveFileInputs.length ? checkedLiveFiles : existingPlaylist;
     channel.cloud_playlist = Array.isArray(existingChannel.cloud_playlist) ? existingChannel.cloud_playlist : [];
     channel.youtube_broadcast_id = String(existingChannel.youtube_broadcast_id || "");
     channel.youtube_stream_id = String(existingChannel.youtube_stream_id || "");
@@ -8579,7 +8711,20 @@ function drawPairingQr(canvas, value) {
 }
 
 function toast(message) {
-  $("serverState").textContent = message;
+  const text = String(message || "").trim();
+  if (!text) return;
+  state.localNotifications = [
+    {
+      id: `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      title: "Update",
+      message: text,
+      severity: "info",
+      created_at: new Date().toISOString(),
+      local: true,
+    },
+    ...(state.localNotifications || []),
+  ].slice(0, 20);
+  rerenderWorkspaceHeader();
 }
 
 function escapeHtml(value) {

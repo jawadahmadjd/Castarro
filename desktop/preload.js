@@ -28,6 +28,9 @@ contextBridge.exposeInMainWorld("desktopShell", {
   selectFolder(options = {}) {
     return ipcRenderer.invoke("desktop:select-folder", options);
   },
+  selectVideos(options = {}) {
+    return ipcRenderer.invoke("desktop:select-videos", options);
+  },
   openExternal(url) {
     return ipcRenderer.invoke("desktop:open-external", url);
   },
