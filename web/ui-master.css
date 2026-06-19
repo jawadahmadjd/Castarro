@@ -2178,9 +2178,19 @@ details[open] > .channel-summary::after {
   transform: rotate(90deg);
 }
 
-.video-thumb {
+.video-thumb-wrap {
   width: 74px;
   aspect-ratio: 16 / 9;
+  display: block;
+  position: relative;
+  overflow: hidden;
+  border-radius: 8px;
+  background: var(--master-color-24211d);
+}
+
+.video-thumb {
+  width: 100%;
+  height: 100%;
   display: block;
   object-fit: cover;
   border: 1px solid var(--line);
@@ -2190,6 +2200,35 @@ details[open] > .channel-summary::after {
 
 .video-thumb.missing {
   opacity: 0.18;
+}
+
+.video-duration-badge,
+.video-total-duration {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: fit-content;
+  border-radius: 5px;
+  background: var(--master-color-12110f);
+  color: var(--master-color-ffffff);
+  font-size: 0.66rem;
+  font-weight: 800;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.video-duration-badge {
+  position: absolute;
+  left: 4px;
+  bottom: 4px;
+  max-width: calc(100% - 8px);
+  padding: 3px 4px;
+}
+
+.video-total-duration {
+  justify-self: end;
+  padding: 4px 6px;
+  letter-spacing: 0;
 }
 
 .video-option-text {
@@ -2436,6 +2475,50 @@ details[open] > .channel-summary::after {
 
 .youtube-stream-settings-card .form-grid {
   grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.youtube-stream-cycle-card .stream-cycle-grid {
+  display: grid;
+  gap: var(--space-2);
+  grid-template-columns: repeat(2, max-content);
+  column-gap: 48px;
+  align-items: start;
+  justify-content: start;
+}
+
+.youtube-stream-cycle-card .stream-cycle-grid section {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.stream-cycle-hms {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.stream-cycle-hms label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: auto;
+}
+
+.stream-cycle-hms label span {
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.stream-cycle-hms input[type="number"] {
+  width: 58px;
+  min-width: 58px;
+  height: 38px;
+  padding: 0 8px;
+  text-align: center;
 }
 
 .youtube-side-stack {
@@ -3574,6 +3657,7 @@ pre {
 
   .youtube-go-live-form,
   .youtube-schedule-form,
+  .youtube-stream-cycle-card .stream-cycle-grid,
   .youtube-stream-settings-card .form-grid,
   .youtube-side-stack .form-grid {
     grid-template-columns: 1fr;

@@ -44,7 +44,7 @@ THUMBNAIL_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".bmp"}
 THUMBNAIL_MAX_BYTES = 2 * 1024 * 1024
 YOUTUBE_CHANNEL_NAME_MATCH_THRESHOLD = 0.80
 UI_PORT = int(os.environ.get("STREAM_UI_PORT", "8765"))
-MEDIA_READY_CACHE: dict[tuple[str, int, int, str], bool] = {}
+MEDIA_DURATION_CACHE: dict[tuple[str, int, int, str], float | None] = {}
 SCHEDULER_DAY_ORDER = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 ALERT_SEVERITY_RANK = {"info": 0, "warn": 1, "danger": 2}
 FFMPEG_SIZE_PATTERN = re.compile(r"size=\s*([0-9]+(?:\.[0-9]+)?)\s*([KMGT]?i?B|[kmgt]?B)", re.IGNORECASE)
@@ -603,6 +603,7 @@ class AppState:
         self.cloud_proxy_settings: dict[str, Any] = {}
         self.stop_event = threading.Event()
         self.scheduler_channels: dict[tuple[str, str], dict[str, Any]] = {}
+        self.stream_cycle_channels: dict[tuple[str, str], dict[str, Any]] = {}
         self.alert_cooldowns: dict[tuple[str | None, str | None, str], float] = {}
         self.stream_exit_recorded: set[tuple[str, str]] = set()
         self.connection_watch: dict[tuple[str, str], dict[str, Any]] = {}
@@ -827,6 +828,7 @@ def load_config_or_none(config_name: str) -> tuple[dict[str, Any] | None, str | 
             normalize_ui_settings(config)
             normalize_alert_settings(config)
             normalize_scheduler_settings(config)
+            normalize_stream_cycle_settings(config)
             normalize_youtube_channel_settings(config)
             storage_providers.normalize_storage_config(config)
             normalize_youtube_accounts(config)
@@ -840,6 +842,7 @@ def save_config(config_name: str, config: dict[str, Any]) -> None:
     normalize_ui_settings(config)
     normalize_alert_settings(config)
     normalize_scheduler_settings(config)
+    normalize_stream_cycle_settings(config)
     normalize_youtube_channel_settings(config)
     storage_providers.normalize_storage_config(config)
     normalize_youtube_accounts(config)
@@ -913,6 +916,66 @@ def default_scheduler_settings() -> dict[str, Any]:
         "poll_seconds": 20,
         "channels": [],
     }
+
+
+def default_stream_cycle_settings() -> dict[str, Any]:
+    return {
+        "enabled": False,
+        "restart_delay_seconds": 180,
+        "channels": [],
+    }
+
+
+def stream_cycle_duration_seconds(entry: dict[str, Any]) -> int:
+    raw_seconds = entry.get("duration_seconds")
+    if raw_seconds in (None, ""):
+        raw_minutes = entry.get("duration_minutes")
+        try:
+            raw_seconds = float(raw_minutes) * 60
+        except (TypeError, ValueError):
+            raw_seconds = 12 * 60 * 60
+    try:
+        seconds = int(float(raw_seconds))
+    except (TypeError, ValueError):
+        seconds = 12 * 60 * 60
+    return max(1, min(seconds, 7 * 24 * 60 * 60))
+
+
+def stream_cycle_restart_delay_seconds(settings: dict[str, Any]) -> float:
+    raw = settings.get("restart_delay_seconds", 180)
+    if raw in (None, ""):
+        raw = 180
+    try:
+        return max(0.0, min(float(raw), 3600.0))
+    except (TypeError, ValueError):
+        return 180.0
+
+
+def normalize_stream_cycle_settings(config: dict[str, Any]) -> dict[str, Any]:
+    raw = config.get("stream_cycles")
+    settings = dict(raw) if isinstance(raw, dict) else {}
+    defaults = default_stream_cycle_settings()
+    settings["enabled"] = bool(settings.get("enabled", defaults["enabled"]))
+    settings["restart_delay_seconds"] = stream_cycle_restart_delay_seconds(settings)
+    raw_channels = settings.get("channels")
+    normalized_channels: list[dict[str, Any]] = []
+    if isinstance(raw_channels, list):
+        for item in raw_channels:
+            if not isinstance(item, dict):
+                continue
+            channel_name = str(item.get("channel") or item.get("channel_name") or "").strip()
+            if not channel_name:
+                continue
+            normalized_channels.append(
+                {
+                    "channel": channel_name,
+                    "enabled": bool(item.get("enabled", False)),
+                    "duration_seconds": stream_cycle_duration_seconds(item),
+                }
+            )
+    settings["channels"] = normalized_channels
+    config["stream_cycles"] = settings
+    return settings
 
 
 def normalize_scheduler_days(value: Any) -> list[str]:
@@ -2717,25 +2780,25 @@ def cleanup_encoding_outputs(config: dict[str, Any], channel_name: str | None = 
     return removed
 
 
-def normalized_media_is_ready(config: dict[str, Any], path: Path) -> bool:
+def media_duration_seconds(config: dict[str, Any], path: Path) -> float | None:
     if not path.exists() or not path.is_file() or path.suffix.lower() not in VIDEO_EXTENSIONS:
-        return False
+        return None
     if ".encoding." in path.name:
-        return False
+        return None
 
     try:
         stat = path.stat()
     except OSError:
-        return False
+        return None
     if stat.st_size <= 0:
-        return False
+        return None
 
     ffprobe_path = executable_or_project_path(config.get("defaults", {}).get("ffprobe_path"), "ffprobe")
     cache_key = (str(path.resolve()), stat.st_mtime_ns, stat.st_size, ffprobe_path)
-    cached = MEDIA_READY_CACHE.get(cache_key)
-    if cached is not None:
-        return cached
+    if cache_key in MEDIA_DURATION_CACHE:
+        return MEDIA_DURATION_CACHE[cache_key]
 
+    duration: float | None
     command = [
         ffprobe_path,
         "-v",
@@ -2757,12 +2820,31 @@ def normalized_media_is_ready(config: dict[str, Any], path: Path) -> bool:
             creationflags=windows_creation_flags(),
             check=False,
         )
-        ready = completed.returncode == 0 and float((completed.stdout or "0").strip() or "0") > 0
+        value = float((completed.stdout or "0").strip() or "0")
+        duration = value if completed.returncode == 0 and value > 0 else None
     except (OSError, subprocess.TimeoutExpired, ValueError):
-        ready = False
+        duration = None
 
-    MEDIA_READY_CACHE[cache_key] = ready
-    return ready
+    MEDIA_DURATION_CACHE[cache_key] = duration
+    return duration
+
+
+def normalized_media_is_ready(config: dict[str, Any], path: Path) -> bool:
+    return media_duration_seconds(config, path) is not None
+
+
+def video_file_item(config: dict[str, Any], path: Path, *, include_exists: bool = False) -> dict[str, Any]:
+    item: dict[str, Any] = {
+        "name": path.name,
+        "path": relative_or_absolute(path),
+        "folder": relative_or_absolute(path.parent),
+    }
+    if include_exists:
+        item["exists"] = path.exists()
+    duration = media_duration_seconds(config, path)
+    if duration is not None:
+        item["duration_seconds"] = duration
+    return item
 
 
 def unregister_cloud_assets(asset_ids: list[str]) -> None:
@@ -2775,7 +2857,7 @@ def unregister_cloud_assets(asset_ids: list[str]) -> None:
         proxy.unregister_asset(asset_id)
 
 
-def raw_video_files(config_name: str, channel_name: str | None) -> list[dict[str, str]]:
+def raw_video_files(config_name: str, channel_name: str | None) -> list[dict[str, Any]]:
     config, error = load_config_or_none(config_name)
     if not config:
         raise ValueError(error or "Config not found.")
@@ -2806,14 +2888,7 @@ def raw_video_files(config_name: str, channel_name: str | None) -> list[dict[str
             break
 
     files = [files_by_path[key] for key in sorted(files_by_path)]
-    return [
-        {
-            "name": path.name,
-            "path": relative_or_absolute(path),
-            "folder": relative_or_absolute(path.parent),
-        }
-        for path in files
-    ]
+    return [video_file_item(config, path) for path in files]
 
 
 def normalized_video_files(config_name: str, channel_name: str | None) -> list[dict[str, Any]]:
@@ -2847,15 +2922,7 @@ def normalized_video_files(config_name: str, channel_name: str | None) -> list[d
             break
 
     files = [files_by_path[key] for key in sorted(files_by_path)]
-    return [
-        {
-            "name": path.name,
-            "path": relative_or_absolute(path),
-            "folder": relative_or_absolute(path.parent),
-            "exists": path.exists(),
-        }
-        for path in files
-    ]
+    return [video_file_item(config, path, include_exists=True) for path in files]
 
 
 def thumbnail_source_for_request(config_name: str, channel_name: str | None, requested_path: str) -> tuple[dict[str, Any], Path]:
@@ -3256,6 +3323,14 @@ def schedule_entry_for_channel(config: dict[str, Any], channel_name: str) -> dic
     return None
 
 
+def stream_cycle_entry_for_channel(config: dict[str, Any], channel_name: str) -> dict[str, Any] | None:
+    settings = normalize_stream_cycle_settings(config)
+    for item in settings.get("channels", []):
+        if str(item.get("channel") or "").strip() == str(channel_name or "").strip():
+            return item
+    return None
+
+
 def schedule_is_active(entry: dict[str, Any], now_local: datetime | None = None) -> bool:
     if not entry or not entry.get("enabled"):
         return False
@@ -3351,6 +3426,55 @@ def scheduler_status(config_name: str, config: dict[str, Any] | None = None) -> 
         "poll_seconds": int(scheduler.get("poll_seconds") or 20),
         "channels": channel_rows,
         "generated_at": now_local.isoformat(timespec="seconds"),
+    }
+
+
+def stream_cycle_status(config_name: str, config: dict[str, Any] | None = None) -> dict[str, Any]:
+    config = config or load_config_or_none(config_name)[0] or {}
+    settings = normalize_stream_cycle_settings(config)
+    channels = config.get("channels", []) if isinstance(config.get("channels"), list) else []
+    now = time.time()
+    with STATE.lock:
+        stream_snapshot = dict(STATE.streams)
+        runtime_snapshot = dict(STATE.stream_cycle_channels)
+    channel_rows: list[dict[str, Any]] = []
+    for channel in channels:
+        if not isinstance(channel, dict):
+            continue
+        name = str(channel.get("name") or "").strip()
+        if not name:
+            continue
+        entry = stream_cycle_entry_for_channel(config, name)
+        stream_state = stream_snapshot.get(name)
+        runtime = runtime_snapshot.get((config_name, name), {})
+        duration_seconds = stream_cycle_duration_seconds(entry or {})
+        process_running = bool(stream_state and stream_state.running.process.poll() is None)
+        elapsed_seconds = max(0.0, now - stream_state.started_at) if process_running and stream_state else 0.0
+        next_cycle_at = ""
+        if process_running and entry and entry.get("enabled"):
+            next_cycle_at = datetime.fromtimestamp(stream_state.started_at + duration_seconds).astimezone().isoformat(timespec="seconds")
+        elif runtime.get("phase") == "waiting_restart" and runtime.get("restart_at"):
+            next_cycle_at = datetime.fromtimestamp(float(runtime.get("restart_at") or 0)).astimezone().isoformat(timespec="seconds")
+        channel_rows.append(
+            {
+                "channel": name,
+                "enabled": bool(entry and entry.get("enabled")),
+                "duration_seconds": duration_seconds,
+                "elapsed_seconds": int(elapsed_seconds),
+                "remaining_seconds": max(0, int(duration_seconds - elapsed_seconds)) if process_running else 0,
+                "running": process_running,
+                "phase": str(runtime.get("phase") or ("running" if process_running else "idle")),
+                "last_action": str(runtime.get("last_action") or ""),
+                "cycle_count": int(runtime.get("cycle_count") or 0),
+                "next_cycle_at": next_cycle_at,
+                "restart_at": float(runtime.get("restart_at") or 0.0),
+            }
+        )
+    return {
+        "enabled": bool(settings.get("enabled")),
+        "restart_delay_seconds": stream_cycle_restart_delay_seconds(settings),
+        "channels": channel_rows,
+        "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
     }
 
 
@@ -3565,6 +3689,7 @@ def stop_stream(channel_name: str | None) -> list[str]:
                 STATE.preview = None
             state.recovering = False
             state.last_reconnect_status = ""
+            STATE.stream_cycle_channels.pop((state.config_name, name), None)
             state.running.stop_requested = True
             stream_manager.stop_stream(state.running)
             if state.running.preview_manifest:
@@ -3676,6 +3801,7 @@ def status_payload(config_name: str) -> dict[str, Any]:
         "stream_history": stream_history,
         "alerts": alerts_status(config_name, config) if config else {"recent": []},
         "scheduler": scheduler_status(config_name, config) if config else default_scheduler_settings(),
+        "stream_cycles": stream_cycle_status(config_name, config) if config else default_stream_cycle_settings(),
         "usage": {
             "stream_transfer_today_bytes": app_db.stream_transfer_today_bytes(config_name) + active_transfer_bytes,
             "active_stream_transfer_bytes": active_transfer_bytes,
@@ -4057,6 +4183,134 @@ def evaluate_scheduler_for_config(config_name: str, config: dict[str, Any]) -> N
             STATE.scheduler_channels[runtime_key] = runtime
 
 
+def evaluate_stream_cycles_for_config(config_name: str, config: dict[str, Any]) -> None:
+    settings = normalize_stream_cycle_settings(config)
+    if not settings.get("enabled"):
+        with STATE.lock:
+            for key in [key for key in STATE.stream_cycle_channels if key[0] == config_name]:
+                STATE.stream_cycle_channels.pop(key, None)
+        return
+
+    now = time.time()
+    restart_delay = stream_cycle_restart_delay_seconds(settings)
+    for channel in config.get("channels", []):
+        if not isinstance(channel, dict):
+            continue
+        channel_name = str(channel.get("name") or "").strip()
+        if not channel_name:
+            continue
+        entry = stream_cycle_entry_for_channel(config, channel_name)
+        if not entry or not entry.get("enabled"):
+            with STATE.lock:
+                STATE.stream_cycle_channels.pop((config_name, channel_name), None)
+            continue
+
+        runtime_key = (config_name, channel_name)
+        duration_seconds = stream_cycle_duration_seconds(entry)
+        with STATE.lock:
+            state = STATE.streams.get(channel_name)
+            runtime = dict(STATE.stream_cycle_channels.get(runtime_key) or {})
+
+        is_running = bool(state and state.config_name == config_name and state.running.process.poll() is None)
+        if is_running and state:
+            elapsed_seconds = max(0.0, now - state.started_at)
+            runtime.update(
+                {
+                    "phase": "running",
+                    "last_evaluated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                    "duration_seconds": duration_seconds,
+                    "restart_at": 0.0,
+                }
+            )
+            with STATE.lock:
+                STATE.stream_cycle_channels[runtime_key] = runtime
+            if elapsed_seconds < duration_seconds:
+                continue
+
+            app_db.record_event(
+                "stream_cycle_due",
+                config_name,
+                channel_name,
+                {
+                    "duration_seconds": duration_seconds,
+                    "elapsed_seconds": round(elapsed_seconds, 3),
+                    "restart_delay_seconds": restart_delay,
+                },
+            )
+            stopped = stop_stream(channel_name)
+            if not stopped:
+                continue
+            restart_at = time.time() + restart_delay
+            runtime.update(
+                {
+                    "phase": "waiting_restart",
+                    "restart_at": restart_at,
+                    "last_action": "stopped_for_cycle",
+                    "last_stopped_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                }
+            )
+            with STATE.lock:
+                STATE.stream_cycle_channels[runtime_key] = runtime
+            app_db.record_event(
+                "stream_cycle_stopped",
+                config_name,
+                channel_name,
+                {
+                    "restart_at": restart_at,
+                    "restart_delay_seconds": restart_delay,
+                },
+            )
+            continue
+
+        if runtime.get("phase") != "waiting_restart":
+            continue
+        restart_at = float(runtime.get("restart_at") or 0.0)
+        if restart_at and now < restart_at:
+            continue
+
+        try:
+            assert_youtube_channel_keys_match(config_name, channel_name)
+            started = start_stream(config_name, channel_name)
+        except Exception as exc:
+            runtime.update(
+                {
+                    "phase": "waiting_restart",
+                    "restart_at": time.time() + max(restart_delay, 10.0),
+                    "last_action": "restart_failed",
+                    "last_error": str(exc),
+                }
+            )
+            with STATE.lock:
+                STATE.stream_cycle_channels[runtime_key] = runtime
+            app_db.record_event(
+                "stream_cycle_restart_failed",
+                config_name,
+                channel_name,
+                {"message": str(exc), "restart_at": runtime["restart_at"]},
+            )
+            continue
+
+        if started:
+            runtime.update(
+                {
+                    "phase": "running",
+                    "restart_at": 0.0,
+                    "last_action": "restarted",
+                    "last_started_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                    "cycle_count": int(runtime.get("cycle_count") or 0) + 1,
+                    "last_error": "",
+                }
+            )
+            with STATE.lock:
+                STATE.stream_cycle_channels[runtime_key] = runtime
+            app_db.record_event(
+                "stream_cycle_restarted",
+                config_name,
+                channel_name,
+                {"cycle_count": runtime["cycle_count"]},
+            )
+
+
 def automation_loop() -> None:
     while not STATE.stop_event.wait(15):
         try:
@@ -4066,6 +4320,7 @@ def automation_loop() -> None:
                 config, _error = load_config_or_none(config_name)
                 if config:
                     evaluate_scheduler_for_config(config_name, config)
+                    evaluate_stream_cycles_for_config(config_name, config)
         except Exception as exc:
             print(f"[automation] {exc}")
 

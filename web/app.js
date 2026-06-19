@@ -363,6 +363,12 @@ const defaultSchedulerSettings = () => ({
   channels: [],
 });
 
+const defaultStreamCycleSettings = () => ({
+  enabled: false,
+  restart_delay_seconds: 180,
+  channels: [],
+});
+
 const defaultConfigData = () => ({
   defaults: {
     ffmpeg_path: "ffmpeg",
@@ -395,6 +401,7 @@ const defaultConfigData = () => ({
   storage: defaultStorageSettings(),
   alerts: defaultAlertSettings(),
   scheduler: defaultSchedulerSettings(),
+  stream_cycles: defaultStreamCycleSettings(),
   ui: {
     channel_workspace_enabled: true,
     legacy_tabs_enabled: false,
@@ -3034,6 +3041,27 @@ function durationText(totalSeconds) {
   return parts.join(" ");
 }
 
+function durationHmsParts(totalSeconds) {
+  const { hours, minutes, seconds } = durationParts(totalSeconds);
+  return { hours, minutes, seconds };
+}
+
+function compactDurationText(totalSeconds) {
+  const { hours, minutes, seconds } = durationParts(totalSeconds);
+  const secondText = String(seconds).padStart(2, "0");
+  if (hours) return `${hours}:${String(minutes).padStart(2, "0")}:${secondText}`;
+  return `${minutes}:${secondText}`;
+}
+
+function videoDurationSeconds(file) {
+  const duration = Number(file?.duration_seconds);
+  return Number.isFinite(duration) && duration > 0 ? Math.round(duration) : 0;
+}
+
+function totalVideoDurationSeconds(files) {
+  return (Array.isArray(files) ? files : []).reduce((total, file) => total + videoDurationSeconds(file), 0);
+}
+
 function durationChip(totalSeconds, isLive = false) {
   const { hours, minutes, seconds } = durationParts(totalSeconds);
   const hourMarkup = hours ? `${hours}<span class="unit">h</span>` : "";
@@ -4061,6 +4089,11 @@ function normalizeConfigShape() {
     ...defaultSchedulerSettings(),
     ...(config.scheduler || {}),
   };
+  config.stream_cycles = {
+    ...defaultStreamCycleSettings(),
+    ...(config.stream_cycles || {}),
+    channels: Array.isArray(config.stream_cycles?.channels) ? [...config.stream_cycles.channels] : [],
+  };
   config.storage.source_proxy = {
     ...defaultStorageSettings().source_proxy,
     ...(config.storage.source_proxy || {}),
@@ -4225,6 +4258,11 @@ function renderSettingsForms() {
   config.scheduler = {
     ...defaultSchedulerSettings(),
     ...(config.scheduler || {}),
+  };
+  config.stream_cycles = {
+    ...defaultStreamCycleSettings(),
+    ...(config.stream_cycles || {}),
+    channels: Array.isArray(config.stream_cycles?.channels) ? [...config.stream_cycles.channels] : [],
   };
   config.storage.source_proxy = {
     ...defaultStorageSettings().source_proxy,
@@ -5622,6 +5660,9 @@ function renderYoutubeSettingsPanel(config) {
   const streamSettingsMarkup = activeLiveIndex >= 0
     ? streamSettingsCard(channelConfig.channels[activeLiveIndex], activeLiveIndex)
     : noChannelCard;
+  const streamCycleMarkup = activeLiveIndex >= 0
+    ? streamCycleCard(channelConfig.channels[activeLiveIndex], activeLiveIndex)
+    : "";
   const encoderMarkup = activeLiveIndex >= 0
     ? normalizationCard(channelConfig.channels[activeLiveIndex], activeLiveIndex, { variant: "youtube" })
     : "";
@@ -5737,6 +5778,7 @@ function renderYoutubeSettingsPanel(config) {
 
       <div class="channel-settings-list" id="channelSettings">
         ${showSetupCard("stream") ? streamSettingsMarkup : ""}
+        ${showSetupCard("stream") ? streamCycleMarkup : ""}
         ${showSetupCard("encoder") ? encoderMarkup : ""}
         ${videosMarkup && showSetupCard("videos") ? videosMarkup : ""}
       </div>
@@ -6818,6 +6860,61 @@ function streamSettingsCard(channel, index) {
   });
 }
 
+function streamCycleCard(channel, index) {
+  const config = state.configData || defaultConfigData();
+  const cycles = {
+    ...defaultStreamCycleSettings(),
+    ...(config.stream_cycles || {}),
+  };
+  const channelName = String(channel?.name || "").trim();
+  const entry = findStreamCycleChannelEntry(config, channelName) || {
+    channel: channelName,
+    enabled: false,
+    duration_seconds: 12 * 60 * 60,
+  };
+  const durationSeconds = streamCycleEntryDurationSeconds(entry);
+  const cooldownSeconds = Math.max(0, Math.round(Number(cycles.restart_delay_seconds ?? 180) || 180));
+  const cycleStatus = Array.isArray(state.status?.stream_cycles?.channels)
+    ? state.status.stream_cycles.channels.find((item) => String(item?.channel || "") === channelName)
+    : null;
+  const active = Boolean(cycles.enabled && entry.enabled);
+  const statusText = cycleStatus?.running
+    ? `${durationText(cycleStatus.elapsed_seconds || 0)} elapsed`
+    : cycleStatus?.phase === "waiting_restart"
+      ? "Cooling down"
+      : active
+        ? "Ready"
+        : "Off";
+  const statusClass = active ? "badge live" : "badge";
+  const actionButtonText = active ? "Disable Stream Loop" : "Enable Stream Loop";
+  const actionButtonClass = active ? "pill danger" : "pill success";
+
+  return youtubeCollapsibleCard({
+    key: `youtube-stream-cycle-${channelName || index}`,
+    title: "24/7 Stream Loop",
+    helper: "Automatically stop this YouTube stream after a duration, cool down, then start it again.",
+    extraClass: "youtube-stream-cycle-card channel-settings",
+    attributes: `data-index="${index}" data-channel-name="${escapeAttr(channelName)}"`,
+    summaryMetaHtml: `<span class="meta">${escapeHtml(active ? `Every ${durationText(durationSeconds)} with ${durationText(cooldownSeconds)} cooldown` : "Automatic restart loop is off")}</span>`,
+    summaryBadgeHtml: `<span class="${statusClass}">${escapeHtml(statusText)}</span>`,
+    body: `
+      <div class="row wrap">
+        <button class="${actionButtonClass}" type="button" onclick="toggleStreamCycleForChannel(${index})">${escapeHtml(actionButtonText)}</button>
+      </div>
+      <div class="stream-cycle-grid">
+        <section>
+          <span class="field-hint">Run each stream for</span>
+          ${streamCycleHmsInputs("duration", durationHmsParts(durationSeconds), "updateChannelStreamCycleDurationFromParts()")}
+        </section>
+        <section>
+          <span class="field-hint">Cooldown before restart</span>
+          ${streamCycleHmsInputs("cooldown", durationHmsParts(cooldownSeconds), "updateStreamCycleCooldownFromParts()")}
+        </section>
+      </div>
+    `,
+  });
+}
+
 function selectedCloudVideos(channel) {
   return Array.isArray(channel?.cloud_playlist) ? channel.cloud_playlist : [];
 }
@@ -6958,6 +7055,9 @@ function liveVideosCard(channel, index) {
   const files = orderedLiveFilesForDisplay(channel, state.normalizedFilesByChannel[channel.name] || [])
     .filter((file) => !isActiveEncodingOutput(channel.name || "", file));
   const uploadId = `live-upload-${index}`;
+  const totalDuration = totalVideoDurationSeconds(files);
+  const summaryText = files.length ? `${files.length} normalized video${files.length === 1 ? "" : "s"} ready` : "No normalized videos found yet";
+  const summaryDuration = totalDuration ? `<span class="video-total-duration" title="Total video duration">${escapeHtml(compactDurationText(totalDuration))}</span>` : "";
   const fileOptions = files.length
     ? files.map((file) => liveVideoOption(file, index, channel.name || "")).join("")
     : `<div class="meta">No normalized videos found yet in Go Live/${escapeHtml(channel.name || "")}. Normalize videos first.</div>`;
@@ -6969,7 +7069,8 @@ function liveVideosCard(channel, index) {
         helper: "Drag normalized videos into the live order. Remove anything you do not want to stream.",
         extraClass: "live-videos-card channel-settings selected-live-videos",
         attributes: `data-index="${index}" data-channel-name="${escapeAttr(channel.name || "")}"`,
-        summaryMetaHtml: `<span class="meta">${escapeHtml(files.length ? `${files.length} normalized video${files.length === 1 ? "" : "s"} ready` : "No normalized videos found yet")}</span>`,
+        summaryMetaHtml: `<span class="meta">${escapeHtml(summaryText)}</span>`,
+        summaryBadgeHtml: summaryDuration,
         autoOpenWhenFocused: false,
         body: `
           <div class="row wrap">
@@ -6988,6 +7089,8 @@ function liveVideosCard(channel, index) {
 function liveVideoOption(file, index, channelName) {
   const path = String(file?.path || "");
   const name = String(file?.name || path.split(/[\\/]/).pop() || path);
+  const duration = videoDurationSeconds(file);
+  const durationBadge = duration ? `<span class="video-duration-badge">${escapeHtml(compactDurationText(duration))}</span>` : "";
   const thumbnailQuery = new URLSearchParams({
     config: state.config,
     channel: channelName,
@@ -6998,7 +7101,10 @@ function liveVideoOption(file, index, channelName) {
       <button class="live-video-drag-handle" type="button" title="Drag to reorder" aria-label="Drag ${escapeAttr(name)} to reorder" onpointerdown="startLiveVideoDrag(event, ${index})" onmousedown="startLiveVideoDrag(event, ${index})">
         <span aria-hidden="true">::</span>
       </button>
-      <img class="video-thumb" src="/api/video-thumbnail?${thumbnailQuery.toString()}" alt="" loading="lazy" onerror="this.classList.add('missing')">
+      <span class="video-thumb-wrap">
+        <img class="video-thumb" src="/api/video-thumbnail?${thumbnailQuery.toString()}" alt="" loading="lazy" onerror="this.classList.add('missing')">
+        ${durationBadge}
+      </span>
       <span class="video-option-text">
         <span class="video-option-name">${escapeHtml(name)}</span>
         <span class="video-option-path">${escapeHtml(path)}</span>
@@ -8406,6 +8512,65 @@ function findSchedulerChannelEntry(config, channelName) {
   return channels.find((item) => String(item?.channel || "").trim() === String(channelName || "").trim()) || null;
 }
 
+function findStreamCycleChannelEntry(config, channelName) {
+  const cycles = { ...defaultStreamCycleSettings(), ...(config?.stream_cycles || {}) };
+  const channels = Array.isArray(cycles.channels) ? cycles.channels : [];
+  return channels.find((item) => String(item?.channel || "").trim() === String(channelName || "").trim()) || null;
+}
+
+function streamCycleEntryDurationSeconds(entry) {
+  const rawSeconds = Number(entry?.duration_seconds);
+  if (Number.isFinite(rawSeconds) && rawSeconds > 0) {
+    return Math.max(1, Math.round(rawSeconds));
+  }
+  const rawMinutes = Number(entry?.duration_minutes);
+  if (Number.isFinite(rawMinutes) && rawMinutes > 0) {
+    return Math.max(1, Math.round(rawMinutes * 60));
+  }
+  return 12 * 60 * 60;
+}
+
+function streamCycleHmsInputs(kind, parts, onChange) {
+  const safeParts = {
+    hours: Math.max(0, Math.floor(Number(parts?.hours) || 0)),
+    minutes: Math.max(0, Math.floor(Number(parts?.minutes) || 0)),
+    seconds: Math.max(0, Math.floor(Number(parts?.seconds) || 0)),
+  };
+  const fields = [
+    { part: "hours", label: "H", title: "Hours", value: safeParts.hours },
+    { part: "minutes", label: "M", title: "Minutes", value: safeParts.minutes },
+    { part: "seconds", label: "S", title: "Seconds", value: safeParts.seconds },
+  ];
+  return `
+    <div class="stream-cycle-hms" data-stream-cycle-group="${escapeAttr(kind)}">
+      ${fields.map((field) => `
+        <label title="${escapeAttr(field.title)}">
+          <span>${escapeHtml(field.label)}</span>
+          <input type="number" min="0" ${field.part === "hours" ? "" : "max=\"59\""} step="1" value="${escapeAttr(String(field.value))}" data-stream-cycle-kind="${escapeAttr(kind)}" data-stream-cycle-part="${escapeAttr(field.part)}" onchange="${escapeAttr(onChange)}">
+        </label>
+      `).join("")}
+    </div>
+  `;
+}
+
+function readStreamCycleHmsSeconds(kind, fallbackSeconds = 0) {
+  const values = { hours: 0, minutes: 0, seconds: 0 };
+  document.querySelectorAll("[data-stream-cycle-kind][data-stream-cycle-part]").forEach((input) => {
+    if (input.dataset.streamCycleKind !== kind) return;
+    const part = input.dataset.streamCyclePart;
+    if (!(part in values)) return;
+    const number = Math.max(0, Math.floor(Number(input.value) || 0));
+    values[part] = number;
+  });
+  const total = (values.hours * 3600) + (values.minutes * 60) + values.seconds;
+  return total > 0 ? total : Math.max(0, Math.round(Number(fallbackSeconds) || 0));
+}
+
+function renderStreamCycleSettingsPanels() {
+  renderYoutubeSettingsPanel(state.configData || defaultConfigData());
+  renderAutomationSettingsPanel(state.configData || defaultConfigData());
+}
+
 function ensureSchedulerChannelEntry(config, channelName) {
   const scheduler = config.scheduler = {
     ...defaultSchedulerSettings(),
@@ -8424,6 +8589,25 @@ function ensureSchedulerChannelEntry(config, channelName) {
     scheduler.channels.push(entry);
   }
   entry.days = Array.isArray(entry.days) ? entry.days : [...SCHEDULE_DAYS];
+  return entry;
+}
+
+function ensureStreamCycleChannelEntry(config, channelName) {
+  const cycles = config.stream_cycles = {
+    ...defaultStreamCycleSettings(),
+    ...(config.stream_cycles || {}),
+    channels: Array.isArray(config?.stream_cycles?.channels) ? [...config.stream_cycles.channels] : [],
+  };
+  let entry = cycles.channels.find((item) => String(item?.channel || "").trim() === String(channelName || "").trim());
+  if (!entry) {
+    entry = {
+      channel: channelName,
+      enabled: false,
+      duration_seconds: 12 * 60 * 60,
+    };
+    cycles.channels.push(entry);
+  }
+  entry.duration_seconds = streamCycleEntryDurationSeconds(entry);
   return entry;
 }
 
@@ -8462,6 +8646,27 @@ function updateSchedulerSetting(key, value) {
   scheduleSettingsAutosave(200);
 }
 
+function updateStreamCycleSetting(key, value) {
+  normalizeConfigShape();
+  const cycles = state.configData.stream_cycles = {
+    ...defaultStreamCycleSettings(),
+    ...(state.configData.stream_cycles || {}),
+    channels: Array.isArray(state.configData?.stream_cycles?.channels) ? [...state.configData.stream_cycles.channels] : [],
+  };
+  if (key === "enabled") {
+    cycles.enabled = Boolean(value);
+  } else if (key === "restart_delay_seconds") {
+    cycles.restart_delay_seconds = Math.max(0, Number(value) || 0);
+  }
+  renderStreamCycleSettingsPanels();
+  scheduleSettingsAutosave(200);
+}
+
+function updateStreamCycleCooldownFromParts() {
+  const seconds = readStreamCycleHmsSeconds("cooldown", 180);
+  updateStreamCycleSetting("restart_delay_seconds", seconds);
+}
+
 function updateChannelSchedulerSetting(field, value) {
   normalizeConfigShape();
   const channelName = selectedSchedulerChannelName(state.configData);
@@ -8474,6 +8679,57 @@ function updateChannelSchedulerSetting(field, value) {
   }
   renderAutomationSettingsPanel(state.configData);
   scheduleSettingsAutosave(200);
+}
+
+function updateChannelStreamCycleSetting(field, value) {
+  normalizeConfigShape();
+  const channelName = selectedSchedulerChannelName(state.configData);
+  if (!channelName) return;
+  const entry = ensureStreamCycleChannelEntry(state.configData, channelName);
+  if (field === "enabled") {
+    entry.enabled = Boolean(value);
+  } else if (field === "duration_hours") {
+    const hours = Math.max(1 / 60, Number(value) || 12);
+    entry.duration_seconds = Math.round(hours * 60 * 60);
+  } else if (field === "duration_seconds") {
+    entry.duration_seconds = Math.max(1, Math.round(Number(value) || 1));
+  }
+  renderStreamCycleSettingsPanels();
+  scheduleSettingsAutosave(200);
+}
+
+function updateChannelStreamCycleDurationFromParts() {
+  const seconds = readStreamCycleHmsSeconds("duration", 12 * 60 * 60);
+  updateChannelStreamCycleSetting("duration_seconds", seconds);
+}
+
+function toggleStreamCycleForChannel(index) {
+  normalizeConfigShape();
+  const config = state.configData || defaultConfigData();
+  const channel = config.channels?.[index];
+  const channelName = String(channel?.name || "").trim();
+  if (!channelName) {
+    toast("Select a channel first.");
+    return;
+  }
+  const cycles = config.stream_cycles = {
+    ...defaultStreamCycleSettings(),
+    ...(config.stream_cycles || {}),
+    channels: Array.isArray(config?.stream_cycles?.channels) ? [...config.stream_cycles.channels] : [],
+  };
+  const entry = ensureStreamCycleChannelEntry(config, channelName);
+  const nextEnabled = !(cycles.enabled && entry.enabled);
+  entry.enabled = nextEnabled;
+  if (nextEnabled) {
+    cycles.enabled = true;
+  } else if (!cycles.channels.some((item) => item?.enabled)) {
+    cycles.enabled = false;
+  }
+  state.configData = config;
+  syncConfigEditor();
+  renderStreamCycleSettingsPanels();
+  scheduleSettingsAutosave(200);
+  toast(nextEnabled ? "Stream loop enabled for this channel." : "Stream loop disabled for this channel.");
 }
 
 function toggleChannelSchedulerDay(day, checked) {
@@ -8560,6 +8816,10 @@ function renderAutomationSettingsPanel(config = state.configData || defaultConfi
     ...defaultSchedulerSettings(),
     ...(config.scheduler || {}),
   };
+  const cycles = {
+    ...defaultStreamCycleSettings(),
+    ...(config.stream_cycles || {}),
+  };
   const channelName = selectedSchedulerChannelName(config);
   const channelEntry = findSchedulerChannelEntry(config, channelName) || {
     channel: channelName,
@@ -8568,8 +8828,18 @@ function renderAutomationSettingsPanel(config = state.configData || defaultConfi
     stop_time: "17:00",
     days: [...SCHEDULE_DAYS],
   };
+  const cycleEntry = findStreamCycleChannelEntry(config, channelName) || {
+    channel: channelName,
+    enabled: false,
+    duration_seconds: 12 * 60 * 60,
+  };
+  const cycleDurationSeconds = streamCycleEntryDurationSeconds(cycleEntry);
+  const cycleDurationHours = Math.round((cycleDurationSeconds / 3600) * 100) / 100;
   const schedulerStatus = Array.isArray(state.status?.scheduler?.channels)
     ? state.status.scheduler.channels.find((item) => String(item?.channel || "") === channelName)
+    : null;
+  const cycleStatus = Array.isArray(state.status?.stream_cycles?.channels)
+    ? state.status.stream_cycles.channels.find((item) => String(item?.channel || "") === channelName)
     : null;
   container.innerHTML = `
     <div class="automation-grid">
@@ -8652,6 +8922,46 @@ function renderAutomationSettingsPanel(config = state.configData || defaultConfi
             `).join("")}
           </div>
         ` : `<p class="helper">Create or select a channel to configure its daily schedule.</p>`}
+      </section>
+      <section class="automation-card">
+        <div>
+          <h3>Stream cycle restart</h3>
+          <p class="helper">End a running stream after a fixed duration, then start a fresh FFmpeg session in a loop.</p>
+        </div>
+        <div class="schedule-grid">
+          <label>
+            <span class="field-hint">Enable cycle restart</span>
+            <input type="checkbox" ${cycles.enabled ? "checked" : ""} onchange="updateStreamCycleSetting('enabled', this.checked)">
+          </label>
+          <label>
+            <span class="field-hint">Cooldown seconds</span>
+            <input type="number" min="60" step="30" value="${escapeAttr(String(cycles.restart_delay_seconds ?? 180))}" onchange="updateStreamCycleSetting('restart_delay_seconds', this.value)">
+          </label>
+          <div>
+            <span class="field-hint">Status</span>
+            <div>${escapeHtml(cycleStatus?.phase || "idle")}</div>
+          </div>
+        </div>
+        ${channelName ? `
+          <div class="automation-toggle">
+            <strong>${escapeHtml(channelName)}</strong>
+            <span class="helper">${cycleStatus?.running ? `${escapeHtml(durationText(cycleStatus.elapsed_seconds || 0))} elapsed.` : "Not currently running."} ${cycleStatus?.next_cycle_at ? `Next cycle ${escapeHtml(formatDateTime(cycleStatus.next_cycle_at))}.` : ""} ${cycleStatus?.remaining_seconds ? `${escapeHtml(durationText(cycleStatus.remaining_seconds))} remaining.` : ""}</span>
+          </div>
+          <div class="schedule-grid">
+            <label>
+              <span class="field-hint">Enable for channel</span>
+              <input type="checkbox" ${cycleEntry.enabled ? "checked" : ""} onchange="updateChannelStreamCycleSetting('enabled', this.checked)">
+            </label>
+            <label>
+              <span class="field-hint">Duration hours</span>
+              <input type="number" min="0.02" step="0.25" value="${escapeAttr(String(cycleDurationHours))}" onchange="updateChannelStreamCycleSetting('duration_hours', this.value)">
+            </label>
+            <div>
+              <span class="field-hint">Configured duration</span>
+              <div>${escapeHtml(durationText(cycleDurationSeconds))}</div>
+            </div>
+          </div>
+        ` : `<p class="helper">Create or select a channel to configure cycle restarts.</p>`}
       </section>
     </div>
   `;
