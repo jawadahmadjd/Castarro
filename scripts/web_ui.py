@@ -150,6 +150,16 @@ def parse_configured_bitrate_bps(value: Any) -> int | None:
 
 
 def live_profile_target_bitrate_bps(profile: dict[str, Any]) -> int | None:
+    if str(profile.get("mode") or "").lower() == "adaptive":
+        try:
+            active = stream_manager.active_adaptive_variant(profile)
+        except Exception:
+            active = {}
+        video_bitrate = parse_configured_bitrate_bps(active.get("video_bitrate"))
+        audio_bitrate = parse_configured_bitrate_bps(active.get("audio_bitrate") or profile.get("audio_bitrate"))
+        if video_bitrate is None and audio_bitrate is None:
+            return None
+        return int(video_bitrate or 0) + int(audio_bitrate or 0)
     video_bitrate = parse_configured_bitrate_bps(profile.get("video_bitrate"))
     audio_bitrate = parse_configured_bitrate_bps(profile.get("audio_bitrate"))
     if video_bitrate is None and audio_bitrate is None:
@@ -577,7 +587,7 @@ class Task:
         self.returncode = self.process.wait()
         self.finished_at = time.time()
         app_db.record_task_finish(self.id, self.returncode, "\n".join(list(self.lines)[-80:]))
-        if self.name == "normalize":
+        if self.name in {"normalize", "renditions"}:
             config, _error = load_config_or_none(self.config_name)
             if config:
                 removed = cleanup_encoding_outputs(config, self.channel_name)
@@ -626,6 +636,14 @@ class Task:
         }
 
 
+def current_adaptive_variant_id(channel: dict[str, Any]) -> str:
+    profile = channel.get("live_profile") if isinstance(channel.get("live_profile"), dict) else {}
+    if str(profile.get("mode") or "").lower() != "adaptive":
+        return ""
+    adaptive = stream_manager.adaptive_profile(profile)
+    return str(adaptive.get("active_variant_id") or "")
+
+
 class StreamState:
     def __init__(
         self,
@@ -644,6 +662,8 @@ class StreamState:
         self.next_reconnect_at = 0.0
         self.last_reconnect_error = ""
         self.last_reconnect_status = ""
+        self.adaptive_variant_id = current_adaptive_variant_id(running.channel)
+        self.last_adaptive_switch_at = 0.0
 
     def replace_running(self, running: stream_manager.RunningStream, cloud_asset_ids: list[str] | None = None) -> None:
         self.running = running
@@ -653,6 +673,7 @@ class StreamState:
         self.next_reconnect_at = 0.0
         self.last_reconnect_error = ""
         self.last_reconnect_status = "reconnected"
+        self.adaptive_variant_id = current_adaptive_variant_id(running.channel)
 
     def transferred_bytes(self) -> int:
         return parse_ffmpeg_size_bytes(tail_file(self.log_path, max_chars=20000))
@@ -683,6 +704,7 @@ class StreamState:
             "preview_url": None,
             "preview_ready": False,
             "preview_warning": None,
+            "adaptive_variant_id": self.adaptive_variant_id,
         }
 
 
@@ -2557,6 +2579,13 @@ def youtube_live_chat(config_name: str, channel_name: str, page_token: str = "")
         stamp_live_chat_message(message, received_at, "received_at")
         for message in chat.get("messages", [])
     ]
+    app_db.record_live_chat_messages(
+        config_name,
+        str(channel.get("name") or ""),
+        str(broadcast.get("id") or ""),
+        live_chat_id,
+        [message for message in chat.get("messages", []) if isinstance(message, dict)],
+    )
     return {
         "ok": True,
         "channel": str(channel.get("name") or ""),
@@ -2582,6 +2611,15 @@ def send_youtube_live_chat(config_name: str, body: dict[str, Any]) -> dict[str, 
         message_text=message_text,
     )
     sent_at = live_chat_local_timestamp()
+    stamped_message = stamp_live_chat_message(message, sent_at, "sent_at")
+    if isinstance(stamped_message, dict):
+        app_db.record_live_chat_messages(
+            config_name,
+            str(channel.get("name") or ""),
+            str(broadcast.get("id") or ""),
+            live_chat_id,
+            [stamped_message],
+        )
     return {
         "ok": True,
         "channel": str(channel.get("name") or ""),
@@ -2591,7 +2629,7 @@ def send_youtube_live_chat(config_name: str, body: dict[str, Any]) -> dict[str, 
         "broadcast_studio_url": str(broadcast.get("studio_url") or channel.get("youtube_studio_url") or ""),
         "broadcast_stream_id": str(broadcast.get("bound_stream_id") or channel.get("youtube_stream_id") or ""),
         "live_chat_id": live_chat_id,
-        "message": stamp_live_chat_message(message, sent_at, "sent_at"),
+        "message": stamped_message,
     }
 
 
@@ -3627,11 +3665,13 @@ def task_command(
     python = sys.executable
     if action == "validate":
         command = [python, str(CODE_ROOT / "scripts" / "validate_media.py"), "--config", config_name]
-    elif action == "normalize":
+    elif action in {"normalize", "renditions"}:
         command = [python, str(CODE_ROOT / "scripts" / "normalize_media.py"), "--config", config_name]
         if force:
             command.append("--force")
-        if start_index > 1:
+        if action == "renditions":
+            command.append("--adaptive-renditions-only")
+        if action == "normalize" and start_index > 1:
             command += ["--start-index", str(start_index)]
     elif action == "test-stream":
         if not channel:
@@ -4010,10 +4050,84 @@ def start_stream(config_name: str, channel_name: str | None) -> list[str]:
             subprocess.list2cmdline(running.command),
             str(Path(running.log_handle.name)),
             stream_live_title(prepared_channel),
+            str(prepared_channel.get("youtube_broadcast_id") or ""),
         )
         app_db.record_event("stream_started", config_name, name, {"pid": running.process.pid})
         started.append(name)
     return started
+
+
+def channel_with_active_adaptive_variant(channel: dict[str, Any], variant_id: str) -> dict[str, Any]:
+    prepared = dict(channel)
+    profile = dict(prepared.get("live_profile") or {})
+    adaptive = dict(profile.get("adaptive") or {})
+    adaptive["active_variant_id"] = variant_id
+    profile["adaptive"] = adaptive
+    profile["mode"] = "adaptive"
+    prepared["live_profile"] = profile
+    return prepared
+
+
+def adaptive_variant_ids(profile: dict[str, Any]) -> list[str]:
+    adaptive = stream_manager.adaptive_profile(profile)
+    return [str(variant.get("id") or "") for variant in adaptive.get("variants") or [] if str(variant.get("id") or "")]
+
+
+def switch_adaptive_stream(
+    config_name: str,
+    channel_name: str,
+    state: StreamState,
+    target_variant_id: str,
+    reason: str,
+) -> bool:
+    if not target_variant_id:
+        return False
+    now_monotonic = time.monotonic()
+    if state.last_adaptive_switch_at and now_monotonic - state.last_adaptive_switch_at < 20:
+        return False
+    config, config_dir = stream_manager.load_config((ROOT / config_name).resolve())
+    channel = find_channel_by_name(config, channel_name)
+    if not channel:
+        return False
+    profile = stream_manager.live_profile(config, channel)
+    if str(profile.get("mode") or "") != "adaptive":
+        return False
+    if target_variant_id == state.adaptive_variant_id:
+        return False
+    prepared_channel, cloud_asset_ids = prepare_channel_cloud_playlist(
+        config,
+        channel_with_active_adaptive_variant(channel, target_variant_id),
+    )
+    old_running = state.running
+    old_assets = list(state.cloud_asset_ids)
+    try:
+        old_running.stop_requested = True
+        stream_manager.stop_stream(old_running)
+        unregister_cloud_assets(old_assets)
+        running = stream_manager.start_stream(config_dir, config, prepared_channel)
+    except Exception as exc:
+        state.last_reconnect_status = "adaptive_switch_failed"
+        state.last_reconnect_error = str(exc)
+        return False
+    state.replace_running(running, cloud_asset_ids=cloud_asset_ids)
+    state.adaptive_variant_id = target_variant_id
+    state.last_adaptive_switch_at = now_monotonic
+    app_db.record_stream_start(
+        config_name,
+        channel_name,
+        running.process.pid,
+        subprocess.list2cmdline(running.command),
+        str(Path(running.log_handle.name)),
+        stream_live_title(prepared_channel),
+        str(prepared_channel.get("youtube_broadcast_id") or ""),
+    )
+    app_db.record_event(
+        "adaptive_variant_switched",
+        config_name,
+        channel_name,
+        {"variant_id": target_variant_id, "reason": reason, "pid": running.process.pid},
+    )
+    return True
 
 
 def stop_preview(channel_name: str | None = None) -> str | None:
@@ -4139,6 +4253,53 @@ def tail_file(path: Path, max_chars: int = 5000) -> str:
         return ""
 
 
+def stream_log_history_for_channels(
+    config_name: str,
+    channels: list[dict[str, Any]],
+    active_stream_names: set[str],
+    *,
+    sessions_per_channel: int = 3,
+) -> dict[str, list[dict[str, Any]]]:
+    history: dict[str, list[dict[str, Any]]] = {}
+    channel_names = [
+        str(channel.get("name") or "").strip()
+        for channel in channels
+        if str(channel.get("name") or "").strip()
+    ]
+    for channel_name in channel_names:
+        sessions = app_db.recent_stream_sessions(
+            config_name,
+            channel_name=channel_name,
+            limit=sessions_per_channel,
+        )
+        items: list[dict[str, Any]] = []
+        for session in sessions:
+            log_path_text = str(session.get("log_path") or "").strip()
+            log_path = app_db.resolve_project_path(log_path_text) if log_path_text else None
+            log_tail = tail_file(log_path) if log_path else ""
+            is_active = (
+                str(session.get("status") or "").lower() == "running"
+                and channel_name in active_stream_names
+            )
+            items.append(
+                {
+                    "session_id": session.get("id"),
+                    "name": channel_name,
+                    "pid": session.get("pid"),
+                    "running": is_active,
+                    "status": session.get("status"),
+                    "returncode": session.get("returncode"),
+                    "started_at": session.get("started_at"),
+                    "stopped_at": session.get("stopped_at"),
+                    "log_path": log_path_text,
+                    "log_tail": log_tail,
+                    "is_active": is_active,
+                }
+            )
+        history[channel_name] = items
+    return history
+
+
 def status_payload(config_name: str) -> dict[str, Any]:
     config, error = load_config_or_none(config_name)
     if config:
@@ -4185,6 +4346,7 @@ def status_payload(config_name: str) -> dict[str, Any]:
             str(session.get("status") or "").lower() == "running"
             and str(session.get("channel_name") or "") in active_stream_names
         )
+    stream_log_history = stream_log_history_for_channels(config_name, channels, active_stream_names)
 
     return {
         "root": str(ROOT),
@@ -4220,6 +4382,7 @@ def status_payload(config_name: str) -> dict[str, Any]:
         "streams": streams,
         "preview": preview or {"channel": "", "running": False, "preview_url": None, "preview_ready": False, "preview_warning": None},
         "stream_history": stream_history,
+        "stream_log_history": stream_log_history,
         "alerts": alerts_status(config_name, config) if config else {"recent": []},
         "scheduler": scheduler_status(config_name, config) if config else default_scheduler_settings(),
         "stream_cycles": stream_cycle_status(config_name, config) if config else default_stream_cycle_settings(),
@@ -4521,6 +4684,7 @@ def evaluate_stream_connection_health() -> None:
         if severity:
             bad_count = int(watch.get("bad_count") or 0) + 1
             watch["bad_count"] = bad_count
+            watch["good_count"] = 0
             watch["last_label"] = label
             if bad_count >= 2:
                 config, _error = load_config_or_none(state.config_name)
@@ -4534,8 +4698,31 @@ def evaluate_stream_connection_health() -> None:
                         f"{channel_name} connection needs attention",
                         str(stats.get("detail") or "FFmpeg is reporting degraded live delivery."),
                     )
+                    profile = stream_manager.live_profile(config, channel)
+                    adaptive = stream_manager.adaptive_profile(profile)
+                    if str(profile.get("mode") or "") == "adaptive" and adaptive.get("auto_switch") is not False:
+                        ids = adaptive_variant_ids(profile)
+                        current_id = state.adaptive_variant_id or str(adaptive.get("active_variant_id") or "")
+                        current_index = ids.index(current_id) if current_id in ids else 0
+                        if current_index + 1 < len(ids):
+                            target_id = ids[current_index + 1]
+                            if switch_adaptive_stream(state.config_name, channel_name, state, target_id, "poor_connection"):
+                                watch["bad_count"] = 0
         else:
-            watch = {"bad_count": 0, "last_label": label}
+            good_count = int(watch.get("good_count") or 0) + 1
+            watch = {"bad_count": 0, "good_count": good_count, "last_label": label}
+            config, _error = load_config_or_none(state.config_name)
+            if config:
+                profile = stream_manager.live_profile(config, channel)
+                adaptive = stream_manager.adaptive_profile(profile)
+                if str(profile.get("mode") or "") == "adaptive" and adaptive.get("auto_switch") is not False and good_count >= 4:
+                    ids = adaptive_variant_ids(profile)
+                    current_id = state.adaptive_variant_id or str(adaptive.get("active_variant_id") or "")
+                    current_index = ids.index(current_id) if current_id in ids else 0
+                    if current_index > 0:
+                        target_id = ids[current_index - 1]
+                        if switch_adaptive_stream(state.config_name, channel_name, state, target_id, "connection_recovered"):
+                            watch["good_count"] = 0
         with STATE.lock:
             STATE.connection_watch[watch_key] = watch
 

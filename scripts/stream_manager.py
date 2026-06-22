@@ -44,6 +44,17 @@ DEFAULT_LIVE_PROFILE = {
     "audio_bitrate": "128k",
     "audio_sample_rate": 44100,
     "audio_channels": 2,
+    "adaptive": {
+        "auto_switch": True,
+        "buffer_seconds": 60,
+        "hls_time": 2,
+        "active_variant_id": "1080p",
+        "variants": [
+            {"id": "1080p", "label": "1080p", "width": 1920, "height": 1080, "video_bitrate": "6800k", "audio_bitrate": "128k", "enabled": True},
+            {"id": "720p", "label": "720p", "width": 1280, "height": 720, "video_bitrate": "3500k", "audio_bitrate": "128k", "enabled": True},
+            {"id": "480p", "label": "480p", "width": 854, "height": 480, "video_bitrate": "1800k", "audio_bitrate": "96k", "enabled": True},
+        ],
+    },
 }
 
 
@@ -503,6 +514,49 @@ def parse_int(
     return parsed
 
 
+def adaptive_profile(profile: dict[str, Any]) -> dict[str, Any]:
+    raw = profile.get("adaptive") if isinstance(profile.get("adaptive"), dict) else {}
+    defaults = DEFAULT_LIVE_PROFILE["adaptive"]
+    merged = {**defaults, **(raw if isinstance(raw, dict) else {})}
+    merged["buffer_seconds"] = parse_int(merged.get("buffer_seconds"), 60, minimum=10, maximum=60)
+    merged["hls_time"] = parse_int(merged.get("hls_time"), 2, minimum=1, maximum=10)
+    variants = merged.get("variants")
+    if not isinstance(variants, list):
+        variants = defaults["variants"]
+    cleaned: list[dict[str, Any]] = []
+    for index, raw_variant in enumerate(variants):
+        if not isinstance(raw_variant, dict):
+            continue
+        width = parse_int(raw_variant.get("width"), 1920, minimum=16)
+        height = parse_int(raw_variant.get("height"), 1080, minimum=16)
+        label = str(raw_variant.get("label") or f"{height}p").strip() or f"{height}p"
+        variant_id = str(raw_variant.get("id") or label.lower().replace(" ", "-") or f"rung-{index + 1}").strip()
+        cleaned.append({
+            **raw_variant,
+            "id": re.sub(r"[^A-Za-z0-9._-]+", "-", variant_id).strip("-") or f"rung-{index + 1}",
+            "label": label,
+            "width": width,
+            "height": height,
+            "video_bitrate": str(raw_variant.get("video_bitrate") or raw_variant.get("bitrate") or "3500k").strip(),
+            "minrate": str(raw_variant.get("minrate") or raw_variant.get("video_bitrate") or raw_variant.get("bitrate") or "3500k").strip(),
+            "maxrate": str(raw_variant.get("maxrate") or raw_variant.get("video_bitrate") or raw_variant.get("bitrate") or "3500k").strip(),
+            "bufsize": str(raw_variant.get("bufsize") or raw_variant.get("video_bufsize") or "7000k").strip(),
+            "audio_bitrate": str(raw_variant.get("audio_bitrate") or profile.get("audio_bitrate") or "128k").strip(),
+            "enabled": raw_variant.get("enabled") is not False,
+        })
+    cleaned = [variant for variant in cleaned if variant["enabled"]]
+    cleaned.sort(key=lambda item: (parse_int(item.get("height"), 0), parse_int(item.get("width"), 0)), reverse=True)
+    if not cleaned:
+        cleaned = [dict(item) for item in defaults["variants"]]
+    active_id = str(merged.get("active_variant_id") or "").strip()
+    if active_id not in {variant["id"] for variant in cleaned}:
+        active_id = cleaned[0]["id"]
+    merged["variants"] = cleaned
+    merged["active_variant_id"] = active_id
+    merged["auto_switch"] = merged.get("auto_switch") is not False
+    return merged
+
+
 def live_profile(config: dict[str, Any], channel: dict[str, Any]) -> dict[str, Any]:
     defaults = config.get("live_profile", {})
     overrides = channel.get("live_profile", {})
@@ -512,28 +566,30 @@ def live_profile(config: dict[str, Any], channel: dict[str, Any]) -> dict[str, A
         **(overrides if isinstance(overrides, dict) else {}),
     }
     mode = str(merged.get("mode", "copy")).strip().lower()
-    merged["mode"] = "transcode" if mode == "transcode" else "copy"
+    merged["mode"] = mode if mode in {"copy", "transcode", "adaptive"} else "copy"
+    merged["adaptive"] = adaptive_profile(merged)
     return merged
 
 
 def transcode_enabled(config: dict[str, Any], channel: dict[str, Any]) -> bool:
-    return live_profile(config, channel).get("mode") == "transcode"
+    return live_profile(config, channel).get("mode") in {"transcode", "adaptive"}
 
 
-def transcode_args(config: dict[str, Any], channel: dict[str, Any]) -> list[str]:
+def transcode_args(config: dict[str, Any], channel: dict[str, Any], variant: dict[str, Any] | None = None) -> list[str]:
     profile = live_profile(config, channel)
+    variant = variant or {}
     encoder = str(profile.get("video_encoder") or "libx264").strip()
     preset = str(profile.get("preset") or "").strip()
     video_profile = str(profile.get("profile") or "").strip()
     pixel_format = str(profile.get("pixel_format") or "yuv420p").strip()
     audio_codec = str(profile.get("audio_codec") or "aac").strip()
-    video_bitrate = str(profile.get("video_bitrate") or "6800k").strip()
-    minrate = str(profile.get("minrate") or video_bitrate).strip()
-    maxrate = str(profile.get("maxrate") or video_bitrate).strip()
-    bufsize = str(profile.get("bufsize") or "13600k").strip()
-    audio_bitrate = str(profile.get("audio_bitrate") or "128k").strip()
-    width = parse_int(profile.get("width"), 1920, minimum=16)
-    height = parse_int(profile.get("height"), 1080, minimum=16)
+    video_bitrate = str(variant.get("video_bitrate") or profile.get("video_bitrate") or "6800k").strip()
+    minrate = str(variant.get("minrate") or profile.get("minrate") or video_bitrate).strip()
+    maxrate = str(variant.get("maxrate") or profile.get("maxrate") or video_bitrate).strip()
+    bufsize = str(variant.get("bufsize") or profile.get("bufsize") or "13600k").strip()
+    audio_bitrate = str(variant.get("audio_bitrate") or profile.get("audio_bitrate") or "128k").strip()
+    width = parse_int(variant.get("width") or profile.get("width"), 1920, minimum=16)
+    height = parse_int(variant.get("height") or profile.get("height"), 1080, minimum=16)
     fps = parse_int(profile.get("fps"), 30, minimum=1, maximum=120)
     gop_seconds = parse_int(profile.get("gop_seconds"), 2, minimum=1, maximum=10)
     gop = max(1, fps * gop_seconds)
@@ -573,6 +629,87 @@ def transcode_args(config: dict[str, Any], channel: dict[str, Any]) -> list[str]
     if video_profile:
         args += ["-profile:v", video_profile]
     return args
+
+
+def adaptive_buffer_dir(config_dir: Path, config: dict[str, Any], channel: dict[str, Any]) -> Path:
+    defaults = config.get("defaults", {})
+    runtime_dir = resolve_path(config_dir, defaults.get("runtime_dir", ".runtime"))
+    channel_name = str(channel.get("name") or "channel").strip()
+    safe_channel = re.sub(r"[^A-Za-z0-9._-]+", "-", channel_name).strip("-") or "channel"
+    return runtime_dir / "adaptive-buffer" / safe_channel
+
+
+def active_adaptive_variant(profile: dict[str, Any]) -> dict[str, Any]:
+    adaptive = adaptive_profile(profile)
+    active_id = str(adaptive.get("active_variant_id") or "")
+    variants = list(adaptive.get("variants") or [])
+    return next((variant for variant in variants if str(variant.get("id")) == active_id), variants[0])
+
+
+def adaptive_hls_output_args(
+    config_dir: Path,
+    config: dict[str, Any],
+    channel: dict[str, Any],
+    variant: dict[str, Any],
+) -> list[str]:
+    profile = live_profile(config, channel)
+    adaptive = adaptive_profile(profile)
+    hls_time = parse_int(adaptive.get("hls_time"), 2, minimum=1, maximum=10)
+    buffer_seconds = parse_int(adaptive.get("buffer_seconds"), 60, minimum=10, maximum=60)
+    list_size = max(1, int((buffer_seconds + hls_time - 1) / hls_time))
+    variant_id = str(variant.get("id") or "rung").strip() or "rung"
+    buffer_dir = adaptive_buffer_dir(config_dir, config, channel) / variant_id
+    buffer_dir.mkdir(parents=True, exist_ok=True)
+    manifest = buffer_dir / "index.m3u8"
+    segment_pattern = buffer_dir / "segment_%05d.ts"
+    return [
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a:0?",
+        *transcode_args(config, channel, variant),
+        "-hls_time",
+        str(hls_time),
+        "-hls_list_size",
+        str(list_size),
+        "-hls_delete_threshold",
+        "1",
+        "-hls_flags",
+        "delete_segments+omit_endlist+independent_segments",
+        "-hls_segment_type",
+        "mpegts",
+        "-hls_segment_filename",
+        str(segment_pattern),
+        "-f",
+        "hls",
+        str(manifest),
+    ]
+
+
+def write_adaptive_master_manifest(config_dir: Path, config: dict[str, Any], channel: dict[str, Any]) -> Path:
+    profile = live_profile(config, channel)
+    variants = adaptive_profile(profile).get("variants") or []
+    root = adaptive_buffer_dir(config_dir, config, channel)
+    root.mkdir(parents=True, exist_ok=True)
+    lines = ["#EXTM3U", "#EXT-X-VERSION:3"]
+    for variant in variants:
+        bitrate = parse_bitrate_for_manifest(variant.get("video_bitrate")) + parse_bitrate_for_manifest(variant.get("audio_bitrate"))
+        resolution = f"{parse_int(variant.get('width'), 0)}x{parse_int(variant.get('height'), 0)}"
+        lines.append(f"#EXT-X-STREAM-INF:BANDWIDTH={max(1, bitrate)},RESOLUTION={resolution}")
+        lines.append(f"{variant.get('id')}/index.m3u8")
+    manifest = root / "master.m3u8"
+    manifest.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return manifest
+
+
+def parse_bitrate_for_manifest(value: Any) -> int:
+    text = str(value or "").strip().lower()
+    match = re.match(r"^([0-9]+(?:\.[0-9]+)?)\s*([kmg]?)", text)
+    if not match:
+        return 0
+    amount = float(match.group(1))
+    suffix = match.group(2)
+    return int(amount * {"": 1, "k": 1000, "m": 1000 ** 2, "g": 1000 ** 3}.get(suffix, 1))
 
 
 def concat_playlist_media_paths(playlist_path: Path) -> list[Path]:
@@ -674,6 +811,7 @@ def build_command(
     playlist_path, has_network_inputs = write_concat_playlist(defaults, config_dir, runtime_dir, channel)
     ffmpeg = str(channel.get("ffmpeg_path") or defaults.get("ffmpeg_path", "ffmpeg"))
     url = output_url(channel, defaults)
+    profile = live_profile(config, channel)
     if has_network_inputs and transcode_enabled(config, channel):
         raise SystemExit(
             f"Channel '{channel.get('name')}' uses cloud/network source inputs, so live transcoding is blocked. "
@@ -703,19 +841,21 @@ def build_command(
         "0",
         "-i",
         str(playlist_path),
-        "-map",
-        "0:v:0",
-        "-map",
-        "0:a:0?",
     ]
 
     stream_output_args = ["-c", "copy"]
-    if transcode_enabled(config, channel):
+    if profile.get("mode") == "adaptive":
+        stream_output_args = transcode_args(config, channel, active_adaptive_variant(profile))
+    elif transcode_enabled(config, channel):
         stream_output_args = transcode_args(config, channel)
     preview_warning: str | None = None
 
     if preview_manifest is None:
         command += [
+            "-map",
+            "0:v:0",
+            "-map",
+            "0:a:0?",
             *stream_output_args,
             "-flvflags",
             "no_duration_filesize",
@@ -723,6 +863,12 @@ def build_command(
             "flv",
             url,
         ]
+        if profile.get("mode") == "adaptive":
+            buffer_root = adaptive_buffer_dir(config_dir, config, channel)
+            clear_directory(buffer_root)
+            write_adaptive_master_manifest(config_dir, config, channel)
+            for variant in adaptive_profile(profile).get("variants") or []:
+                command += adaptive_hls_output_args(config_dir, config, channel, variant)
         return command, playlist_path, url, preview_warning
 
     if not transcode_enabled(config, channel):
@@ -734,6 +880,10 @@ def build_command(
 
     segment_pattern = preview_manifest.parent / "segment_%05d.ts"
     command += [
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a:0?",
         *stream_output_args,
         "-flvflags",
         "no_duration_filesize",

@@ -42,7 +42,18 @@
     "audio_codec": "aac",
     "audio_bitrate": "128k",
     "audio_sample_rate": 44100,
-    "audio_channels": 2
+    "audio_channels": 2,
+    "adaptive": {
+      "auto_switch": true,
+      "buffer_seconds": 60,
+      "hls_time": 2,
+      "active_variant_id": "1080p",
+      "variants": [
+        { "id": "1080p", "label": "1080p", "width": 1920, "height": 1080, "video_bitrate": "6800k", "audio_bitrate": "128k", "enabled": true },
+        { "id": "720p", "label": "720p", "width": 1280, "height": 720, "video_bitrate": "3500k", "audio_bitrate": "128k", "enabled": true },
+        { "id": "480p", "label": "480p", "width": 854, "height": 480, "video_bitrate": "1800k", "audio_bitrate": "96k", "enabled": true }
+      ]
+    }
   },
   "youtube": {
     "client_id": "",
@@ -164,7 +175,18 @@
         "audio_codec": "aac",
         "audio_bitrate": "128k",
         "audio_sample_rate": 44100,
-        "audio_channels": 2
+        "audio_channels": 2,
+        "adaptive": {
+          "auto_switch": true,
+          "buffer_seconds": 60,
+          "hls_time": 2,
+          "active_variant_id": "1080p",
+          "variants": [
+            { "id": "1080p", "label": "1080p", "width": 1920, "height": 1080, "video_bitrate": "6800k", "audio_bitrate": "128k", "enabled": true },
+            { "id": "720p", "label": "720p", "width": 1280, "height": 720, "video_bitrate": "3500k", "audio_bitrate": "128k", "enabled": true },
+            { "id": "480p", "label": "480p", "width": 854, "height": 480, "video_bitrate": "1800k", "audio_bitrate": "96k", "enabled": true }
+          ]
+        }
       },
       "youtube_auto_start": true,
       "youtube_auto_stop": true,

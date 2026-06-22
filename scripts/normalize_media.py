@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import runtime_paths
+import stream_manager
 
 
 DEFAULT_PROFILE: dict[str, Any] = {
@@ -80,12 +81,44 @@ def channel_sources(config_dir: Path, channel: dict[str, Any]) -> list[Path]:
     )
 
 
+def channel_normalized_sources(config: dict[str, Any], config_dir: Path, channel: dict[str, Any]) -> list[Path]:
+    playlist = channel.get("playlist")
+    if isinstance(playlist, list) and playlist:
+        return [resolve_path(config_dir, str(item)) for item in playlist]
+
+    defaults = config.get("defaults", {})
+    normalized_root = resolve_path(config_dir, defaults.get("normalized_dir", "Go Live"))
+    channel_dir = normalized_root / str(channel["name"])
+    if not channel_dir.exists():
+        return []
+    return sorted(
+        path for path in channel_dir.iterdir()
+        if path.is_file() and path.suffix.lower() in stream_manager.VIDEO_EXTENSIONS
+    )
+
+
 def profile(config: dict[str, Any], channel: dict[str, Any] | None = None) -> dict[str, Any]:
     merged = dict(DEFAULT_PROFILE)
     merged.update(config.get("normalize_profile", {}))
     if channel:
         merged.update(channel.get("normalize_profile", {}))
     return merged
+
+
+def rendition_profile(config: dict[str, Any], channel: dict[str, Any], variant: dict[str, Any]) -> dict[str, Any]:
+    selected = profile(config, channel)
+    live_profile = stream_manager.live_profile(config, channel)
+    selected["width"] = int(variant.get("width") or selected.get("width") or 1280)
+    selected["height"] = int(variant.get("height") or selected.get("height") or 720)
+    selected["video_bitrate"] = str(variant.get("video_bitrate") or selected.get("video_bitrate") or "3500k")
+    selected["video_minrate"] = str(variant.get("minrate") or variant.get("video_bitrate") or selected["video_bitrate"])
+    selected["video_maxrate"] = str(variant.get("maxrate") or variant.get("video_bitrate") or selected["video_bitrate"])
+    selected["video_bufsize"] = str(variant.get("bufsize") or bitrate_times_two(selected["video_bitrate"]))
+    selected["audio_bitrate"] = str(variant.get("audio_bitrate") or selected.get("audio_bitrate") or "128k")
+    selected["video_encoder"] = str(live_profile.get("video_encoder") or selected.get("video_encoder") or "libx264")
+    selected["x264_preset"] = str(live_profile.get("preset") or selected.get("x264_preset") or "veryfast")
+    selected["x264_profile"] = str(live_profile.get("profile") or selected.get("x264_profile") or "high")
+    return selected
 
 
 def build_ffmpeg_command(
@@ -354,6 +387,87 @@ def normalize_channel(
     return ready_channel, normalized_files
 
 
+def adaptive_lower_variants(config: dict[str, Any], channel: dict[str, Any]) -> list[dict[str, Any]]:
+    live_profile = stream_manager.live_profile(config, channel)
+    adaptive = stream_manager.adaptive_profile(live_profile)
+    variants = list(adaptive.get("variants") or [])
+    if len(variants) <= 1:
+        return []
+    max_height = max(int(variant.get("height") or 0) for variant in variants)
+    return [variant for variant in variants if int(variant.get("height") or 0) < max_height]
+
+
+def normalize_channel_renditions(
+    config: dict[str, Any],
+    config_dir: Path,
+    channel: dict[str, Any],
+    force: bool,
+    dry_run: bool,
+) -> tuple[dict[str, Any], list[Path]]:
+    defaults = config.get("defaults", {})
+    ffmpeg_path = str(defaults.get("ffmpeg_path", "ffmpeg"))
+    ffprobe_path = str(defaults.get("ffprobe_path", "ffprobe"))
+    normalized_root = resolve_path(config_dir, defaults.get("normalized_dir", "Go Live"))
+    channel_dir = normalized_root / str(channel["name"])
+    channel_dir.mkdir(parents=True, exist_ok=True)
+    remove_stale_encoding_outputs(channel_dir)
+
+    sources = channel_normalized_sources(config, config_dir, channel)
+    if not sources:
+        raise SystemExit(
+            f"Channel '{channel.get('name')}' has no existing Go Live videos. Run Encode Videos first or add videos to the Videos card."
+        )
+    variants = adaptive_lower_variants(config, channel)
+    if not variants:
+        raise SystemExit(f"Channel '{channel.get('name')}' has no enabled lower-resolution ladder rungs.")
+
+    jobs: list[tuple[Path, dict[str, Any]]] = [(source, variant) for variant in variants for source in sources]
+    total = len(jobs)
+    print(f"\n[{channel['name']}] encoding {total} lower-resolution rendition(s)", flush=True)
+    print(f"TASK channel={channel['name']} total={total}", flush=True)
+
+    outputs: list[Path] = []
+    for job_index, (source, variant) in enumerate(jobs, start=1):
+        if not source.exists():
+            raise SystemExit(f"Source file does not exist: {source}")
+
+        variant_id = str(variant.get("id") or f"{variant.get('height', 'lower')}p").strip() or "lower"
+        variant_dir = channel_dir / variant_id
+        variant_dir.mkdir(parents=True, exist_ok=True)
+        default_output = variant_dir / source.name
+        output = default_output if force else next_versioned_output(default_output)
+        if output != default_output:
+            print(
+                f"HEADS-UP existing rendition: {default_output.name}; creating {output.name}",
+                flush=True,
+            )
+        temp_output = encoding_output_path(output)
+        temp_output.unlink(missing_ok=True)
+        outputs.append(output)
+
+        selected_profile = rendition_profile(config, channel, variant)
+        command = build_ffmpeg_command(ffmpeg_path, source, temp_output, selected_profile)
+        label = str(variant.get("label") or variant_id)
+        print(f"FILE {job_index}/{total} render {label} {source.name} -> {variant_id}/{output.name}", flush=True)
+        if dry_run:
+            print("  " + subprocess.list2cmdline(command), flush=True)
+            print(f"PROGRESS file={job_index} total={total} percent=100", flush=True)
+            continue
+
+        duration_seconds = probe_duration(ffprobe_path, source)
+        returncode = run_ffmpeg_with_progress(command, duration_seconds, job_index, total)
+        if returncode != 0:
+            temp_output.unlink(missing_ok=True)
+            raise SystemExit(f"FFmpeg failed for {source} with exit code {returncode}")
+        temp_output.replace(output)
+
+    ready_channel = dict(channel)
+    ready_channel["rendition_playlist"] = [
+        relative_or_absolute(config_dir, path) for path in outputs
+    ]
+    return ready_channel, outputs
+
+
 def write_ready_config(
     config: dict[str, Any],
     config_dir: Path,
@@ -395,6 +509,11 @@ def main() -> int:
     )
     parser.add_argument("--dry-run", action="store_true", help="Print FFmpeg commands without encoding.")
     parser.add_argument(
+        "--adaptive-renditions-only",
+        action="store_true",
+        help="Skip source normalization and encode only lower-resolution adaptive renditions from existing Go Live videos.",
+    )
+    parser.add_argument(
         "--include-disabled",
         action="store_true",
         help="Normalize disabled channels too.",
@@ -424,10 +543,13 @@ def main() -> int:
     ready_channels: list[dict[str, Any]] = []
     start_index = max(1, int(args.start_index or 1))
     for channel in channels:
-        ready_channel, _files = normalize_channel(config, config_dir, channel, args.force, args.dry_run, start_index)
+        if args.adaptive_renditions_only:
+            ready_channel, _files = normalize_channel_renditions(config, config_dir, channel, args.force, args.dry_run)
+        else:
+            ready_channel, _files = normalize_channel(config, config_dir, channel, args.force, args.dry_run, start_index)
         ready_channels.append(ready_channel)
 
-    if not args.dry_run:
+    if not args.dry_run and not args.adaptive_renditions_only:
         write_concat_playlists(config, config_dir, ready_channels)
         write_ready_config(config, config_dir, ready_channels, Path(args.output_config).resolve())
 

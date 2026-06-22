@@ -7,7 +7,7 @@ const { chromium } = require("playwright");
 
 const ROOT = process.cwd();
 const OUT_DIR = path.join(ROOT, "tests", "screenshots");
-const PORT = "8787";
+const PORT = String(8787 + Math.floor(Math.random() * 800));
 const URL = `http://127.0.0.1:${PORT}`;
 
 function wait(ms) {
@@ -122,6 +122,22 @@ async function stopServer(child) {
   child.kill("SIGTERM");
 }
 
+async function removeTempRoot(tempRoot) {
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    try {
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      if (error.code !== "EBUSY") throw error;
+      if (attempt === 7) {
+        console.warn(`cleanup skipped for locked temp folder: ${tempRoot}`);
+        return;
+      }
+      await wait(350);
+    }
+  }
+}
+
 async function installHistoryFixture(page) {
   await page.evaluate(() => {
     const base = new Date();
@@ -141,6 +157,28 @@ async function installHistoryFixture(page) {
         channel_name: "Main Channel",
         live_title: "Sunday Worship Live",
         status: "stopped",
+        comment_count: 3,
+        recent_comments: [
+          {
+            id: "msg-3",
+            author_display_name: "Ayesha",
+            display_message: "Beautiful audio today.",
+            published_at: new Date(base.getFullYear(), base.getMonth(), base.getDate() - 2, 20, 42, 0).toISOString(),
+          },
+          {
+            id: "msg-2",
+            author_display_name: "Daniel",
+            display_message: "Praying with everyone from home.",
+            published_at: new Date(base.getFullYear(), base.getMonth(), base.getDate() - 2, 20, 12, 0).toISOString(),
+          },
+          {
+            id: "msg-1",
+            author_display_name: "Castarro Team",
+            display_message: "Welcome to the live stream.",
+            sent_at: new Date(base.getFullYear(), base.getMonth(), base.getDate() - 2, 19, 31, 0).toISOString(),
+            is_chat_owner: true,
+          },
+        ],
         ...iso(2, 19, 30, 118, 0),
       },
       {
@@ -157,6 +195,15 @@ async function installHistoryFixture(page) {
         channel_name: "Main Channel",
         live_title: "Product Walkthrough",
         status: "stopped",
+        comment_count: 1,
+        recent_comments: [
+          {
+            id: "msg-4",
+            author_display_name: "Viewer",
+            display_message: "Please show the setup screen again.",
+            received_at: new Date(base.getFullYear(), base.getMonth(), base.getDate() - 11, 16, 28, 0).toISOString(),
+          },
+        ],
         ...iso(11, 16, 15, 46, 1),
       },
       {
@@ -176,6 +223,7 @@ async function installHistoryFixture(page) {
         ...iso(24, 18, 45, 39, 0),
       },
     ];
+    state.settingsLiveHistory.expandedCommentSessionIds = { 7: true };
     renderSettingsLiveHistory();
   });
 }
@@ -194,20 +242,33 @@ async function installHistoryFixture(page) {
     const context = await browser.newContext({ viewport: { width: 1490, height: 930 } });
     const page = await context.newPage();
     await page.goto(URL, { waitUntil: "networkidle" });
-    await page.locator("#tabSettings").click();
+    await page.waitForFunction(() => (
+      typeof showTab === "function"
+      && typeof showSettingsTab === "function"
+      && typeof state !== "undefined"
+      && Array.isArray(state?.configData?.channels)
+      && state.configData.channels.length > 0
+    ));
     const historyResponse = page.waitForResponse((response) => response.url().includes("/api/stream-history"));
-    await page.locator("#settingsLiveHistoryTab").click();
+    await page.evaluate(() => {
+      state.workspace.selectedChannelName = "Main Channel";
+      showTab("settings");
+      showSettingsTab("liveHistory");
+    });
     await historyResponse;
     await page.waitForSelector("#settingsLiveHistoryView.active");
     await installHistoryFixture(page);
+    await page.waitForTimeout(700);
     await page.screenshot({ path: path.join(OUT_DIR, "live-history-settings.png"), fullPage: true });
 
     await page.locator("#settingsLiveHistoryRangeButton").click();
     await page.waitForSelector("#settingsLiveHistoryDateMenu:not(.hidden)");
+    await page.waitForTimeout(250);
     await page.screenshot({ path: path.join(OUT_DIR, "live-history-settings-dropdown.png"), fullPage: true });
 
     await page.getByRole("menuitem", { name: "Custom" }).click();
     await page.waitForSelector("#settingsLiveHistoryCalendar:not(.hidden)");
+    await page.waitForTimeout(250);
     await page.screenshot({ path: path.join(OUT_DIR, "live-history-settings-custom.png"), fullPage: true });
 
     await page.setViewportSize({ width: 390, height: 980 });
@@ -217,7 +278,7 @@ async function installHistoryFixture(page) {
     console.log("capture-live-history-settings: PASS");
   } finally {
     await stopServer(server);
-    fs.rmSync(tempRoot, { recursive: true, force: true });
+    await removeTempRoot(tempRoot);
     if (stderr.length) {
       fs.writeFileSync(path.join(OUT_DIR, "live-history-settings.stderr.log"), stderr.join(""), "utf8");
     }

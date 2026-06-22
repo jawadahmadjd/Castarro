@@ -120,6 +120,7 @@ const state = {
   settingsLiveHistory: {
     sessions: [],
     filter: "last_28",
+    expandedCommentSessionIds: {},
     menuOpen: false,
     calendarOpen: false,
     customStart: "",
@@ -340,6 +341,17 @@ const defaultLiveProfile = () => ({
   audio_bitrate: "128k",
   audio_sample_rate: 44100,
   audio_channels: 2,
+  adaptive: {
+    auto_switch: true,
+    buffer_seconds: 60,
+    hls_time: 2,
+    active_variant_id: "1080p",
+    variants: [
+      { id: "1080p", label: "1080p", width: 1920, height: 1080, video_bitrate: "6800k", audio_bitrate: "128k", enabled: true },
+      { id: "720p", label: "720p", width: 1280, height: 720, video_bitrate: "3500k", audio_bitrate: "128k", enabled: true },
+      { id: "480p", label: "480p", width: 854, height: 480, video_bitrate: "1800k", audio_bitrate: "96k", enabled: true },
+    ],
+  },
 });
 
 const defaultYoutubeSettings = () => ({
@@ -3325,11 +3337,13 @@ function renderLiveHistory(sessions) {
     const durationSeconds = sessionDurationSeconds(session, nowMs);
     const title = String(session?.live_title || session?.channel_name || "Untitled live");
     const channelName = String(session?.channel_name || "Unknown channel");
+    const commentCount = historySessionCommentCount(session);
     return `
       <button class="live-history-row ${isLive ? "current" : ""}" type="button" onclick="setWorkspaceRoute('history')" aria-label="Open History for ${escapeAttr(title)}">
         <div class="live-history-title">
           <strong>${escapeHtml(title)}</strong>
           <span>${escapeHtml(channelName)}</span>
+          <span>${escapeHtml(commentCount ? `${commentCount} saved comment${commentCount === 1 ? "" : "s"}` : "No saved comments")}</span>
         </div>
         <div class="live-history-time">
           <strong>${escapeHtml(started.date)}</strong>
@@ -3338,6 +3352,10 @@ function renderLiveHistory(sessions) {
         <div class="live-history-time">
           <strong>${escapeHtml(stopped.date)}</strong>
           ${stopped.time ? `<span>${escapeHtml(stopped.time)}</span>` : ""}
+        </div>
+        <div class="live-history-comments">
+          <strong>${escapeHtml(commentCount ? String(commentCount) : "0")}</strong>
+          <span>${escapeHtml(historyLatestCommentLabel(session))}</span>
         </div>
         ${durationChip(durationSeconds, isLive)}
       </button>
@@ -3349,6 +3367,7 @@ function renderLiveHistory(sessions) {
       <span>Live title</span>
       <span>Started</span>
       <span>Ended</span>
+      <span>Comments</span>
       <span>Duration</span>
     </div>
     ${rows}
@@ -3649,6 +3668,64 @@ function settingsHistoryStatus(session) {
   return { label: "Completed", className: "live" };
 }
 
+function historySessionComments(session) {
+  return Array.isArray(session?.recent_comments) ? session.recent_comments : [];
+}
+
+function historySessionCommentCount(session) {
+  const count = Number(session?.comment_count);
+  if (Number.isFinite(count)) return Math.max(0, count);
+  return historySessionComments(session).length;
+}
+
+function historyCommentText(comment) {
+  return String(comment?.display_message || comment?.message_text || "").trim();
+}
+
+function historyCommentTimestamp(comment) {
+  return comment?.published_at || comment?.sent_at || comment?.received_at || "";
+}
+
+function historyLatestCommentLabel(session) {
+  const comments = historySessionComments(session);
+  if (!comments.length) return "No saved comments";
+  const latest = comments[0];
+  const author = String(latest?.author_display_name || "Viewer").trim();
+  const text = historyCommentText(latest);
+  return text ? `${author}: ${text}` : `${author} commented`;
+}
+
+function renderHistoryCommentMessages(session) {
+  const comments = historySessionComments(session);
+  if (!comments.length) {
+    return `<div class="history-comments-empty">No comments were saved for this live session.</div>`;
+  }
+  return comments.map((comment) => {
+    const badges = youtubeLiveChatAuthorBadges(comment);
+    const timestamp = historyCommentTimestamp(comment);
+    return `
+      <article class="history-comment-message">
+        <div class="history-comment-head">
+          <strong>${escapeHtml(comment?.author_display_name || "Viewer")}</strong>
+          ${timestamp ? `<time datetime="${escapeAttr(timestamp)}" title="${escapeAttr(formatDateTime(timestamp))}">${escapeHtml(formatLiveChatClockTime(timestamp) || formatDateTime(timestamp))}</time>` : ""}
+          ${badges.map((badge) => `<span class="badge">${escapeHtml(badge)}</span>`).join("")}
+        </div>
+        <p>${escapeHtml(historyCommentText(comment) || "Comment text unavailable")}</p>
+      </article>
+    `;
+  }).join("");
+}
+
+function toggleSettingsHistoryComments(sessionId) {
+  const key = String(sessionId || "");
+  if (!key) return;
+  state.settingsLiveHistory.expandedCommentSessionIds = {
+    ...(state.settingsLiveHistory.expandedCommentSessionIds || {}),
+    [key]: !state.settingsLiveHistory.expandedCommentSessionIds?.[key],
+  };
+  renderSettingsLiveHistory();
+}
+
 function renderSettingsLiveHistory() {
   const table = $("settingsLiveHistoryTable");
   const summary = $("settingsLiveHistorySummary");
@@ -3667,6 +3744,7 @@ function renderSettingsLiveHistory() {
       <span class="badge live">Total 0s</span>
       <span class="badge">0 completed</span>
       <span class="badge warn">0 failed</span>
+      <span class="badge">0 comments</span>
     `;
     table.innerHTML = `<div class="live-history-empty">Select a channel to view live history.</div>`;
     return;
@@ -3681,7 +3759,10 @@ function renderSettingsLiveHistory() {
       if (range.start && started < range.start) return false;
       if (range.end && started > range.end) return false;
       if (!search) return true;
-      const haystack = `${session?.live_title || ""} ${session?.channel_name || ""} ${session?.status || ""}`.toLowerCase();
+      const commentText = historySessionComments(session)
+        .map((comment) => `${comment?.author_display_name || ""} ${historyCommentText(comment)}`)
+        .join(" ");
+      const haystack = `${session?.live_title || ""} ${session?.channel_name || ""} ${session?.status || ""} ${commentText}`.toLowerCase();
       return haystack.includes(search);
     });
 
@@ -3689,11 +3770,13 @@ function renderSettingsLiveHistory() {
   const totalSeconds = sessions.reduce((sum, item) => sum + sessionDurationSeconds(item, nowMs), 0);
   const completed = sessions.filter((session) => settingsHistoryStatus(session).label === "Completed").length;
   const failed = sessions.filter((session) => settingsHistoryStatus(session).label === "Failed").length;
+  const commentTotal = sessions.reduce((sum, session) => sum + historySessionCommentCount(session), 0);
   summary.innerHTML = `
     <span class="badge">${sessions.length} session${sessions.length === 1 ? "" : "s"}</span>
     <span class="badge live">Total ${escapeHtml(durationText(totalSeconds))}</span>
     <span class="badge">${completed} completed</span>
     <span class="badge warn">${failed} failed</span>
+    <span class="badge">${commentTotal} comment${commentTotal === 1 ? "" : "s"}</span>
   `;
 
   if (!sessions.length) {
@@ -3708,22 +3791,38 @@ function renderSettingsLiveHistory() {
     const durationSeconds = sessionDurationSeconds(session, nowMs);
     const title = String(session?.live_title || session?.channel_name || "Untitled live");
     const channelName = String(session?.channel_name || "Unknown channel");
+    const commentCount = historySessionCommentCount(session);
+    const comments = historySessionComments(session);
+    const expanded = Boolean(state.settingsLiveHistory.expandedCommentSessionIds?.[String(session?.id || "")]);
     return `
-      <div class="settings-history-row ${isLive ? "current" : ""}">
-        <div class="settings-history-date">
-          <strong>${escapeHtml(started.date)}</strong>
-          ${started.time ? `<span>${escapeHtml(started.time)}</span>` : ""}
+      <div class="settings-history-group ${expanded ? "expanded" : ""}">
+        <div class="settings-history-row ${isLive ? "current" : ""}">
+          <div class="settings-history-date">
+            <strong>${escapeHtml(started.date)}</strong>
+            ${started.time ? `<span>${escapeHtml(started.time)}</span>` : ""}
+          </div>
+          <div class="settings-history-primary">
+            <strong>${escapeHtml(channelName)}</strong>
+            <span>${escapeHtml(session?.config_name || state.config || "")}</span>
+          </div>
+          <div class="settings-history-primary">
+            <strong>${escapeHtml(title)}</strong>
+            <span>${escapeHtml(isLive ? "Streaming now" : "Stored session")}</span>
+          </div>
+          <div>${durationChip(durationSeconds, isLive)}</div>
+          <div class="settings-history-comments-cell">
+            <button
+              class="pill ghost small"
+              type="button"
+              onclick="toggleSettingsHistoryComments('${escapeJs(session?.id || "")}')"
+              ${comments.length ? "" : "disabled"}
+              aria-expanded="${expanded ? "true" : "false"}"
+            >${escapeHtml(commentCount)} comment${commentCount === 1 ? "" : "s"}</button>
+            <span>${escapeHtml(historyLatestCommentLabel(session))}</span>
+          </div>
+          <span class="badge ${escapeAttr(status.className)} settings-history-status">${escapeHtml(status.label)}</span>
         </div>
-        <div class="settings-history-primary">
-          <strong>${escapeHtml(channelName)}</strong>
-          <span>${escapeHtml(session?.config_name || state.config || "")}</span>
-        </div>
-        <div class="settings-history-primary">
-          <strong>${escapeHtml(title)}</strong>
-          <span>${escapeHtml(isLive ? "Streaming now" : "Stored session")}</span>
-        </div>
-        <div>${durationChip(durationSeconds, isLive)}</div>
-        <span class="badge ${escapeAttr(status.className)} settings-history-status">${escapeHtml(status.label)}</span>
+        ${expanded ? `<div class="settings-history-comments-panel">${renderHistoryCommentMessages(session)}</div>` : ""}
       </div>
     `;
   }).join("");
@@ -3734,6 +3833,7 @@ function renderSettingsLiveHistory() {
       <span>Channel</span>
       <span>Live title</span>
       <span>Duration</span>
+      <span>Comments</span>
       <span>Status</span>
     </div>
     ${rows}
@@ -3745,12 +3845,42 @@ function toggleTaskLog(taskId) {
   renderTasks(state.status?.tasks || [], state.status?.activity_events || []);
 }
 
+function streamLogSessionHeader(session, fallbackName) {
+  const name = String(session?.name || session?.channel_name || fallbackName || "stream");
+  const started = formatSessionDateParts(session?.started_at);
+  const running = Boolean(session?.running || session?.is_active);
+  const rawStatus = String(session?.status || "").trim().toLowerCase();
+  const status = running
+    ? "RUNNING"
+    : rawStatus === "running"
+      ? "LAST KNOWN RUNNING"
+      : rawStatus
+        ? rawStatus.toUpperCase()
+        : session?.returncode !== undefined && session?.returncode !== null
+          ? `EXITED ${session.returncode}`
+          : "SAVED";
+  const parts = [`[${name}] ${status}`];
+  if (session?.pid) parts.push(`pid=${session.pid}`);
+  if (started.date !== "Time unavailable") parts.push(`${started.date} ${started.time}`.trim());
+  if (session?.log_path) parts.push(String(session.log_path));
+  return parts.join(" | ");
+}
+
+function streamLogSessionsForChannel(streams, selectedChannel) {
+  const historyByChannel = state.status?.stream_log_history || {};
+  const saved = Array.isArray(historyByChannel?.[selectedChannel])
+    ? historyByChannel[selectedChannel]
+    : [];
+  if (saved.length) return saved;
+  return Object.values(streams || {})
+    .filter((stream) => selectedChannel && String(stream?.name || "") === selectedChannel);
+}
+
 function renderLogs(streams) {
   const pre = $("streamLogs");
   if (!pre) return;
   const selectedChannel = selectedWorkspaceChannelName();
-  const entries = Object.values(streams || {})
-    .filter((stream) => selectedChannel && String(stream?.name || "") === selectedChannel);
+  const entries = selectedChannel ? streamLogSessionsForChannel(streams, selectedChannel) : [];
   const wasAtBottom = isNearBottom(pre);
   const scrollTop = pre.scrollTop;
   const scrollLeft = pre.scrollLeft;
@@ -3763,8 +3893,10 @@ function renderLogs(streams) {
     return;
   }
   pre.textContent = entries.map((stream) => {
-    const status = stream.recovering ? "RECOVERING" : stream.running ? "RUNNING" : `EXITED ${stream.returncode}`;
-    return `[${stream.name}] ${status} pid=${stream.pid}\n${stream.log_tail || "No log output yet."}`;
+    const header = stream.recovering
+      ? `[${stream.name}] RECOVERING | pid=${stream.pid || "unknown"}`
+      : streamLogSessionHeader(stream, selectedChannel);
+    return `${header}\n${stream.log_tail || "No log output yet."}`;
   }).join("\n\n");
   pre.scrollTop = wasAtBottom ? pre.scrollHeight : scrollTop;
   pre.scrollLeft = scrollLeft;
@@ -4350,8 +4482,10 @@ function normalizeConfigShape() {
     channel.live_profile = {
       ...config.live_profile,
       ...(channel.live_profile || {}),
-      mode: "copy",
     };
+    const mode = String(channel.live_profile.mode || "copy").toLowerCase();
+    channel.live_profile.mode = ["copy", "transcode", "adaptive"].includes(mode) ? mode : "copy";
+    channel.live_profile.adaptive = normalizedAdaptiveLiveProfile(channel.live_profile);
     channel.youtube_account_id = normalizeAccountId(channel.youtube_account_id || "");
     channel.youtube_broadcast_id = String(channel.youtube_broadcast_id || "");
     channel.youtube_stream_id = String(channel.youtube_stream_id || "");
@@ -6755,7 +6889,8 @@ function normalizationCard(channel, index, { variant = "normalize" } = {}) {
       <div class="row wrap">
         <input class="hidden-file" id="${escapeAttr(uploadId)}" type="file" multiple accept="video/*" onchange="uploadRawVideos(${index}, this.files).catch((error) => toast(error.message)); this.value = '';">
         <button class="pill primary" type="button" ${state.rawUploadBusyChannel === channel.name ? "disabled" : ""} onclick="selectRawVideos(${index}, '${escapeJs(uploadId)}').catch((error) => toast(error.message))">${escapeHtml(state.rawUploadBusyChannel === channel.name ? "Adding..." : "Add Videos")}</button>
-        <button class="pill success" type="button" onclick="startSettingsTask('normalize', ${index})">${isYoutubeVariant ? "Encode to Videos" : "Encode"}</button>
+        <button class="pill success" type="button" onclick="startSettingsTask('normalize', ${index})">${isYoutubeVariant ? "Encode Videos" : "Encode"}</button>
+        ${isYoutubeVariant ? `<button class="pill ghost" type="button" onclick="startSettingsTask('renditions', ${index}, { chooseOutputFolder: false })">Encode Lower Res</button>` : ""}
       </div>
       ${task ? taskProgressMarkup(task, index, completedCount) : ""}
       <div class="file-picker">
@@ -6763,7 +6898,7 @@ function normalizationCard(channel, index, { variant = "normalize" } = {}) {
         <div class="meta">If an encoded file name already exists, a new version like <code>-v2</code> is created and a heads-up appears in Activity.</div>
       </div>
       <div>
-        <h3>Encoder Profile</h3>
+        <h3>Source Encode</h3>
         <div class="form-grid">
           ${normalizeInput(index, "width", "Width", normalizeProfile.width ?? 1920, "number")}
           ${normalizeInput(index, "height", "Height", normalizeProfile.height ?? 1080, "number")}
@@ -6787,13 +6922,14 @@ function normalizationCard(channel, index, { variant = "normalize" } = {}) {
         </div>
         <div class="meta" data-normalize-rate-status>${isCbr ? "CBR mode is enabled for this channel." : "VBR mode is enabled for this channel."}</div>
       </div>
+      ${isYoutubeVariant ? adaptiveLadderSection(channel, index) : ""}
   `;
 
   if (isYoutubeVariant) {
     return youtubeCollapsibleCard({
       key: `youtube-encoder-${channel.name || index}`,
       title: "Encoder",
-      helper: "Add source videos and encode them into the Videos card for this channel.",
+      helper: "Prepare videos and control live output encoding for this channel.",
       extraClass: "youtube-encoder-card channel-settings selected-normalize-settings",
       attributes: `data-normalize-card data-index="${index}" data-channel-name="${escapeAttr(channel.name || "")}"`,
       summaryMetaHtml: `<span class="meta">${escapeHtml(channel.name || "No channel selected")}</span>`,
@@ -6814,11 +6950,11 @@ function taskForChannel(channelName) {
   const tasks = state.status?.tasks || [];
   return tasks.find((task) => (
     task.channel === channelName
-    && ["normalize", "validate", "test-stream"].includes(task.name)
+    && ["normalize", "renditions", "validate", "test-stream"].includes(task.name)
     && task.running
   )) || tasks.find((task) => (
     task.channel === channelName
-    && ["normalize", "validate", "test-stream"].includes(task.name)
+    && ["normalize", "renditions", "validate", "test-stream"].includes(task.name)
   ));
 }
 
@@ -6841,7 +6977,11 @@ function completedRawFileSet(channel, task) {
 function taskProgressMarkup(task, index = -1, completedCount = 0) {
   const progress = task.progress || {};
   const percent = Math.max(0, Math.min(100, Number(progress.percent) || 0));
-  const action = task.name === "normalize" ? "Encoding" : task.name === "validate" ? "Validating" : "Testing stream";
+  const action = task.name === "normalize"
+    ? "Encoding"
+    : task.name === "renditions"
+      ? "Encoding lower resolutions"
+      : task.name === "validate" ? "Validating" : "Testing stream";
   const stopped = Boolean(task.stopped_by_user);
   const status = task.running ? action : task.returncode === 0 ? "Finished" : stopped ? "Stopped" : "Failed";
   const total = Number(progress.total) || 0;
@@ -6935,6 +7075,7 @@ async function waitForLiveImportResume() {
 
 function stopTaskLabel(name) {
   if (name === "normalize") return "Stop Encoding";
+  if (name === "renditions") return "Stop Lower Res";
   return `Stop ${name}`;
 }
 
@@ -7529,6 +7670,95 @@ function liveSelect(name, label, value, options, hint = "", onchange = "") {
   `;
 }
 
+function normalizedAdaptiveLiveProfile(profile = {}) {
+  const defaults = defaultLiveProfile();
+  const adaptive = {
+    ...defaults.adaptive,
+    ...((profile && typeof profile.adaptive === "object") ? profile.adaptive : {}),
+  };
+  const defaultVariants = defaults.adaptive.variants;
+  const rawVariants = Array.isArray(adaptive.variants) ? adaptive.variants : defaultVariants;
+  const variants = rawVariants.map((variant, index) => {
+    const fallback = defaultVariants[index] || defaultVariants[defaultVariants.length - 1] || {};
+    const height = Number(variant?.height ?? fallback.height ?? 720);
+    const id = String(variant?.id || `${height || fallback.height || 720}p`).trim();
+    return {
+      ...fallback,
+      ...(variant || {}),
+      id,
+      label: String(variant?.label || fallback.label || id).trim() || id,
+      width: Number(variant?.width ?? fallback.width ?? 1280),
+      height: Number.isFinite(height) ? height : Number(fallback.height || 720),
+      video_bitrate: String(variant?.video_bitrate || variant?.bitrate || fallback.video_bitrate || "3500k"),
+      audio_bitrate: String(variant?.audio_bitrate || fallback.audio_bitrate || profile.audio_bitrate || "128k"),
+      enabled: variant?.enabled !== false,
+    };
+  });
+  const activeIds = new Set(variants.filter((variant) => variant.enabled).map((variant) => variant.id));
+  if (!activeIds.has(String(adaptive.active_variant_id || ""))) {
+    adaptive.active_variant_id = variants.find((variant) => variant.enabled)?.id || variants[0]?.id || "720p";
+  }
+  adaptive.variants = variants;
+  adaptive.auto_switch = adaptive.auto_switch !== false;
+  adaptive.buffer_seconds = Math.min(60, Math.max(10, Number(adaptive.buffer_seconds || 60)));
+  adaptive.hls_time = Math.min(10, Math.max(1, Number(adaptive.hls_time || 2)));
+  return adaptive;
+}
+
+function adaptiveLadderSection(channel, index) {
+  const profile = { ...defaultLiveProfile(), ...(channel.live_profile || {}) };
+  const mode = ["copy", "transcode", "adaptive"].includes(String(profile.mode || "").toLowerCase())
+    ? String(profile.mode || "copy").toLowerCase()
+    : "copy";
+  const adaptive = normalizedAdaptiveLiveProfile(profile);
+  const rows = adaptive.variants.map((variant, variantIndex) => `
+    <div class="adaptive-rung" data-adaptive-rung="${variantIndex}">
+      <label class="adaptive-rung-check" title="Use ${escapeAttr(variant.label)} in adaptive mode">
+        <input type="checkbox" data-adaptive-field="enabled" ${variant.enabled ? "checked" : ""} onchange="syncAdaptiveLadder(${index})">
+        <span>${escapeHtml(variant.label)}</span>
+      </label>
+      <input type="number" min="16" step="2" data-adaptive-field="width" value="${escapeAttr(String(variant.width))}" aria-label="${escapeAttr(variant.label)} width" onchange="syncAdaptiveLadder(${index})">
+      <input type="number" min="16" step="2" data-adaptive-field="height" value="${escapeAttr(String(variant.height))}" aria-label="${escapeAttr(variant.label)} height" onchange="syncAdaptiveLadder(${index})">
+      <input type="text" data-adaptive-field="video_bitrate" value="${escapeAttr(variant.video_bitrate)}" aria-label="${escapeAttr(variant.label)} video bitrate" onchange="syncAdaptiveLadder(${index})">
+      <input type="text" data-adaptive-field="audio_bitrate" value="${escapeAttr(variant.audio_bitrate)}" aria-label="${escapeAttr(variant.label)} audio bitrate" onchange="syncAdaptiveLadder(${index})">
+    </div>
+  `).join("");
+  return `
+    <section class="encoder-live-output" data-index="${index}" data-channel-name="${escapeAttr(channel.name || "")}" data-adaptive-card>
+      <div class="encoder-subsection-head">
+        <div>
+          <h3>Live Output</h3>
+          <p class="helper">Multiple live resolutions, one-minute backup buffer, and automatic recovery switching.</p>
+        </div>
+        <span class="badge ${mode === "adaptive" ? "live" : ""}">${escapeHtml(mode === "adaptive" ? "Adaptive" : mode === "transcode" ? "Transcode" : "Copy")}</span>
+      </div>
+      <div class="adaptive-topline">
+        <label>
+          Mode
+          <select data-live-profile-field="mode" onchange="syncLiveMode(${index}, this.value)">
+            ${["copy", "transcode", "adaptive"].map((option) => `<option value="${option}" ${option === mode ? "selected" : ""}>${escapeHtml(option)}</option>`).join("")}
+          </select>
+        </label>
+        <label class="switch adaptive-switch">
+          <input type="checkbox" data-adaptive-setting="auto_switch" ${adaptive.auto_switch ? "checked" : ""} onchange="syncAdaptiveLadder(${index})">
+          <span>Auto switch</span>
+        </label>
+        <label>
+          Buffer
+          <input type="number" min="10" max="60" step="5" data-adaptive-setting="buffer_seconds" value="${escapeAttr(String(adaptive.buffer_seconds))}" onchange="syncAdaptiveLadder(${index})">
+        </label>
+      </div>
+      <div class="adaptive-ladder-head" aria-hidden="true">
+        <span>Rung</span><span>W</span><span>H</span><span>Video</span><span>Audio</span>
+      </div>
+      <div class="adaptive-ladder" data-adaptive-ladder>
+        ${rows}
+      </div>
+      <div class="meta" data-live-mode-status>${mode === "adaptive" ? "Adaptive mode is enabled for this channel." : mode === "transcode" ? "Transcode mode is enabled for this channel." : "Copy mode is enabled for this channel."}</div>
+    </section>
+  `;
+}
+
 function checkboxInput(name, label, checked) {
   return `
     <label class="switch">
@@ -7908,18 +8138,22 @@ function syncLiveVideoOrder(index, orderedItems = null) {
 }
 
 function syncLiveMode(index, modeValue) {
-  const card = document.querySelector(`#channelSettings [data-index="${index}"]`);
+  const card = document.querySelector(`#channelSettings [data-adaptive-card][data-index="${index}"]`)
+    || document.querySelector(`#channelSettings [data-index="${index}"]`);
   if (!card) return;
-  const mode = String(modeValue || "copy").toLowerCase() === "transcode" ? "transcode" : "copy";
+  const rawMode = String(modeValue || "copy").toLowerCase();
+  const mode = ["copy", "transcode", "adaptive"].includes(rawMode) ? rawMode : "copy";
 
   card.querySelectorAll("[data-live-mode-panel]").forEach((panel) => {
     panel.classList.toggle("active", panel.dataset.liveModePanel === mode);
   });
   const modeStatus = card.querySelector("[data-live-mode-status]");
   if (modeStatus) {
-    modeStatus.textContent = mode === "transcode"
-      ? "Transcode mode is enabled for this channel."
-      : "Copy mode is enabled for this channel.";
+    modeStatus.textContent = mode === "adaptive"
+      ? "Adaptive mode is enabled for this channel."
+      : mode === "transcode"
+        ? "Transcode mode is enabled for this channel."
+        : "Copy mode is enabled for this channel.";
   }
 
   const config = state.configData || defaultConfigData();
@@ -7932,6 +8166,48 @@ function syncLiveMode(index, modeValue) {
     state.configData = config;
     $("configEditor").value = JSON.stringify(config, null, 2) + "\n";
   }
+}
+
+function collectAdaptiveLadderFromCard(card, existingProfile = {}) {
+  const adaptive = normalizedAdaptiveLiveProfile(existingProfile);
+  card?.querySelectorAll("[data-adaptive-setting]").forEach((input) => {
+    const field = input.dataset.adaptiveSetting;
+    adaptive[field] = input.type === "checkbox" ? input.checked : coerceValue(input.value, input.type);
+  });
+  const variants = [];
+  card?.querySelectorAll("[data-adaptive-rung]").forEach((row, index) => {
+    const existing = adaptive.variants[index] || {};
+    const variant = { ...existing };
+    row.querySelectorAll("[data-adaptive-field]").forEach((input) => {
+      const field = input.dataset.adaptiveField;
+      variant[field] = input.type === "checkbox" ? input.checked : coerceValue(input.value, input.type);
+    });
+    const height = Number(variant.height || existing.height || 720);
+    variant.id = String(existing.id || `${height}p`);
+    variant.label = String(existing.label || `${height}p`);
+    variants.push(variant);
+  });
+  if (variants.length) adaptive.variants = variants;
+  const enabled = adaptive.variants.filter((variant) => variant.enabled !== false);
+  if (!enabled.some((variant) => variant.id === adaptive.active_variant_id)) {
+    adaptive.active_variant_id = enabled[0]?.id || adaptive.variants[0]?.id || "720p";
+  }
+  adaptive.buffer_seconds = Math.min(60, Math.max(10, Number(adaptive.buffer_seconds || 60)));
+  return adaptive;
+}
+
+function syncAdaptiveLadder(index) {
+  const config = state.configData || defaultConfigData();
+  if (!config.channels?.[index]) return;
+  const card = document.querySelector(`#channelSettings [data-adaptive-card][data-index="${index}"]`);
+  const liveProfile = {
+    ...defaultLiveProfile(),
+    ...(config.channels[index].live_profile || {}),
+  };
+  liveProfile.adaptive = collectAdaptiveLadderFromCard(card, liveProfile);
+  config.channels[index].live_profile = liveProfile;
+  state.configData = config;
+  syncConfigEditor();
 }
 
 function selectAllLiveFiles(index) {
@@ -8376,7 +8652,7 @@ function collectSettingsData() {
     live_profile: {
       ...defaultLiveProfile(),
       ...(existingChannel.live_profile || {}),
-      mode: "copy",
+      adaptive: normalizedAdaptiveLiveProfile(existingChannel.live_profile || {}),
     },
     normalize_profile: {
       ...(existingChannel.normalize_profile || {}),
@@ -8400,11 +8676,20 @@ function collectSettingsData() {
       }
     });
 
-    channel.live_profile = { ...defaultLiveProfile(), ...(existingChannel.live_profile || {}), mode: "copy" };
+    channel.live_profile = {
+      ...defaultLiveProfile(),
+      ...(existingChannel.live_profile || {}),
+      adaptive: normalizedAdaptiveLiveProfile(existingChannel.live_profile || {}),
+    };
     card.querySelectorAll("[data-live-profile-field]").forEach((input) => {
       channel.live_profile[input.dataset.liveProfileField] = coerceValue(input.value, input.type);
     });
-    channel.live_profile.mode = "copy";
+    const mode = String(channel.live_profile.mode || "copy").toLowerCase();
+    channel.live_profile.mode = ["copy", "transcode", "adaptive"].includes(mode) ? mode : "copy";
+    const adaptiveCard = document.querySelector(`#channelSettings [data-adaptive-card][data-index="${index}"]`);
+    if (adaptiveCard) {
+      channel.live_profile.adaptive = collectAdaptiveLadderFromCard(adaptiveCard, channel.live_profile);
+    }
 
     const normalizeCard = normalizeCardForIndex(index, card);
     const checkedRawFiles = normalizeCard
@@ -8566,6 +8851,8 @@ function settingsAutosaveTargetChanged(target) {
     "[data-normalize-index][data-normalize-field]",
     "[data-channel-field]",
     "[data-live-profile-field]",
+    "[data-adaptive-setting]",
+    "[data-adaptive-field]",
     "[data-youtube-channel-index][data-youtube-channel-field]",
     "[data-raw-file]",
     "[data-live-file]",

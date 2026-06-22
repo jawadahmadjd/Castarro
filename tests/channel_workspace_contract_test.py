@@ -597,6 +597,50 @@ def assert_history_and_activity_are_channel_specific() -> None:
             app_db.DB_PATH = original_db_path
 
 
+def assert_stream_log_history_keeps_three_sessions_per_channel() -> None:
+    original_root = app_db.ROOT
+    original_db_path = app_db.DB_PATH
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+        temp_root = Path(temp_dir)
+        app_db.ROOT = temp_root
+        app_db.DB_PATH = temp_root / "stream_control.db"
+        try:
+            app_db.init_db()
+            logs_dir = temp_root / "logs"
+            logs_dir.mkdir(parents=True, exist_ok=True)
+            for index in range(4):
+                log_path = logs_dir / f"A-{index}.log"
+                log_path.write_text(f"session {index}\n", encoding="utf-8")
+                app_db.record_stream_start(
+                    "config.ready.json",
+                    "A",
+                    100 + index,
+                    f"ffmpeg-a-{index}",
+                    str(log_path),
+                    f"A live {index}",
+                )
+                app_db.record_stream_stop("config.ready.json", "A", 0, index)
+            old_log_path = logs_dir / "B-0.log"
+            old_log_path.write_text("session b\n", encoding="utf-8")
+            app_db.record_stream_start("config.ready.json", "B", 200, "ffmpeg-b", str(old_log_path), "B live")
+
+            history = web_ui.stream_log_history_for_channels(
+                "config.ready.json",
+                [{"name": "A"}, {"name": "B"}],
+                set(),
+            )
+
+            assert len(history["A"]) == 3
+            assert [item["pid"] for item in history["A"]] == [103, 102, 101]
+            assert "session 3" in history["A"][0]["log_tail"]
+            assert all(item["log_path"] for item in history["A"])
+            assert len(history["B"]) == 1
+            assert "session b" in history["B"][0]["log_tail"]
+        finally:
+            app_db.ROOT = original_root
+            app_db.DB_PATH = original_db_path
+
+
 def assert_live_chat_routes_to_linked_channel_account() -> None:
     config = make_config()
     config["channels"][1]["youtube_broadcast_id"] = "broadcast-b"
@@ -607,6 +651,7 @@ def assert_live_chat_routes_to_linked_channel_account() -> None:
     original_profile = web_ui.youtube_service.connected_account_profile
     original_broadcast = web_ui.youtube_service.broadcast_chat_details_by_id
     original_messages = web_ui.youtube_service.list_live_chat_messages
+    original_record_messages = app_db.record_live_chat_messages
 
     def fake_load(_config_name: str):
         return copy.deepcopy(config), None
@@ -634,11 +679,15 @@ def assert_live_chat_routes_to_linked_channel_account() -> None:
             "offline_at": "",
         }
 
+    def fake_record_messages(config_name: str, channel_name: str, broadcast_id: str, live_chat_id: str, messages: list):
+        captured["recorded_chat"] = (config_name, channel_name, broadcast_id, live_chat_id, copy.deepcopy(messages))
+
     web_ui.load_config_or_none = fake_load
     web_ui.youtube_service.valid_access_token = fake_valid_access_token
     web_ui.youtube_service.connected_account_profile = fake_profile
     web_ui.youtube_service.broadcast_chat_details_by_id = fake_broadcast
     web_ui.youtube_service.list_live_chat_messages = fake_messages
+    app_db.record_live_chat_messages = fake_record_messages
     try:
         payload = web_ui.youtube_live_chat("config.ready.json", "B", "page-b")
     finally:
@@ -647,6 +696,7 @@ def assert_live_chat_routes_to_linked_channel_account() -> None:
         web_ui.youtube_service.connected_account_profile = original_profile
         web_ui.youtube_service.broadcast_chat_details_by_id = original_broadcast
         web_ui.youtube_service.list_live_chat_messages = original_messages
+        app_db.record_live_chat_messages = original_record_messages
 
     assert payload["account_id"] == "acct-b"
     assert payload["broadcast_id"] == "broadcast-b"
@@ -657,6 +707,8 @@ def assert_live_chat_routes_to_linked_channel_account() -> None:
     assert captured["page_token"] == "page-b"
     assert payload["messages"][0]["received_at"]
     assert "T" in payload["messages"][0]["received_at"]
+    assert captured["recorded_chat"][0:4] == ("config.ready.json", "B", "broadcast-b", "chat-b")
+    assert captured["recorded_chat"][4][0]["received_at"]
 
 
 def assert_live_chat_auto_links_active_broadcast() -> None:
@@ -670,6 +722,7 @@ def assert_live_chat_auto_links_active_broadcast() -> None:
     original_list_broadcasts = web_ui.youtube_service.list_broadcasts_by_status
     original_messages = web_ui.youtube_service.list_live_chat_messages
     original_record_event = app_db.record_event
+    original_record_messages = app_db.record_live_chat_messages
 
     def fake_load(_config_name: str):
         return working, None
@@ -708,6 +761,9 @@ def assert_live_chat_auto_links_active_broadcast() -> None:
         captured["event"] = (event_type, config_name, channel_name, copy.deepcopy(details or {}))
         return 1
 
+    def fake_record_messages(config_name: str, channel_name: str, broadcast_id: str, live_chat_id: str, messages: list):
+        captured["recorded_chat"] = (config_name, channel_name, broadcast_id, live_chat_id, copy.deepcopy(messages))
+
     web_ui.load_config_or_none = fake_load
     web_ui.save_config = fake_save
     web_ui.youtube_service.valid_access_token = fake_valid_access_token
@@ -715,6 +771,7 @@ def assert_live_chat_auto_links_active_broadcast() -> None:
     web_ui.youtube_service.list_broadcasts_by_status = fake_list_broadcasts
     web_ui.youtube_service.list_live_chat_messages = fake_messages
     app_db.record_event = fake_record_event
+    app_db.record_live_chat_messages = fake_record_messages
     try:
         payload = web_ui.youtube_live_chat("config.ready.json", "B")
     finally:
@@ -725,6 +782,7 @@ def assert_live_chat_auto_links_active_broadcast() -> None:
         web_ui.youtube_service.list_broadcasts_by_status = original_list_broadcasts
         web_ui.youtube_service.list_live_chat_messages = original_messages
         app_db.record_event = original_record_event
+        app_db.record_live_chat_messages = original_record_messages
 
     saved_channel = captured["saved"]["channels"][1]
     assert payload["account_id"] == "acct-b"
@@ -738,6 +796,7 @@ def assert_live_chat_auto_links_active_broadcast() -> None:
     assert captured["messages_token"] == "token-b"
     assert captured["live_chat_id"] == "chat-active-b"
     assert captured["event"][0] == "youtube_broadcast_auto_linked"
+    assert captured["recorded_chat"][0:4] == ("config.ready.json", "B", "active-broadcast-b", "chat-active-b")
 
 
 def assert_live_chat_reply_posts_to_linked_channel_account() -> None:
@@ -750,6 +809,7 @@ def assert_live_chat_reply_posts_to_linked_channel_account() -> None:
     original_profile = web_ui.youtube_service.connected_account_profile
     original_broadcast = web_ui.youtube_service.broadcast_chat_details_by_id
     original_send = web_ui.youtube_service.send_live_chat_message
+    original_record_messages = app_db.record_live_chat_messages
 
     def fake_load(_config_name: str):
         return copy.deepcopy(config), None
@@ -770,11 +830,15 @@ def assert_live_chat_reply_posts_to_linked_channel_account() -> None:
         captured["message_text"] = message_text
         return {"id": "sent-1", "display_message": message_text}
 
+    def fake_record_messages(config_name: str, channel_name: str, broadcast_id: str, live_chat_id: str, messages: list):
+        captured["recorded_chat"] = (config_name, channel_name, broadcast_id, live_chat_id, copy.deepcopy(messages))
+
     web_ui.load_config_or_none = fake_load
     web_ui.youtube_service.valid_access_token = fake_valid_access_token
     web_ui.youtube_service.connected_account_profile = fake_profile
     web_ui.youtube_service.broadcast_chat_details_by_id = fake_broadcast
     web_ui.youtube_service.send_live_chat_message = fake_send
+    app_db.record_live_chat_messages = fake_record_messages
     try:
         payload = web_ui.send_youtube_live_chat(
             "config.ready.json",
@@ -786,6 +850,7 @@ def assert_live_chat_reply_posts_to_linked_channel_account() -> None:
         web_ui.youtube_service.connected_account_profile = original_profile
         web_ui.youtube_service.broadcast_chat_details_by_id = original_broadcast
         web_ui.youtube_service.send_live_chat_message = original_send
+        app_db.record_live_chat_messages = original_record_messages
 
     assert payload["account_id"] == "acct-c"
     assert payload["broadcast_id"] == "broadcast-c"
@@ -795,6 +860,70 @@ def assert_live_chat_reply_posts_to_linked_channel_account() -> None:
     assert captured["message_text"] == "Thanks for watching"
     assert payload["message"]["sent_at"]
     assert "T" in payload["message"]["sent_at"]
+    assert captured["recorded_chat"][0:4] == ("config.ready.json", "C", "broadcast-c", "chat-c")
+    assert captured["recorded_chat"][4][0]["sent_at"]
+
+
+def assert_live_chat_messages_are_saved_with_stream_history() -> None:
+    original_root = app_db.ROOT
+    original_db_path = app_db.DB_PATH
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+        temp_root = Path(temp_dir)
+        app_db.ROOT = temp_root
+        app_db.DB_PATH = temp_root / "stream_control.db"
+        try:
+            session_id = app_db.record_stream_start(
+                "config.ready.json",
+                "B",
+                202,
+                "ffmpeg-b",
+                "logs/B.log",
+                "B Live",
+                "broadcast-b",
+            )
+            app_db.record_live_chat_messages(
+                "config.ready.json",
+                "B",
+                "broadcast-b",
+                "chat-b",
+                [
+                    {
+                        "id": "msg-1",
+                        "author_display_name": "Viewer One",
+                        "display_message": "Amen from Lahore",
+                        "published_at": "2026-06-22T10:00:00+05:00",
+                    },
+                    {
+                        "id": "msg-2",
+                        "author_display_name": "Viewer Two",
+                        "display_message": "Audio is clear",
+                        "received_at": "2026-06-22T10:00:05+05:00",
+                    },
+                ],
+            )
+            app_db.record_live_chat_messages(
+                "config.ready.json",
+                "B",
+                "broadcast-b",
+                "chat-b",
+                [
+                    {
+                        "id": "msg-1",
+                        "author_display_name": "Viewer One",
+                        "display_message": "Amen from Lahore",
+                        "published_at": "2026-06-22T10:00:00+05:00",
+                    }
+                ],
+            )
+            sessions = app_db.stream_sessions("config.ready.json", channel_name="B")
+            assert sessions[0]["id"] == session_id
+            assert sessions[0]["youtube_broadcast_id"] == "broadcast-b"
+            assert sessions[0]["comment_count"] == 2
+            assert [item["id"] for item in sessions[0]["recent_comments"]] == ["msg-2", "msg-1"]
+            assert sessions[0]["recent_comments"][0]["display_message"] == "Audio is clear"
+        finally:
+            app_db.ROOT = original_root
+            app_db.DB_PATH = original_db_path
 
 
 def main() -> int:
@@ -812,9 +941,11 @@ def main() -> int:
     assert_auth_start_uses_runtime_desktop_redirect_uri()
     assert_oauth_callback_exchanges_with_stored_redirect_uri()
     assert_history_and_activity_are_channel_specific()
+    assert_stream_log_history_keeps_three_sessions_per_channel()
     assert_live_chat_routes_to_linked_channel_account()
     assert_live_chat_auto_links_active_broadcast()
     assert_live_chat_reply_posts_to_linked_channel_account()
+    assert_live_chat_messages_are_saved_with_stream_history()
     print("channel_workspace_contract_test: PASS")
     return 0
 

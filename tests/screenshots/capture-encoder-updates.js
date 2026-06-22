@@ -131,6 +131,36 @@ function makeConfig() {
         youtube_stream_id: "",
         loop: true,
         restart_on_exit: true,
+        live_profile: {
+          mode: "adaptive",
+          video_encoder: "libx264",
+          preset: "veryfast",
+          profile: "high",
+          pixel_format: "yuv420p",
+          width: 1920,
+          height: 1080,
+          fps: 30,
+          video_bitrate: "6800k",
+          minrate: "6800k",
+          maxrate: "6800k",
+          bufsize: "13600k",
+          gop_seconds: 2,
+          audio_codec: "aac",
+          audio_bitrate: "128k",
+          audio_sample_rate: 44100,
+          audio_channels: 2,
+          adaptive: {
+            auto_switch: true,
+            buffer_seconds: 60,
+            hls_time: 2,
+            active_variant_id: "1080p",
+            variants: [
+              { id: "1080p", label: "1080p", width: 1920, height: 1080, video_bitrate: "6800k", audio_bitrate: "128k", enabled: true },
+              { id: "720p", label: "720p", width: 1280, height: 720, video_bitrate: "3500k", audio_bitrate: "128k", enabled: true },
+              { id: "480p", label: "480p", width: 854, height: 480, video_bitrate: "1800k", audio_bitrate: "96k", enabled: true },
+            ],
+          },
+        },
       },
     ],
   };
@@ -181,6 +211,21 @@ async function stopServer(child) {
   child.kill("SIGTERM");
 }
 
+async function removeTempRoot(tempRoot) {
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    try {
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      if (attempt === 9) {
+        console.warn(`Temp cleanup skipped for ${tempRoot}: ${error.message}`);
+        return;
+      }
+      await wait(800);
+    }
+  }
+}
+
 async function run() {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "castarro-encoder-ui-"));
   writeFixtureData(tempRoot);
@@ -196,58 +241,36 @@ async function run() {
     const page = await browser.newPage({ viewport: { width: 920, height: 720 } });
     await page.goto(URL, { waitUntil: "networkidle" });
     await page.waitForSelector("#channelWorkspaceRail:not(.hidden)");
-    await page.locator("#railOpenEncoder").click();
-    await page.waitForSelector("#settingsNormalizeView.active");
-    await page.waitForSelector("#normalizationChannels .selected-normalize-settings");
-
-    assert.equal(await page.getByText("Video encoder is the processing engine").count(), 0);
-    assert.equal(await page.getByText("CBR Controls").count(), 0);
-    await page.getByText("VBR Controls").waitFor();
-    assert.equal(await page.locator(".file-complete-icon").count(), 0);
-    assert.equal(await page.locator(".file-remove-button").count(), 3);
-    await page.screenshot({ path: path.join(OUT_DIR, "encoder-updates.png"), fullPage: true });
-
-    await page.locator(".file-remove-button").first().click();
-    await page.waitForFunction(() => (
-      document.querySelector("#normalizationChannels .selected-normalize-settings .badge")?.textContent?.includes("2 selected")
-    ));
-    assert.equal(await page.locator(".file-remove-button").count(), 2);
-
     await page.evaluate(() => {
-      state.status.tasks.unshift({
-        id: "stopped-normalize-fixture",
-        name: "normalize",
-        channel: "Encoder Test",
-        command: "python normalize_media.py",
-        running: false,
-        returncode: 1,
-        stopped_by_user: true,
-        started_at: Date.now() / 1000,
-        finished_at: Date.now() / 1000,
-        lines: ["TASK channel=Encoder Test total=3", "FILE 2/3 encode video-02.mp4 -> 0002-video-02.mp4", "out_time_us=462866667", "Stop requested."],
-        progress: {
-          action: "normalize",
-          channel: "Encoder Test",
-          percent: 69,
-          file_percent: 69,
-          current: 2,
-          total: 3,
-          status: "failed",
-          message: "out_time_us=462866667",
-        },
-      });
-      renderSettingsForms();
+      applyLegacyTabView("settings");
+      state.settingsTab = "youtube";
+      state.workspace.selectedChannelName = "Encoder Test";
+      state.youtubeExpandedCards = { ...(state.youtubeExpandedCards || {}), "youtube-encoder-Encoder Test": true };
+      applySettingsSection("youtube");
+      renderYoutubeSettingsPanel(state.configData || defaultConfigData());
     });
-    await page.locator(".progress-head span").filter({ hasText: /^Stopped$/ }).waitFor();
-    await page.getByRole("button", { name: "Resume" }).waitFor();
-    assert.equal(await page.locator(".progress-head span").filter({ hasText: /^Failed$/ }).count(), 0);
-    assert.equal(await page.locator(".progress-card").getByText("out_time_us=462866667").count(), 0);
-    await page.screenshot({ path: path.join(OUT_DIR, "encoder-stopped-resume.png"), fullPage: true });
+    await page.waitForSelector("#settingsYoutubeView.active");
+    const encoderCard = page.locator(".youtube-encoder-card").first();
+    await encoderCard.waitFor();
+    await page.waitForSelector(".youtube-encoder-card[open] [data-adaptive-card] .adaptive-rung");
+    assert.equal(await page.locator(".youtube-encoder-card [data-adaptive-card] .adaptive-rung").count(), 3);
+    assert.equal(await page.locator(".youtube-encoder-card [data-adaptive-card]").getByText("Auto switch").count(), 1);
+    assert.equal(await page.locator('.youtube-encoder-card [data-adaptive-card] input[value="6800k"]').count(), 1);
+    await page.screenshot({ path: path.join(OUT_DIR, "encoder-card-adaptive-ladder.png"), fullPage: true });
+    await page.setViewportSize({ width: 390, height: 820 });
+    await page.evaluate(() => {
+      state.workspace.selectedChannelName = "Encoder Test";
+      state.youtubeExpandedCards = { ...(state.youtubeExpandedCards || {}), "youtube-encoder-Encoder Test": true };
+      renderYoutubeSettingsPanel(state.configData || defaultConfigData());
+    });
+    await page.waitForSelector(".youtube-encoder-card[open] [data-adaptive-card] .adaptive-rung");
+    assert.equal(await page.locator('.youtube-encoder-card [data-adaptive-card] select[data-live-profile-field="mode"]').inputValue(), "adaptive");
+    await page.screenshot({ path: path.join(OUT_DIR, "encoder-card-adaptive-ladder-mobile.png"), fullPage: true });
     await page.close();
   } finally {
     await browser.close().catch(() => {});
     await stopServer(server);
-    fs.rmSync(tempRoot, { recursive: true, force: true });
+    await removeTempRoot(tempRoot);
   }
 
   if (server.exitCode && server.exitCode !== 0) {

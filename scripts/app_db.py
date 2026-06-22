@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -133,6 +134,8 @@ def init_db() -> None:
               config_name TEXT NOT NULL,
               channel_name TEXT NOT NULL,
               live_title TEXT,
+              youtube_broadcast_id TEXT,
+              live_chat_id TEXT,
               pid INTEGER,
               command TEXT NOT NULL,
               log_path TEXT,
@@ -141,6 +144,32 @@ def init_db() -> None:
               transferred_bytes INTEGER NOT NULL DEFAULT 0,
               started_at TEXT NOT NULL,
               stopped_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS live_chat_messages (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              config_name TEXT NOT NULL,
+              channel_name TEXT NOT NULL,
+              stream_session_id INTEGER,
+              youtube_broadcast_id TEXT NOT NULL,
+              live_chat_id TEXT NOT NULL,
+              youtube_message_id TEXT NOT NULL,
+              author_display_name TEXT,
+              author_profile_image_url TEXT,
+              display_message TEXT,
+              message_text TEXT,
+              published_at TEXT,
+              received_at TEXT,
+              sent_at TEXT,
+              is_chat_owner INTEGER NOT NULL DEFAULT 0,
+              is_chat_moderator INTEGER NOT NULL DEFAULT 0,
+              is_chat_sponsor INTEGER NOT NULL DEFAULT 0,
+              is_verified INTEGER NOT NULL DEFAULT 0,
+              raw_json TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              FOREIGN KEY(stream_session_id) REFERENCES stream_sessions(id) ON DELETE SET NULL,
+              UNIQUE(config_name, channel_name, youtube_broadcast_id, youtube_message_id)
             );
 
             CREATE TABLE IF NOT EXISTS logs (
@@ -173,6 +202,10 @@ def init_db() -> None:
         }
         if "live_title" not in columns:
             db.execute("ALTER TABLE stream_sessions ADD COLUMN live_title TEXT")
+        if "youtube_broadcast_id" not in columns:
+            db.execute("ALTER TABLE stream_sessions ADD COLUMN youtube_broadcast_id TEXT")
+        if "live_chat_id" not in columns:
+            db.execute("ALTER TABLE stream_sessions ADD COLUMN live_chat_id TEXT")
         if "transferred_bytes" not in columns:
             db.execute("ALTER TABLE stream_sessions ADD COLUMN transferred_bytes INTEGER NOT NULL DEFAULT 0")
         channel_columns = {
@@ -583,15 +616,30 @@ def record_stream_start(
     command: str,
     log_path: str,
     live_title: str | None = None,
+    youtube_broadcast_id: str | None = None,
+    live_chat_id: str | None = None,
 ) -> int:
     init_db()
     with connect() as db:
         cursor = db.execute(
             """
-            INSERT INTO stream_sessions(config_name, channel_name, live_title, pid, command, log_path, status, started_at)
-            VALUES (?, ?, ?, ?, ?, ?, 'running', ?)
+            INSERT INTO stream_sessions(
+              config_name, channel_name, live_title, youtube_broadcast_id, live_chat_id,
+              pid, command, log_path, status, started_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running', ?)
             """,
-            (config_name, channel_name, live_title, pid, command, log_path, now()),
+            (
+                config_name,
+                channel_name,
+                live_title,
+                str(youtube_broadcast_id or "").strip() or None,
+                str(live_chat_id or "").strip() or None,
+                pid,
+                command,
+                log_path,
+                now(),
+            ),
         )
         db.execute(
             """
@@ -601,6 +649,153 @@ def record_stream_start(
             (config_name, channel_name, log_path, now()),
         )
         return int(cursor.lastrowid)
+
+
+def live_chat_message_key(message: dict[str, Any], live_chat_id: str) -> str:
+    explicit_id = str(message.get("id") or message.get("youtube_message_id") or "").strip()
+    if explicit_id:
+        return explicit_id
+    identity = {
+        "live_chat_id": live_chat_id,
+        "author": str(message.get("author_display_name") or ""),
+        "text": str(message.get("display_message") or message.get("message_text") or ""),
+        "time": str(message.get("published_at") or message.get("sent_at") or message.get("received_at") or ""),
+    }
+    digest = hashlib.sha256(json.dumps(identity, sort_keys=True).encode("utf-8")).hexdigest()
+    return f"generated-{digest[:24]}"
+
+
+def live_chat_message_time(message: dict[str, Any]) -> str:
+    return str(message.get("published_at") or message.get("sent_at") or message.get("received_at") or "")
+
+
+def find_live_chat_stream_session_id(
+    db: sqlite3.Connection,
+    config_name: str,
+    channel_name: str,
+    youtube_broadcast_id: str,
+) -> int | None:
+    params: list[Any] = [config_name, channel_name]
+    broadcast_clause = ""
+    if youtube_broadcast_id:
+        broadcast_clause = "AND (youtube_broadcast_id = ? OR youtube_broadcast_id IS NULL OR youtube_broadcast_id = '')"
+        params.append(youtube_broadcast_id)
+    row = db.execute(
+        f"""
+        SELECT id
+        FROM stream_sessions
+        WHERE config_name = ?
+          AND channel_name = ?
+          AND status = 'running'
+          {broadcast_clause}
+        ORDER BY datetime(started_at) DESC, id DESC
+        LIMIT 1
+        """,
+        params,
+    ).fetchone()
+    if row:
+        session_id = int(row["id"])
+        if youtube_broadcast_id:
+            db.execute(
+                """
+                UPDATE stream_sessions
+                SET youtube_broadcast_id = COALESCE(NULLIF(youtube_broadcast_id, ''), ?)
+                WHERE id = ?
+                """,
+                (youtube_broadcast_id, session_id),
+            )
+        return session_id
+
+    if not youtube_broadcast_id:
+        return None
+    row = db.execute(
+        """
+        SELECT id
+        FROM stream_sessions
+        WHERE config_name = ?
+          AND channel_name = ?
+          AND youtube_broadcast_id = ?
+        ORDER BY datetime(started_at) DESC, id DESC
+        LIMIT 1
+        """,
+        (config_name, channel_name, youtube_broadcast_id),
+    ).fetchone()
+    return int(row["id"]) if row else None
+
+
+def record_live_chat_messages(
+    config_name: str,
+    channel_name: str,
+    youtube_broadcast_id: str,
+    live_chat_id: str,
+    messages: list[dict[str, Any]],
+) -> None:
+    if not messages:
+        return
+    init_db()
+    broadcast_id = str(youtube_broadcast_id or "").strip()
+    chat_id = str(live_chat_id or "").strip()
+    if not broadcast_id or not chat_id:
+        return
+    timestamp = now()
+    with connect() as db:
+        session_id = find_live_chat_stream_session_id(db, config_name, channel_name, broadcast_id)
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            message_id = live_chat_message_key(message, chat_id)
+            display_message = str(message.get("display_message") or "")
+            message_text = str(message.get("message_text") or display_message or "")
+            db.execute(
+                """
+                INSERT INTO live_chat_messages(
+                  config_name, channel_name, stream_session_id, youtube_broadcast_id, live_chat_id,
+                  youtube_message_id, author_display_name, author_profile_image_url, display_message,
+                  message_text, published_at, received_at, sent_at, is_chat_owner, is_chat_moderator,
+                  is_chat_sponsor, is_verified, raw_json, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(config_name, channel_name, youtube_broadcast_id, youtube_message_id)
+                DO UPDATE SET
+                  stream_session_id = COALESCE(live_chat_messages.stream_session_id, excluded.stream_session_id),
+                  live_chat_id = excluded.live_chat_id,
+                  author_display_name = excluded.author_display_name,
+                  author_profile_image_url = excluded.author_profile_image_url,
+                  display_message = excluded.display_message,
+                  message_text = excluded.message_text,
+                  published_at = COALESCE(NULLIF(excluded.published_at, ''), live_chat_messages.published_at),
+                  received_at = COALESCE(NULLIF(excluded.received_at, ''), live_chat_messages.received_at),
+                  sent_at = COALESCE(NULLIF(excluded.sent_at, ''), live_chat_messages.sent_at),
+                  is_chat_owner = excluded.is_chat_owner,
+                  is_chat_moderator = excluded.is_chat_moderator,
+                  is_chat_sponsor = excluded.is_chat_sponsor,
+                  is_verified = excluded.is_verified,
+                  raw_json = excluded.raw_json,
+                  updated_at = excluded.updated_at
+                """,
+                (
+                    config_name,
+                    channel_name,
+                    session_id,
+                    broadcast_id,
+                    chat_id,
+                    message_id,
+                    str(message.get("author_display_name") or ""),
+                    str(message.get("author_profile_image_url") or ""),
+                    display_message,
+                    message_text,
+                    str(message.get("published_at") or ""),
+                    str(message.get("received_at") or ""),
+                    str(message.get("sent_at") or ""),
+                    1 if message.get("is_chat_owner") else 0,
+                    1 if message.get("is_chat_moderator") else 0,
+                    1 if message.get("is_chat_sponsor") else 0,
+                    1 if message.get("is_verified") else 0,
+                    json.dumps(message, sort_keys=True),
+                    timestamp,
+                    timestamp,
+                ),
+            )
 
 
 def record_stream_stop(
@@ -648,6 +843,69 @@ def stream_transfer_today_bytes(config_name: str | None = None) -> int:
     return int(row["total"] or 0) if row else 0
 
 
+def live_chat_messages_for_session(db: sqlite3.Connection, session: dict[str, Any], limit: int = 4) -> dict[str, Any]:
+    session_id = int(session.get("id") or 0)
+    broadcast_id = str(session.get("youtube_broadcast_id") or "").strip()
+    where = ["config_name = ?", "channel_name = ?"]
+    params: list[Any] = [session.get("config_name"), session.get("channel_name")]
+    if broadcast_id:
+        where.append("(stream_session_id = ? OR youtube_broadcast_id = ?)")
+        params.extend([session_id, broadcast_id])
+    else:
+        where.append("stream_session_id = ?")
+        params.append(session_id)
+    where_clause = " AND ".join(where)
+    count_row = db.execute(
+        f"SELECT COUNT(*) AS count FROM live_chat_messages WHERE {where_clause}",
+        params,
+    ).fetchone()
+    rows = db.execute(
+        f"""
+        SELECT
+          youtube_message_id,
+          author_display_name,
+          author_profile_image_url,
+          display_message,
+          message_text,
+          published_at,
+          received_at,
+          sent_at,
+          is_chat_owner,
+          is_chat_moderator,
+          is_chat_sponsor,
+          is_verified
+        FROM live_chat_messages
+        WHERE {where_clause}
+        ORDER BY datetime(COALESCE(NULLIF(published_at, ''), NULLIF(sent_at, ''), NULLIF(received_at, ''), created_at)) DESC,
+                 id DESC
+        LIMIT ?
+        """,
+        [*params, max(1, min(int(limit), 25))],
+    ).fetchall()
+    messages: list[dict[str, Any]] = []
+    for row in rows:
+        messages.append(
+            {
+                "id": str(row["youtube_message_id"] or ""),
+                "author_display_name": str(row["author_display_name"] or ""),
+                "author_profile_image_url": str(row["author_profile_image_url"] or ""),
+                "display_message": str(row["display_message"] or ""),
+                "message_text": str(row["message_text"] or ""),
+                "published_at": str(row["published_at"] or ""),
+                "received_at": str(row["received_at"] or ""),
+                "sent_at": str(row["sent_at"] or ""),
+                "is_chat_owner": bool(row["is_chat_owner"]),
+                "is_chat_moderator": bool(row["is_chat_moderator"]),
+                "is_chat_sponsor": bool(row["is_chat_sponsor"]),
+                "is_verified": bool(row["is_verified"]),
+            }
+        )
+    return {
+        "comment_count": int(count_row["count"] or 0) if count_row else 0,
+        "recent_comments": messages,
+    }
+
+
 def stream_sessions(
     config_name: str | None = None,
     *,
@@ -679,7 +937,9 @@ def stream_sessions(
     with connect() as db:
         rows = db.execute(
             f"""
-            SELECT id, config_name, channel_name, live_title, status, returncode, transferred_bytes, started_at, stopped_at
+            SELECT
+              id, config_name, channel_name, live_title, youtube_broadcast_id, live_chat_id,
+              pid, log_path, status, returncode, transferred_bytes, started_at, stopped_at
             FROM stream_sessions
             {where_clause}
             ORDER BY datetime(started_at) DESC, id DESC
@@ -696,6 +956,10 @@ def stream_sessions(
                 "config_name": row["config_name"],
                 "channel_name": row["channel_name"],
                 "live_title": str(row["live_title"] or row["channel_name"] or "Untitled live"),
+                "youtube_broadcast_id": str(row["youtube_broadcast_id"] or ""),
+                "live_chat_id": str(row["live_chat_id"] or ""),
+                "pid": row["pid"],
+                "log_path": str(row["log_path"] or ""),
                 "status": str(row["status"] or ""),
                 "returncode": row["returncode"],
                 "transferred_bytes": int(row["transferred_bytes"] or 0),
@@ -703,6 +967,9 @@ def stream_sessions(
                 "stopped_at": str(row["stopped_at"] or ""),
             }
         )
+    with connect() as db:
+        for session in sessions:
+            session.update(live_chat_messages_for_session(db, session))
     return sessions
 
 
@@ -724,6 +991,7 @@ def stats() -> dict[str, Any]:
         "settings_snapshots",
         "tasks",
         "stream_sessions",
+        "live_chat_messages",
         "logs",
         "app_events",
     ]
