@@ -1588,6 +1588,10 @@ textarea {
   gap: 8px;
 }
 
+.automation-toggle-wide {
+  grid-column: 1 / -1;
+}
+
 .automation-toggle label,
 .schedule-days label {
   display: flex;
@@ -2052,6 +2056,14 @@ details[open] > .channel-summary::after {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.live-import-progress {
+  padding: 10px;
+}
+
+.live-import-actions {
+  padding-top: 4px;
 }
 
 .file-list {
@@ -2519,6 +2531,41 @@ details[open] > .channel-summary::after {
   height: 38px;
   padding: 0 8px;
   text-align: center;
+}
+
+.stream-cycle-randomize {
+  margin-top: 2px;
+}
+
+.stream-cycle-info {
+  width: 18px;
+  height: 18px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  display: inline-grid;
+  place-items: center;
+  background: transparent;
+  color: var(--ink);
+  font-size: 0.72rem;
+  font-weight: 900;
+  line-height: 1;
+}
+
+.stream-cycle-random-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 220px));
+  gap: var(--space-2);
+  align-items: start;
+}
+
+.stream-cycle-random-fields label {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.stream-cycle-random-fields input[type="number"] {
+  max-width: 120px;
 }
 
 .youtube-side-stack {
@@ -3657,6 +3704,7 @@ pre {
 
   .youtube-go-live-form,
   .youtube-schedule-form,
+  .stream-cycle-random-fields,
   .youtube-stream-cycle-card .stream-cycle-grid,
   .youtube-stream-settings-card .form-grid,
   .youtube-side-stack .form-grid {
@@ -4427,9 +4475,9 @@ h1 {
   border-left-width: 4px;
   border-radius: 14px;
   background: var(--master-color-rgba-255-250-240-0-92);
-  padding: 12px 13px;
+  padding: 0;
   display: grid;
-  gap: 6px;
+  overflow: hidden;
 }
 
 .workspace-alert-item.info {
@@ -4444,18 +4492,100 @@ h1 {
   border-left-color: var(--master-color-b44732);
 }
 
-.workspace-alert-item-head {
+.workspace-alert-summary {
+  width: 100%;
+  min-height: 56px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  padding: 10px 12px 10px 14px;
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
+  gap: 10px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.workspace-alert-summary:hover,
+.workspace-alert-summary:focus-visible {
+  background: var(--ui-surface);
+}
+
+.workspace-alert-summary-main {
+  min-width: 0;
+  display: block;
+}
+
+.workspace-alert-summary-main strong {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-alert-summary-meta {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--ui-muted);
+  font-size: 0.78rem;
+  white-space: nowrap;
+}
+
+.workspace-alert-chevron {
+  width: 22px;
+  height: 22px;
+  border: 1px solid var(--ui-line);
+  border-radius: 999px;
+  display: inline-grid;
+  place-items: center;
+  color: var(--ui-ink);
+  font-weight: 900;
+  line-height: 1;
+}
+
+.workspace-alert-detail {
+  border-top: 1px solid var(--ui-line);
+  padding: 11px 13px 13px 14px;
+  display: grid;
   gap: 10px;
 }
 
-.workspace-alert-item p {
+.workspace-alert-detail p {
   margin: 0;
   color: var(--ui-ink);
   font-size: 0.88rem;
   line-height: 1.45;
+}
+
+.workspace-alert-detail dl {
+  margin: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.workspace-alert-detail dl div {
+  display: grid;
+  grid-template-columns: 86px minmax(0, 1fr);
+  gap: 8px;
+  align-items: baseline;
+}
+
+.workspace-alert-detail dt {
+  color: var(--ui-muted);
+  font-size: 0.72rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.workspace-alert-detail dd {
+  margin: 0;
+  min-width: 0;
+  color: var(--ui-ink);
+  font-size: 0.82rem;
+  overflow-wrap: anywhere;
 }
 
 .workspace-status-band {

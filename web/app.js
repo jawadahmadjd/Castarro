@@ -16,6 +16,8 @@ const state = {
     editingChannelCrop: { x: 0, y: 0 },
     editingChannelDrag: null,
     alertsMenuOpen: false,
+    expandedAlertIds: {},
+    readAlertIds: [],
     loading: { channelSwitch: false, module: null },
   },
   onboarding: {
@@ -31,6 +33,11 @@ const state = {
   rawFilesAutoRefreshLastAt: 0,
   rawUploadBusyChannel: "",
   liveUploadBusyChannel: "",
+  liveImportProgress: null,
+  liveImportControl: {
+    paused: false,
+    cancelRequested: false,
+  },
   settingsRenderPausedUntil: 0,
   settingsAutosaveTimer: null,
   settingsAutosaveBusy: false,
@@ -129,6 +136,45 @@ const $ = (id) => document.getElementById(id);
 let youtubeLiveChatPopoutWindow = null;
 const desktopBridge = () => (window.desktopShell && typeof window.desktopShell === "object" ? window.desktopShell : null);
 
+function liveImportProgressForChannel(channelName) {
+  const progress = state.liveImportProgress;
+  if (!progress) return null;
+  return String(progress.channel || "") === String(channelName || "") ? progress : null;
+}
+
+function isLiveImportBusy(channelName = "") {
+  if (!state.liveUploadBusyChannel) return false;
+  return !channelName || String(state.liveUploadBusyChannel) === String(channelName || "");
+}
+
+function resetLiveImportControl() {
+  state.liveImportControl = {
+    paused: false,
+    cancelRequested: false,
+  };
+}
+
+function liveImportControlState() {
+  if (!state.liveImportControl || typeof state.liveImportControl !== "object") {
+    resetLiveImportControl();
+  }
+  return state.liveImportControl;
+}
+
+function syncLiveImportProgressFlags() {
+  if (!state.liveImportProgress) return;
+  const control = liveImportControlState();
+  state.liveImportProgress = {
+    ...state.liveImportProgress,
+    paused: Boolean(control.paused),
+    cancelRequested: Boolean(control.cancelRequested),
+  };
+}
+
+function delay(ms) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
 function cacheDesktopStartupView(reason = "ui", delayMs = 900) {
   try {
     const bridge = desktopBridge();
@@ -164,6 +210,7 @@ function authPopupLoadingHtml(title) {
 
 const ACTIVITY_STREAM_SPLIT_KEY = "castarro.activityStreamSplitRatio.v1";
 const WORKSPACE_SELECTED_CHANNEL_KEY = "castarro.workspace.selectedChannel.v1";
+const WORKSPACE_READ_ALERTS_KEY = "castarro.workspace.readAlerts.v1";
 const ONBOARDING_STATE_KEY = "castarro.onboarding.state.v1";
 const DASHBOARD_CACHE_KEY = "castarro.dashboard.frontPage.v1";
 const YOUTUBE_STATUS_CACHE_KEY = "castarro.youtube.status.v1";
@@ -345,6 +392,7 @@ const defaultStorageSettings = () => ({
 });
 
 const defaultAlertSettings = () => ({
+  notification_mode: "all",
   desktop_notifications_enabled: true,
   mobile_notifications_enabled: true,
   cooldown_seconds: 300,
@@ -366,6 +414,8 @@ const defaultSchedulerSettings = () => ({
 const defaultStreamCycleSettings = () => ({
   enabled: false,
   restart_delay_seconds: 180,
+  randomized: false,
+  restart_delay_random_minutes: 0,
   channels: [],
 });
 
@@ -540,6 +590,33 @@ function onboardingStorageKey() {
 
 function youtubeStatusStorageKey() {
   return `${YOUTUBE_STATUS_CACHE_KEY}:${state.config || "config.json"}`;
+}
+
+function workspaceReadAlertsStorageKey() {
+  return `${WORKSPACE_READ_ALERTS_KEY}:${state.config || "config.json"}`;
+}
+
+function normalizeNotificationMode(value) {
+  return ["all", "critical", "off"].includes(String(value || "")) ? String(value) : "all";
+}
+
+function readWorkspaceAlertIds() {
+  try {
+    const raw = window.localStorage.getItem(workspaceReadAlertsStorageKey());
+    const parsed = raw ? JSON.parse(raw) : [];
+    state.workspace.readAlertIds = Array.isArray(parsed) ? parsed.map((item) => String(item)).slice(-200) : [];
+  } catch {
+    state.workspace.readAlertIds = [];
+  }
+}
+
+function writeWorkspaceAlertIds() {
+  state.workspace.readAlertIds = Array.from(new Set(state.workspace.readAlertIds || [])).slice(-200);
+  try {
+    window.localStorage.setItem(workspaceReadAlertsStorageKey(), JSON.stringify(state.workspace.readAlertIds));
+  } catch {
+    // Ignore storage failures; unread state can still work for this session.
+  }
 }
 
 function readPreviewEnabled() {
@@ -804,6 +881,107 @@ function workspaceRecentAlerts(payload = state.status) {
     .slice(0, 20);
 }
 
+function workspaceAlertId(item, index = 0) {
+  const rawId = String(item?.id || "").trim();
+  if (rawId) {
+    return `${item?.local ? "local" : "backend"}-${rawId}`;
+  }
+  return `alert-${index}-${String(item?.created_at || "")}-${String(item?.title || "")}`;
+}
+
+function markWorkspaceAlertsRead(alerts) {
+  const items = Array.isArray(alerts) ? alerts : [];
+  const nextIds = items.map((item, index) => workspaceAlertId(item, index));
+  const merged = Array.from(new Set([...(state.workspace.readAlertIds || []), ...nextIds])).slice(-200);
+  if (merged.length === (state.workspace.readAlertIds || []).length && merged.every((id, index) => id === state.workspace.readAlertIds[index])) {
+    return;
+  }
+  state.workspace.readAlertIds = merged;
+  writeWorkspaceAlertIds();
+}
+
+function compactAlertTitle(item) {
+  const title = String(item?.title || "").trim();
+  if (title && title !== "Update") return title;
+  const message = String(item?.message || "").trim();
+  if (!message) return "Notification";
+  if (/failed to fetch/i.test(message)) {
+    const quotedName = message.match(/"([^"]+)"/)?.[1] || "";
+    if (/raw video/i.test(message)) return quotedName ? `Raw video failed: ${quotedName}` : "Raw video failed to fetch";
+    if (/live video/i.test(message)) return quotedName ? `Live video failed: ${quotedName}` : "Live video failed to fetch";
+    if (/thumbnail/i.test(message)) return quotedName ? `Thumbnail failed: ${quotedName}` : "Thumbnail failed to fetch";
+    if (/\/api\/status/i.test(message) || /dashboard status/i.test(message)) return "Dashboard status failed to fetch";
+    if (/\/api\/config/i.test(message) || /settings/i.test(message)) return "Settings failed to fetch";
+    if (/raw/i.test(message) && /file/i.test(message)) return "Raw file list failed to fetch";
+    if (/youtube/i.test(message)) return "YouTube data failed to fetch";
+    if (/google drive|storage/i.test(message)) return "Storage data failed to fetch";
+    return "Request failed to fetch";
+  }
+  return message.split(/[.!?]\s/)[0].replace(/\.$/, "").slice(0, 88) || "Notification";
+}
+
+function alertDetailRows(item) {
+  const rows = [];
+  const add = (label, value) => {
+    const text = String(value || "").trim();
+    if (text) rows.push({ label, value: text });
+  };
+  const message = String(item?.message || "");
+  add("Channel", item?.channel_name);
+  add("Config", item?.config_name);
+  add("Rule", item?.key);
+  add("Severity", item?.severity);
+  if (item?.local) add("Source", "Local UI");
+  if (item?.local) {
+    add("Request", message.match(/Request:\s*(.*?)(?:\.\s+(?:Browser|Server|HTTP)|$)/)?.[1]);
+    add("Request ID", message.match(/Request ID:\s*([^.\]]+)/)?.[1]);
+  }
+  if (item?.desktop_enabled === false) add("Desktop notification", "Disabled for this alert");
+  if (item?.mobile_enabled === false) add("Mobile notification", "Disabled for this alert");
+  return rows;
+}
+
+function renderWorkspaceAlertItem(item, index) {
+  const id = workspaceAlertId(item, index);
+  const expanded = Boolean(state.workspace.expandedAlertIds?.[id]);
+  const title = compactAlertTitle(item);
+  const detail = String(item?.detail || item?.message || "").trim();
+  const rows = alertDetailRows(item);
+  return `
+    <article class="workspace-alert-item ${escapeAttr(item?.severity || "info")} ${expanded ? "is-expanded" : ""}">
+      <button
+        class="workspace-alert-summary"
+        type="button"
+        aria-expanded="${expanded ? "true" : "false"}"
+        onclick="event.stopPropagation(); toggleWorkspaceAlertItem('${escapeJs(id)}')"
+      >
+        <span class="workspace-alert-summary-main">
+          <strong>${escapeHtml(title)}</strong>
+        </span>
+        <span class="workspace-alert-summary-meta">
+          <time>${escapeHtml(formatDateTime(item?.created_at || ""))}</time>
+          <span class="workspace-alert-chevron" aria-hidden="true">${expanded ? "-" : "+"}</span>
+        </span>
+      </button>
+      ${expanded ? `
+        <div class="workspace-alert-detail">
+          <p>${escapeHtml(detail || "No additional details were provided for this notification.")}</p>
+          ${rows.length ? `
+            <dl>
+              ${rows.map((row) => `
+                <div>
+                  <dt>${escapeHtml(row.label)}</dt>
+                  <dd>${escapeHtml(row.value)}</dd>
+                </div>
+              `).join("")}
+            </dl>
+          ` : ""}
+        </div>
+      ` : ""}
+    </article>
+  `;
+}
+
 function rerenderWorkspaceHeader(payload = state.status || {}) {
   const selected = getSelectedChannel({ channels: payload?.channels || [] }, state.workspace.selectedChannelName);
   renderWorkspaceHeader(payload || {}, selected);
@@ -990,6 +1168,30 @@ function channelNameFromApiRequest(path, options = {}) {
   return "";
 }
 
+function apiRequestLabel(path, action = "") {
+  const actionText = String(action || "").replaceAll(".", " ").replaceAll("_", " ").trim();
+  if (actionText) return actionText;
+  let pathname = "";
+  try {
+    pathname = new URL(String(path || ""), window.location.origin).pathname;
+  } catch {
+    pathname = String(path || "");
+  }
+  if (pathname === "/api/status") return "dashboard status";
+  if (pathname === "/api/config") return "settings config";
+  if (pathname.includes("raw")) return "raw video file list";
+  if (pathname.includes("normalized")) return "normalized video file list";
+  if (pathname.includes("youtube")) return "YouTube data";
+  if (pathname.includes("storage") || pathname.includes("cloud")) return "storage data";
+  if (pathname.includes("history")) return "live history";
+  if (pathname.includes("sync")) return "sync status";
+  return pathname.replace(/^\/api\/?/, "").replaceAll("/", " ").trim() || "request";
+}
+
+function titleCaseText(value) {
+  return String(value || "").replace(/\b[a-z]/g, (letter) => letter.toUpperCase());
+}
+
 async function api(path, options = {}) {
   const {
     action = "",
@@ -1010,13 +1212,14 @@ async function api(path, options = {}) {
     });
   } catch (error) {
     const channelName = channelNameFromApiRequest(path, fetchOptions);
+    const label = apiRequestLabel(path, action);
     logLocalActivityEvent(
       "api_request",
       `Network error while calling ${path}`,
       { path, request_id: requestId, client_action: action, channel_name: channelName, error: String(error?.message || error) },
       "error"
     );
-    throw error;
+    throw new Error(`${titleCaseText(label)} failed to fetch. Request: ${path}. Browser/network error: ${String(error?.message || error)}. Request ID: ${requestId}.`);
   }
   const responseRequestId = String(response.headers.get("X-Request-ID") || requestId);
   const text = await response.text();
@@ -1032,6 +1235,7 @@ async function api(path, options = {}) {
   if (!response.ok) {
     const message = payload?.error || payload || response.statusText;
     const channelName = channelNameFromApiRequest(path, fetchOptions);
+    const label = apiRequestLabel(path, action);
     logLocalActivityEvent(
       "api_request",
       `API request failed: ${path}`,
@@ -1045,7 +1249,7 @@ async function api(path, options = {}) {
       },
       "error"
     );
-    throw new Error(`${message} [Request ID: ${responseRequestId}]`);
+    throw new Error(`${titleCaseText(label)} request failed. Request: ${path}. Server response: ${message}. HTTP status: ${response.status}. Request ID: ${responseRequestId}.`);
   }
   return payload;
 }
@@ -1067,6 +1271,7 @@ async function refresh() {
     state.config = visiblePayload.configs.includes("config.json") ? "config.json" : visiblePayload.configs[0] || "config.json";
   }
   if (previousConfig !== state.config) {
+    readWorkspaceAlertIds();
     readOnboardingState();
     hydrateYoutubeStatusFromCache(true);
   } else if (!state.youtubeStatus) {
@@ -1358,10 +1563,13 @@ function renderStatus(payload) {
   const startAllButton = $("startAll");
   if (startAllButton) {
     const anyRunning = running > 0;
+    const importBusy = isLiveImportBusy();
     startAllButton.textContent = anyRunning ? "Stop all streams" : "Start All Streams";
     startAllButton.classList.toggle("success", !anyRunning);
     startAllButton.classList.toggle("danger", anyRunning);
     startAllButton.setAttribute("aria-label", anyRunning ? "Stop all streams" : "Start All Streams");
+    startAllButton.disabled = !anyRunning && importBusy;
+    startAllButton.title = !anyRunning && importBusy ? "Wait for video import to finish." : "";
   }
   $("channelCount").textContent = `${payload.channels.length} channel${payload.channels.length === 1 ? "" : "s"}`;
   const activeConfigLabel = $("activeConfigLabel");
@@ -1422,6 +1630,7 @@ function renderChannels(payload) {
   channelsNode.innerHTML = payload.channels.map((channel) => {
     const stream = payload.streams[channel.name];
     const live = stream?.running;
+    const importBusy = isLiveImportBusy(channel.name);
     const key = streamKeyLabel(channel);
     const autoReady = channel.youtube_auto_start && channel.youtube_auto_stop;
     const dualReady = channel.youtube_dual_stream !== false;
@@ -1443,7 +1652,7 @@ function renderChannels(payload) {
           ${studio}
         </div>
         <div class="mini-actions">
-          <button class="${streamButtonClass}" onclick="${streamAction}('${escapeJs(channel.name)}')">${streamButtonLabel}</button>
+          <button class="${streamButtonClass}" ${!live && importBusy ? "disabled title=\"Wait for video import to finish.\"" : ""} onclick="${streamAction}('${escapeJs(channel.name)}')">${streamButtonLabel}</button>
           <button class="pill" onclick="startTask('test-stream', '${escapeJs(channel.name)}', false)">Test Stream</button>
           <button class="pill ghost" onclick="showTab('settings')">Settings</button>
         </div>
@@ -2126,11 +2335,18 @@ function renderWorkspaceHeader(payload, channel) {
   const escapedName = escapeJs(channel.name);
   const stream = payload?.streams?.[channel.name] || null;
   const streamRunning = Boolean(stream?.running);
+  const importBusy = isLiveImportBusy(channel.name);
   const streamAction = streamRunning ? "stopStream" : "startStream";
   const streamButtonClass = streamRunning ? "pill danger" : "pill success";
   const streamButtonLabel = streamRunning ? "Stop Stream" : "Start Stream";
   const alerts = workspaceRecentAlerts(payload);
   const hasDangerAlerts = alerts.some((item) => String(item?.severity || "") === "danger");
+  if (state.workspace.alertsMenuOpen) {
+    markWorkspaceAlertsRead(alerts);
+  }
+  const readAlertIds = new Set(state.workspace.readAlertIds || []);
+  const unreadAlerts = alerts.filter((item, index) => !readAlertIds.has(workspaceAlertId(item, index)));
+  const hasUnreadDangerAlerts = unreadAlerts.some((item) => String(item?.severity || "") === "danger");
   const alertBadgeClass = hasDangerAlerts ? "badge warn" : alerts.length ? "badge" : "badge live";
   const alertSummary = `${alerts.length} notification${alerts.length === 1 ? "" : "s"}`;
   actionsNode.innerHTML = `
@@ -2152,7 +2368,7 @@ function renderWorkspaceHeader(payload, channel) {
           onclick="event.stopPropagation(); toggleWorkspaceAlertsMenu()"
         >
           <span aria-hidden="true">&#128276;</span>
-          ${alerts.length ? `<span class="workspace-alerts-count ${hasDangerAlerts ? "warn" : ""}">${alerts.length}</span>` : ""}
+          ${unreadAlerts.length ? `<span class="workspace-alerts-count ${hasUnreadDangerAlerts ? "warn" : ""}">${unreadAlerts.length}</span>` : ""}
         </button>
         <div class="workspace-alerts-popover ${state.workspace.alertsMenuOpen ? "" : "hidden"}" id="workspaceAlertsPopover" aria-label="Notification history">
           <div class="workspace-alerts-popover-head">
@@ -2160,19 +2376,11 @@ function renderWorkspaceHeader(payload, channel) {
             <span class="${alertBadgeClass}">${escapeHtml(alertSummary)}</span>
           </div>
           ${alerts.length
-            ? `<div class="workspace-alerts-feed">${alerts.map((item) => `
-                <article class="workspace-alert-item ${escapeAttr(item.severity || "info")}">
-                  <div class="workspace-alert-item-head">
-                    <strong>${escapeHtml(item.title || "Alert")}</strong>
-                    <span class="helper">${escapeHtml(formatDateTime(item.created_at || ""))}</span>
-                  </div>
-                  <p>${escapeHtml(item.message || "")}</p>
-                </article>
-              `).join("")}</div>`
+            ? `<div class="workspace-alerts-feed">${alerts.map((item, index) => renderWorkspaceAlertItem(item, index)).join("")}</div>`
             : `<p class="helper">No recent alerts for this workspace.</p>`}
         </div>
       </div>
-      <button class="${streamButtonClass}" type="button" onclick="${streamAction}('${escapedName}').catch((error) => toast(error.message))">${streamButtonLabel}</button>
+      <button class="${streamButtonClass}" type="button" ${!streamRunning && importBusy ? "disabled title=\"Wait for video import to finish.\"" : ""} onclick="${streamAction}('${escapedName}').catch((error) => toast(error.message))">${streamButtonLabel}</button>
     </div>
   `;
   syncThemeToggle();
@@ -4042,12 +4250,18 @@ async function copyText(text) {
 async function loadConfigText() {
   try {
     const requestId = makeRequestId();
-    const response = await fetch(`/api/config?config=${encodeURIComponent(state.config)}`, {
-      headers: {
-        "X-Request-ID": requestId,
-        "X-Client-Action": "config.load",
-      },
-    });
+    const path = `/api/config?config=${encodeURIComponent(state.config)}`;
+    let response;
+    try {
+      response = await fetch(path, {
+        headers: {
+          "X-Request-ID": requestId,
+          "X-Client-Action": "config.load",
+        },
+      });
+    } catch (error) {
+      throw new Error(`Settings config failed to fetch. Request: ${path}. Browser/network error: ${String(error?.message || error)}. Request ID: ${requestId}.`);
+    }
     const responseRequestId = String(response.headers.get("X-Request-ID") || requestId);
     const text = response.ok ? await response.text() : "";
     $("configEditor").value = text;
@@ -4059,7 +4273,7 @@ async function loadConfigText() {
     await loadRawFiles();
     await loadNormalizedFiles();
     if (!response.ok) {
-      throw new Error(`Could not load config. [Request ID: ${responseRequestId}]`);
+      throw new Error(`Settings config request failed. Request: ${path}. HTTP status: ${response.status}. Request ID: ${responseRequestId}.`);
     }
   } catch (error) {
     state.configData = defaultConfigData();
@@ -4080,6 +4294,7 @@ function normalizeConfigShape() {
   config.alerts = {
     ...defaultAlertSettings(),
     ...(config.alerts || {}),
+    notification_mode: normalizeNotificationMode(config.alerts?.notification_mode),
     rules: {
       ...defaultAlertSettings().rules,
       ...((config.alerts && config.alerts.rules) || {}),
@@ -4094,6 +4309,16 @@ function normalizeConfigShape() {
     ...(config.stream_cycles || {}),
     channels: Array.isArray(config.stream_cycles?.channels) ? [...config.stream_cycles.channels] : [],
   };
+  if (typeof config.stream_cycles.randomized !== "boolean") {
+    config.stream_cycles.randomized = Boolean(config.stream_cycles.restart_delay_randomized);
+  }
+  if (!Number.isFinite(Number(config.stream_cycles.restart_delay_random_minutes))) {
+    const restartMax = Number(config.stream_cycles.restart_delay_max_seconds);
+    const restartBase = Number(config.stream_cycles.restart_delay_seconds);
+    config.stream_cycles.restart_delay_random_minutes = Number.isFinite(restartMax) && Number.isFinite(restartBase)
+      ? Math.max(0, Math.round((restartMax - restartBase) / 60))
+      : 0;
+  }
   config.storage.source_proxy = {
     ...defaultStorageSettings().source_proxy,
     ...(config.storage.source_proxy || {}),
@@ -4250,6 +4475,7 @@ function renderSettingsForms() {
   config.alerts = {
     ...defaultAlertSettings(),
     ...(config.alerts || {}),
+    notification_mode: normalizeNotificationMode(config.alerts?.notification_mode),
     rules: {
       ...defaultAlertSettings().rules,
       ...((config.alerts && config.alerts.rules) || {}),
@@ -4755,8 +4981,8 @@ function youtubeLiveChatKey(channel = null) {
   const selectedChannel = channel || (config.channels || []).find((item) => String(item?.name || "").trim() === selectedChannelName) || null;
   const accountId = normalizeAccountId(selectedChannel?.youtube_account_id || "");
   const broadcastId = String(selectedChannel?.youtube_broadcast_id || "").trim();
-  return selectedChannelName && accountId && broadcastId
-    ? `${state.config}:${selectedChannelName}:${accountId}:${broadcastId}`
+  return selectedChannelName && accountId
+    ? `${state.config}:${selectedChannelName}:${accountId}:${broadcastId || "auto"}`
     : "";
 }
 
@@ -4875,6 +5101,14 @@ async function refreshYoutubeLiveChat(options = {}) {
     state.youtubeLiveChat.offlineAt = String(payload?.offline_at || "");
     state.youtubeLiveChat.loadedKey = key;
     state.youtubeLiveChat.failedKey = "";
+    if (state.youtubeLiveChat.broadcastId && channel && !String(channel.youtube_broadcast_id || "").trim()) {
+      channel.youtube_broadcast_id = state.youtubeLiveChat.broadcastId;
+      channel.youtube_broadcast_title = state.youtubeLiveChat.broadcastTitle || channel.youtube_broadcast_title || "";
+      channel.youtube_studio_url = String(payload?.broadcast_studio_url || channel.youtube_studio_url || "");
+      channel.youtube_stream_id = String(payload?.broadcast_stream_id || channel.youtube_stream_id || "");
+      state.youtubeLiveChat.loadedKey = youtubeLiveChatKey(channel) || key;
+      syncConfigEditor();
+    }
     mergeYoutubeLiveChatMessages(Array.isArray(payload?.messages) ? payload.messages : []);
     return payload;
   } catch (error) {
@@ -5018,8 +5252,6 @@ function youtubeLiveChatBodyMarkup(selectedChannel, linkedAccount, actionBusy, o
     guard = "Link a YouTube account to this channel first.";
   } else if (!linkedAccountConnected) {
     guard = "Reconnect the linked YouTube account to read and send live chat.";
-  } else if (!broadcastId) {
-    guard = "Schedule or link a YouTube broadcast for this channel first.";
   }
   const canSend = !guard && !chat.sending && !actionBusy && !chat.offlineAt;
   const statusText = guard
@@ -5082,8 +5314,6 @@ function youtubeLiveChatCard(selectedChannel, linkedAccount, actionBusy) {
     guard = "Link a YouTube account to this channel first.";
   } else if (!linkedAccountConnected) {
     guard = "Reconnect the linked YouTube account to read and send live chat.";
-  } else if (!broadcastId) {
-    guard = "Schedule or link a YouTube broadcast for this channel first.";
   }
   const statusText = guard
     ? "Setup"
@@ -5098,7 +5328,7 @@ function youtubeLiveChatCard(selectedChannel, linkedAccount, actionBusy) {
     helper: "Read viewer comments and reply as the linked YouTube channel.",
     extraClass: "youtube-live-chat-card",
     defaultOpen: false,
-    summaryMetaHtml: `<span class="meta">${escapeHtml(chat.broadcastTitle || selectedChannel?.youtube_studio_url || broadcastId || guard || "No broadcast linked")}</span>`,
+    summaryMetaHtml: `<span class="meta">${escapeHtml(chat.broadcastTitle || selectedChannel?.youtube_studio_url || broadcastId || guard || (linkedAccountConnected ? "Auto-detect active broadcast" : "No broadcast linked"))}</span>`,
     summaryBadgeHtml: `<span class="badge ${!guard && !chat.offlineAt ? "live" : guard ? "warn" : ""}">${escapeHtml(statusText)}</span>`,
     body: `
       <div class="youtube-chat-launch-actions" aria-label="Live chat options">
@@ -5702,7 +5932,7 @@ function renderYoutubeSettingsPanel(config) {
     return true;
   };
   if (!setupGuideStep) {
-    if (selectedChannel && linkedAccount?.connected && selectedChannel.youtube_broadcast_id) {
+    if (selectedChannel && linkedAccount?.connected) {
       queueYoutubeLiveChatRefresh(selectedChannel);
     } else if (state.youtubeLiveChat.liveChatId || state.youtubeLiveChat.timer || state.youtubeLiveChat.messages.length) {
       resetYoutubeLiveChat();
@@ -6465,19 +6695,25 @@ async function uploadYoutubeThumbnail(file, broadcastId, accountId) {
     broadcast: broadcastId,
     filename: file.name || "thumbnail",
   });
-  const response = await fetch(`/api/youtube/thumbnail?${query.toString()}`, {
-    method: "POST",
-    headers: {
-      "Content-Type": file.type || "application/octet-stream",
-      "X-Request-ID": requestId,
-      "X-Client-Action": "youtube.thumbnail.upload",
-    },
-    body: file,
-  });
+  const path = `/api/youtube/thumbnail?${query.toString()}`;
+  let response;
+  try {
+    response = await fetch(path, {
+      method: "POST",
+      headers: {
+        "Content-Type": file.type || "application/octet-stream",
+        "X-Request-ID": requestId,
+        "X-Client-Action": "youtube.thumbnail.upload",
+      },
+      body: file,
+    });
+  } catch (error) {
+    throw new Error(`YouTube thumbnail "${file.name || "thumbnail"}" failed to fetch. Request: ${path}. Browser/network error: ${String(error?.message || error)}. Request ID: ${requestId}.`);
+  }
   const responseRequestId = String(response.headers.get("X-Request-ID") || requestId);
   const payload = await response.json();
   if (!response.ok) {
-    throw new Error(`${payload.error || "Thumbnail upload failed."} [Request ID: ${responseRequestId}]`);
+    throw new Error(`YouTube thumbnail upload failed for "${file.name || "thumbnail"}". Server response: ${payload.error || "Thumbnail upload failed."}. Request ID: ${responseRequestId}.`);
   }
   return payload;
 }
@@ -6630,6 +6866,71 @@ function taskProgressMarkup(task, index = -1, completedCount = 0) {
       </div>
     </div>
   `;
+}
+
+function liveImportProgressMarkup(progress) {
+  const total = Math.max(0, Number(progress?.total) || 0);
+  const current = Math.max(0, Number(progress?.current) || 0);
+  const percent = total ? Math.max(0, Math.min(100, Math.round((current / total) * 100))) : 0;
+  const action = String(progress?.action || "Copying");
+  const fileName = String(progress?.fileName || "");
+  const status = total ? `${action} ${Math.min(current + 1, total)} of ${total}` : action;
+  const paused = Boolean(progress?.paused);
+  const cancelRequested = Boolean(progress?.cancelRequested);
+  const message = cancelRequested
+    ? "Canceling after current file..."
+    : paused
+      ? `Paused${fileName ? `: ${fileName}` : ""}`
+      : fileName ? `${status}: ${fileName}` : status;
+  const showControls = action.toLowerCase() === "copying";
+  return `
+    <div class="progress-card running live-import-progress">
+      <div class="progress-head">
+        <span>${escapeHtml(status)}</span>
+        <span>${escapeHtml(`${percent}%`)}</span>
+      </div>
+      <div class="progress-track" aria-label="Video import progress">
+        <div class="progress-fill" style="--progress-fill-width: ${percent}%"></div>
+      </div>
+      <div class="progress-message">${escapeHtml(message)}</div>
+      ${showControls ? `
+        <div class="progress-actions live-import-actions">
+          <button class="pill small" type="button" onclick="toggleLiveImportPause()" ${cancelRequested ? "disabled" : ""}>${escapeHtml(paused ? "Resume" : "Pause")}</button>
+          <button class="pill danger small" type="button" onclick="cancelLiveImport()" ${cancelRequested ? "disabled" : ""}>Cancel</button>
+        </div>
+      ` : ""}
+    </div>
+  `;
+}
+
+function toggleLiveImportPause() {
+  if (!isLiveImportBusy()) return;
+  const control = liveImportControlState();
+  if (control.cancelRequested) return;
+  control.paused = !control.paused;
+  syncLiveImportProgressFlags();
+  toast(control.paused ? "Video import paused." : "Video import resumed.");
+  renderSettingsForms();
+}
+
+function cancelLiveImport() {
+  if (!isLiveImportBusy()) return;
+  const control = liveImportControlState();
+  control.cancelRequested = true;
+  control.paused = false;
+  syncLiveImportProgressFlags();
+  toast("Canceling import after the current file.");
+  renderSettingsForms();
+}
+
+async function waitForLiveImportResume() {
+  const control = liveImportControlState();
+  while (control.paused && !control.cancelRequested) {
+    syncLiveImportProgressFlags();
+    renderSettingsForms();
+    await delay(250);
+  }
+  return !control.cancelRequested;
 }
 
 function stopTaskLabel(name) {
@@ -6873,7 +7174,12 @@ function streamCycleCard(channel, index) {
     duration_seconds: 12 * 60 * 60,
   };
   const durationSeconds = streamCycleEntryDurationSeconds(entry);
-  const cooldownSeconds = Math.max(0, Math.round(Number(cycles.restart_delay_seconds ?? 180) || 180));
+  const rawCooldownSeconds = Number(cycles.restart_delay_seconds ?? 180);
+  const cooldownSeconds = Number.isFinite(rawCooldownSeconds) ? Math.max(0, Math.round(rawCooldownSeconds)) : 180;
+  const durationRandomFallback = Math.max(0, Number(entry.duration_max_seconds) - durationSeconds);
+  const cooldownRandomFallback = Math.max(0, Number(cycles.restart_delay_max_seconds) - cooldownSeconds);
+  const durationRandomMinutes = streamCycleRandomMinutes(entry, "duration_random_minutes", durationRandomFallback);
+  const cooldownRandomMinutes = streamCycleRandomMinutes(cycles, "restart_delay_random_minutes", cooldownRandomFallback);
   const cycleStatus = Array.isArray(state.status?.stream_cycles?.channels)
     ? state.status.stream_cycles.channels.find((item) => String(item?.channel || "") === channelName)
     : null;
@@ -6888,6 +7194,9 @@ function streamCycleCard(channel, index) {
   const statusClass = active ? "badge live" : "badge";
   const actionButtonText = active ? "Disable Stream Loop" : "Enable Stream Loop";
   const actionButtonClass = active ? "pill danger" : "pill success";
+  const durationSummary = cycles.randomized ? streamCycleRandomSummary(durationSeconds, durationRandomMinutes) : durationText(durationSeconds);
+  const cooldownSummary = cycles.randomized ? streamCycleRandomSummary(cooldownSeconds, cooldownRandomMinutes) : durationText(cooldownSeconds);
+  const randomTooltip = `After the end time of your set stream, Castarro will randomly end the stream within a maximum of ${durationRandomMinutes || "n"} minutes.`;
 
   return youtubeCollapsibleCard({
     key: `youtube-stream-cycle-${channelName || index}`,
@@ -6895,12 +7204,17 @@ function streamCycleCard(channel, index) {
     helper: "Automatically stop this YouTube stream after a duration, cool down, then start it again.",
     extraClass: "youtube-stream-cycle-card channel-settings",
     attributes: `data-index="${index}" data-channel-name="${escapeAttr(channelName)}"`,
-    summaryMetaHtml: `<span class="meta">${escapeHtml(active ? `Every ${durationText(durationSeconds)} with ${durationText(cooldownSeconds)} cooldown` : "Automatic restart loop is off")}</span>`,
+    summaryMetaHtml: `<span class="meta">${escapeHtml(active ? `Every ${durationSummary} with ${cooldownSummary} cooldown` : "Automatic restart loop is off")}</span>`,
     summaryBadgeHtml: `<span class="${statusClass}">${escapeHtml(statusText)}</span>`,
     body: `
       <div class="row wrap">
         <button class="${actionButtonClass}" type="button" onclick="toggleStreamCycleForChannel(${index})">${escapeHtml(actionButtonText)}</button>
       </div>
+      <label class="switch stream-cycle-randomize">
+        <input type="checkbox" ${cycles.randomized ? "checked" : ""} onchange="updateStreamCycleSetting('randomized', this.checked)">
+        <span>Randomize stream and cooldown</span>
+        ${streamCycleInfoIcon(randomTooltip)}
+      </label>
       <div class="stream-cycle-grid">
         <section>
           <span class="field-hint">Run each stream for</span>
@@ -6911,6 +7225,20 @@ function streamCycleCard(channel, index) {
           ${streamCycleHmsInputs("cooldown", durationHmsParts(cooldownSeconds), "updateStreamCycleCooldownFromParts()")}
         </section>
       </div>
+      ${cycles.randomized ? `
+        <div class="stream-cycle-random-fields">
+          <label>
+            <span class="field-hint">Stream random duration</span>
+            <input type="number" min="0" step="1" value="${escapeAttr(String(durationRandomMinutes))}" onchange="updateChannelStreamCycleSetting('duration_random_minutes', this.value)">
+            <span class="setting-note">minutes after the set stream time</span>
+          </label>
+          <label>
+            <span class="field-hint">Cooldown random duration</span>
+            <input type="number" min="0" step="1" value="${escapeAttr(String(cooldownRandomMinutes))}" onchange="updateStreamCycleSetting('restart_delay_random_minutes', this.value)">
+            <span class="setting-note">minutes added before restart</span>
+          </label>
+        </div>
+      ` : ""}
     `,
   });
 }
@@ -7055,6 +7383,8 @@ function liveVideosCard(channel, index) {
   const files = orderedLiveFilesForDisplay(channel, state.normalizedFilesByChannel[channel.name] || [])
     .filter((file) => !isActiveEncodingOutput(channel.name || "", file));
   const uploadId = `live-upload-${index}`;
+  const importProgress = liveImportProgressForChannel(channel.name || "");
+  const importBusy = isLiveImportBusy(channel.name || "");
   const totalDuration = totalVideoDurationSeconds(files);
   const summaryText = files.length ? `${files.length} normalized video${files.length === 1 ? "" : "s"} ready` : "No normalized videos found yet";
   const summaryDuration = totalDuration ? `<span class="video-total-duration" title="Total video duration">${escapeHtml(compactDurationText(totalDuration))}</span>` : "";
@@ -7075,9 +7405,10 @@ function liveVideosCard(channel, index) {
         body: `
           <div class="row wrap">
             <input class="hidden-file" id="${escapeAttr(uploadId)}" type="file" multiple accept="video/*" onchange="uploadLiveVideos(${index}, this.files).catch((error) => toast(error.message)); this.value = '';">
-            <button class="pill" type="button" ${state.liveUploadBusyChannel === channel.name ? "disabled" : ""} onclick="document.getElementById('${escapeJs(uploadId)}').click()">${escapeHtml(state.liveUploadBusyChannel === channel.name ? "Importing..." : "Import Videos")}</button>
+            <button class="pill" type="button" ${importBusy ? "disabled" : ""} onclick="selectLiveVideos(${index}, '${escapeJs(uploadId)}').catch((error) => toast(error.message))">${escapeHtml(importBusy ? "Importing..." : "Import Videos")}</button>
           </div>
           <div class="meta">Encoded videos appear here automatically. Import videos only for files created outside this app.</div>
+          ${importProgress ? liveImportProgressMarkup(importProgress) : ""}
           <div class="file-list live-video-list" data-live-video-list>${fileOptions}</div>
         `,
       })}
@@ -7703,6 +8034,132 @@ async function importRawVideoPaths(index, paths) {
   }
 }
 
+function localPathParent(path) {
+  const text = String(path || "");
+  const index = Math.max(text.lastIndexOf("\\"), text.lastIndexOf("/"));
+  return index >= 0 ? text.slice(0, index) : "";
+}
+
+function allPathsShareParent(paths) {
+  const parents = (paths || [])
+    .map((path) => localPathParent(path).trim().toLowerCase())
+    .filter(Boolean);
+  return parents.length > 0 && parents.every((parent) => parent === parents[0]);
+}
+
+async function selectLiveVideos(index, inputId) {
+  const bridge = desktopBridge();
+  if (!bridge || typeof bridge.selectVideos !== "function") {
+    const input = $(inputId);
+    input?.click();
+    return;
+  }
+
+  const config = collectSettingsData();
+  const channel = config.channels[index];
+  if (!channel || !channel.name) {
+    toast("Save a channel name before importing videos.");
+    return;
+  }
+
+  const picked = await bridge.selectVideos({
+    title: `Import videos for ${channel.name}`,
+    defaultPath: resolvedFolderPath(config.defaults?.normalized_dir || "Go Live") || undefined,
+  });
+  const paths = Array.isArray(picked?.paths) ? picked.paths.filter(Boolean) : [];
+  if (!picked || picked.canceled || !paths.length) return;
+  await importLiveVideoPaths(index, paths);
+}
+
+async function importLiveVideoPaths(index, paths) {
+  if (!Array.isArray(paths) || !paths.length) return;
+  state.activeSettingsChannelIndex = index;
+  const config = collectSettingsData();
+  const channel = config.channels[index];
+  if (!channel || !channel.name) {
+    toast("Save a channel name before importing videos.");
+    return;
+  }
+
+  const useOriginals = allPathsShareParent(paths);
+  const actionLabel = useOriginals ? "Adding" : "Copying";
+  const saved = [];
+  resetLiveImportControl();
+  state.liveUploadBusyChannel = channel.name;
+  state.liveImportProgress = {
+    channel: channel.name,
+    current: 0,
+    total: paths.length,
+    fileName: String(paths[0] || "").split(/[\\/]/).pop() || String(paths[0] || "video"),
+    action: actionLabel,
+    paused: false,
+    cancelRequested: false,
+  };
+  pauseSettingsRender(60000);
+  renderSettingsForms();
+  try {
+    await saveConfigData(config, { render: false, refresh: false, reloadFiles: false });
+
+    for (let itemIndex = 0; itemIndex < paths.length; itemIndex += 1) {
+      if (liveImportControlState().cancelRequested) break;
+      if (!await waitForLiveImportResume()) break;
+      const sourcePath = String(paths[itemIndex] || "");
+      const fileName = sourcePath.split(/[\\/]/).pop() || sourcePath || "video";
+      state.liveImportProgress = {
+        channel: channel.name,
+        current: itemIndex,
+        total: paths.length,
+        fileName,
+        action: actionLabel,
+        paused: Boolean(liveImportControlState().paused),
+        cancelRequested: Boolean(liveImportControlState().cancelRequested),
+      };
+      renderSettingsForms();
+      toast(`${actionLabel} ${itemIndex + 1} of ${paths.length}: ${fileName}`);
+      if (!await waitForLiveImportResume()) break;
+      const payload = await api("/api/normalized-files/import", {
+        method: "POST",
+        action: "normalized.import",
+        body: JSON.stringify({
+          config: state.config,
+          channel: channel.name,
+          paths: [sourcePath],
+          useOriginals,
+        }),
+      });
+      const imported = Array.isArray(payload.saved)
+        ? payload.saved.map((item) => item?.path || item).filter(Boolean)
+        : [];
+      saved.push(...imported);
+      state.normalizedFilesByChannel[channel.name] = payload.files || state.normalizedFilesByChannel[channel.name] || [];
+      if (liveImportControlState().cancelRequested) break;
+    }
+
+    await loadNormalizedFilesForChannel(channel);
+    const liveFiles = state.normalizedFilesByChannel[channel.name] || [];
+    const livePaths = liveFiles.map((file) => file.path).filter(Boolean);
+    const currentPlaylist = Array.isArray(state.configData.channels?.[index]?.playlist)
+      ? state.configData.channels[index].playlist
+      : [];
+    state.configData.channels[index].playlist = Array.from(new Set([...currentPlaylist, ...saved, ...livePaths]));
+    await saveConfigData(state.configData, { render: false, refresh: false, reloadFiles: false });
+    if (liveImportControlState().cancelRequested) {
+      toast(`Canceled import for ${channel.name}. ${saved.length} video${saved.length === 1 ? "" : "s"} kept.`);
+    } else if (useOriginals) {
+      toast(`Added ${saved.length} video${saved.length === 1 ? "" : "s"} from original folder to ${channel.name}.`);
+    } else {
+      toast(`Copied ${saved.length} video${saved.length === 1 ? "" : "s"} to Go Live / ${channel.name}.`);
+    }
+  } finally {
+    state.liveUploadBusyChannel = "";
+    state.liveImportProgress = null;
+    resetLiveImportControl();
+    state.settingsRenderPausedUntil = 0;
+    syncConfigEditor();
+    renderSettingsForms();
+  }
+}
+
 async function uploadRawVideos(index, files) {
   const selectedFiles = Array.from(files || []);
   if (!selectedFiles.length) return;
@@ -7724,18 +8181,23 @@ async function uploadRawVideos(index, files) {
       toast(`Adding ${file.name}...`);
       const url = `/api/raw-files/upload?config=${encodeURIComponent(state.config)}&channel=${encodeURIComponent(channel.name)}&filename=${encodeURIComponent(file.name)}`;
       const requestId = makeRequestId();
-      const response = await fetch(url, {
-        method: "POST",
-        headers: {
-          "X-Request-ID": requestId,
-          "X-Client-Action": "raw.upload",
-        },
-        body: file,
-      });
+      let response;
+      try {
+        response = await fetch(url, {
+          method: "POST",
+          headers: {
+            "X-Request-ID": requestId,
+            "X-Client-Action": "raw.upload",
+          },
+          body: file,
+        });
+      } catch (error) {
+        throw new Error(`Raw video "${file.name}" failed to fetch for ${channel.name}. Request: ${url}. Browser/network error: ${String(error?.message || error)}. Request ID: ${requestId}.`);
+      }
       const responseRequestId = String(response.headers.get("X-Request-ID") || requestId);
       const payload = await response.json();
       if (!response.ok) {
-        throw new Error(`${payload.error || "Upload failed."} [Request ID: ${responseRequestId}]`);
+        throw new Error(`Raw video upload failed for "${file.name}" on ${channel.name}. Server response: ${payload.error || "Upload failed."}. Request ID: ${responseRequestId}.`);
       }
       if (payload.saved?.path) {
         saved.push(payload.saved.path);
@@ -7772,33 +8234,64 @@ async function uploadLiveVideos(index, files) {
     return;
   }
 
+  resetLiveImportControl();
   state.liveUploadBusyChannel = channel.name;
+  state.liveImportProgress = {
+    channel: channel.name,
+    current: 0,
+    total: selectedFiles.length,
+    fileName: selectedFiles[0]?.name || "video",
+    action: "Copying",
+    paused: false,
+    cancelRequested: false,
+  };
   pauseSettingsRender(60000);
+  renderSettingsForms();
   const saved = [];
   try {
     await saveConfigData(config, { render: false, refresh: false, reloadFiles: false });
 
-    for (const file of selectedFiles) {
-      toast(`Importing ${file.name}...`);
+    for (let itemIndex = 0; itemIndex < selectedFiles.length; itemIndex += 1) {
+      if (liveImportControlState().cancelRequested) break;
+      if (!await waitForLiveImportResume()) break;
+      const file = selectedFiles[itemIndex];
+      state.liveImportProgress = {
+        channel: channel.name,
+        current: itemIndex,
+        total: selectedFiles.length,
+        fileName: file.name,
+        action: "Copying",
+        paused: Boolean(liveImportControlState().paused),
+        cancelRequested: Boolean(liveImportControlState().cancelRequested),
+      };
+      renderSettingsForms();
+      toast(`Copying ${itemIndex + 1} of ${selectedFiles.length}: ${file.name}`);
+      if (!await waitForLiveImportResume()) break;
       const url = `/api/normalized-files/upload?config=${encodeURIComponent(state.config)}&channel=${encodeURIComponent(channel.name)}&filename=${encodeURIComponent(file.name)}`;
       const requestId = makeRequestId();
-      const response = await fetch(url, {
-        method: "POST",
-        headers: {
-          "X-Request-ID": requestId,
-          "X-Client-Action": "normalized.upload",
-        },
-        body: file,
-      });
+      let response;
+      try {
+        response = await fetch(url, {
+          method: "POST",
+          headers: {
+            "X-Request-ID": requestId,
+            "X-Client-Action": "normalized.upload",
+          },
+          body: file,
+        });
+      } catch (error) {
+        throw new Error(`Live video "${file.name}" failed to fetch for ${channel.name}. Request: ${url}. Browser/network error: ${String(error?.message || error)}. Request ID: ${requestId}.`);
+      }
       const responseRequestId = String(response.headers.get("X-Request-ID") || requestId);
       const payload = await response.json();
       if (!response.ok) {
-        throw new Error(`${payload.error || "Import failed."} [Request ID: ${responseRequestId}]`);
+        throw new Error(`Live video import failed for "${file.name}" on ${channel.name}. Server response: ${payload.error || "Import failed."}. Request ID: ${responseRequestId}.`);
       }
       if (payload.saved?.path) {
         saved.push(payload.saved.path);
       }
       state.normalizedFilesByChannel[channel.name] = payload.files || state.normalizedFilesByChannel[channel.name] || [];
+      if (liveImportControlState().cancelRequested) break;
     }
 
     await loadNormalizedFilesForChannel(channel);
@@ -7809,9 +8302,15 @@ async function uploadLiveVideos(index, files) {
       : [];
     state.configData.channels[index].playlist = Array.from(new Set([...currentPlaylist, ...saved, ...livePaths]));
     await saveConfigData(state.configData, { render: false, refresh: false, reloadFiles: false });
-    toast(`Imported ${saved.length} video${saved.length === 1 ? "" : "s"} to ${channel.name}.`);
+    if (liveImportControlState().cancelRequested) {
+      toast(`Canceled import for ${channel.name}. ${saved.length} video${saved.length === 1 ? "" : "s"} kept.`);
+    } else {
+      toast(`Copied ${saved.length} video${saved.length === 1 ? "" : "s"} to Go Live / ${channel.name}.`);
+    }
   } finally {
     state.liveUploadBusyChannel = "";
+    state.liveImportProgress = null;
+    resetLiveImportControl();
     state.settingsRenderPausedUntil = 0;
     syncConfigEditor();
     renderSettingsForms();
@@ -8367,6 +8866,11 @@ async function stopTask(taskId) {
 }
 
 async function startStream(channel = null) {
+  if (isLiveImportBusy(channel || "")) {
+    const busyChannel = state.liveUploadBusyChannel || "the selected channel";
+    toast(`Wait for video import to finish for ${busyChannel}.`);
+    return;
+  }
   await flushSettingsAutosave();
   await api("/api/stream/start", {
     method: "POST",
@@ -8530,7 +9034,25 @@ function streamCycleEntryDurationSeconds(entry) {
   return 12 * 60 * 60;
 }
 
-function streamCycleHmsInputs(kind, parts, onChange) {
+function streamCycleRandomMinutes(source, field, fallbackSeconds = 0) {
+  if (Number.isFinite(Number(source?.[field]))) {
+    return Math.max(0, Math.round(Number(source[field]) || 0));
+  }
+  return Math.max(0, Math.round((Number(fallbackSeconds) || 0) / 60));
+}
+
+function streamCycleRandomSummary(baseSeconds, randomMinutes) {
+  const baseText = durationText(baseSeconds);
+  const minutes = Math.max(0, Math.round(Number(randomMinutes) || 0));
+  if (!minutes) return baseText;
+  return `${baseText} + up to ${minutes}m`;
+}
+
+function streamCycleInfoIcon(text) {
+  return `<span class="stream-cycle-info" aria-label="${escapeAttr(text)}" title="${escapeAttr(text)}">i</span>`;
+}
+
+function streamCycleHmsInputs(kind, parts, onChange, disabled = false) {
   const safeParts = {
     hours: Math.max(0, Math.floor(Number(parts?.hours) || 0)),
     minutes: Math.max(0, Math.floor(Number(parts?.minutes) || 0)),
@@ -8546,7 +9068,7 @@ function streamCycleHmsInputs(kind, parts, onChange) {
       ${fields.map((field) => `
         <label title="${escapeAttr(field.title)}">
           <span>${escapeHtml(field.label)}</span>
-          <input type="number" min="0" ${field.part === "hours" ? "" : "max=\"59\""} step="1" value="${escapeAttr(String(field.value))}" data-stream-cycle-kind="${escapeAttr(kind)}" data-stream-cycle-part="${escapeAttr(field.part)}" onchange="${escapeAttr(onChange)}">
+          <input type="number" min="0" ${field.part === "hours" ? "" : "max=\"59\""} step="1" value="${escapeAttr(String(field.value))}" data-stream-cycle-kind="${escapeAttr(kind)}" data-stream-cycle-part="${escapeAttr(field.part)}" onchange="${escapeAttr(onChange)}" ${disabled ? "disabled" : ""}>
         </label>
       `).join("")}
     </div>
@@ -8604,10 +9126,16 @@ function ensureStreamCycleChannelEntry(config, channelName) {
       channel: channelName,
       enabled: false,
       duration_seconds: 12 * 60 * 60,
+      duration_random_minutes: 0,
     };
     cycles.channels.push(entry);
   }
   entry.duration_seconds = streamCycleEntryDurationSeconds(entry);
+  if (!Number.isFinite(Number(entry.duration_random_minutes))) {
+    const previousMax = Number(entry.duration_max_seconds);
+    entry.duration_random_minutes = Number.isFinite(previousMax) ? Math.max(0, Math.round((previousMax - entry.duration_seconds) / 60)) : 0;
+  }
+  entry.duration_random_minutes = Math.max(0, Math.round(Number(entry.duration_random_minutes) || 0));
   return entry;
 }
 
@@ -8616,6 +9144,7 @@ function updateAlertToggle(key, value) {
   const alerts = state.configData.alerts = {
     ...defaultAlertSettings(),
     ...(state.configData.alerts || {}),
+    notification_mode: normalizeNotificationMode(state.configData.alerts?.notification_mode),
     rules: {
       ...defaultAlertSettings().rules,
       ...((state.configData.alerts && state.configData.alerts.rules) || {}),
@@ -8623,6 +9152,8 @@ function updateAlertToggle(key, value) {
   };
   if (key.startsWith("rules.")) {
     alerts.rules[key.slice(6)] = Boolean(value);
+  } else if (key === "notification_mode") {
+    alerts.notification_mode = normalizeNotificationMode(value);
   } else {
     alerts[key] = typeof alerts[key] === "number" ? Math.max(30, Number(value) || 300) : Boolean(value);
   }
@@ -8657,6 +9188,10 @@ function updateStreamCycleSetting(key, value) {
     cycles.enabled = Boolean(value);
   } else if (key === "restart_delay_seconds") {
     cycles.restart_delay_seconds = Math.max(0, Number(value) || 0);
+  } else if (key === "randomized") {
+    cycles.randomized = Boolean(value);
+  } else if (key === "restart_delay_random_minutes") {
+    cycles.restart_delay_random_minutes = Math.max(0, Math.round(Number(value) || 0));
   }
   renderStreamCycleSettingsPanels();
   scheduleSettingsAutosave(200);
@@ -8693,6 +9228,8 @@ function updateChannelStreamCycleSetting(field, value) {
     entry.duration_seconds = Math.round(hours * 60 * 60);
   } else if (field === "duration_seconds") {
     entry.duration_seconds = Math.max(1, Math.round(Number(value) || 1));
+  } else if (field === "duration_random_minutes") {
+    entry.duration_random_minutes = Math.max(0, Math.round(Number(value) || 0));
   }
   renderStreamCycleSettingsPanels();
   scheduleSettingsAutosave(200);
@@ -8750,6 +9287,19 @@ function toggleChannelSchedulerDay(day, checked) {
 
 function toggleWorkspaceAlertsMenu() {
   state.workspace.alertsMenuOpen = !state.workspace.alertsMenuOpen;
+  if (state.workspace.alertsMenuOpen) {
+    markWorkspaceAlertsRead(workspaceRecentAlerts(state.status));
+  }
+  rerenderWorkspaceHeader();
+}
+
+function toggleWorkspaceAlertItem(id) {
+  const key = String(id || "").trim();
+  if (!key) return;
+  state.workspace.expandedAlertIds = {
+    ...(state.workspace.expandedAlertIds || {}),
+    [key]: !state.workspace.expandedAlertIds?.[key],
+  };
   rerenderWorkspaceHeader();
 }
 
@@ -8781,6 +9331,13 @@ async function showDesktopAlertNotification(alert) {
   }
 }
 
+function alertAllowedByNotificationMode(mode, alert) {
+  const normalized = normalizeNotificationMode(mode);
+  if (normalized === "off") return false;
+  if (normalized === "critical") return String(alert?.severity || "").toLowerCase() === "danger";
+  return true;
+}
+
 function rememberDeliveredAlertIds(nextIds) {
   state.deliveredAlertIds = Array.from(new Set([...(state.deliveredAlertIds || []), ...nextIds])).slice(-40);
 }
@@ -8790,9 +9347,10 @@ function deliverDesktopAlerts(payload = state.status) {
   const recent = Array.isArray(alerts.recent) ? alerts.recent : [];
   const enabled = alerts.desktop_notifications_enabled !== false;
   if (!enabled || !recent.length) return;
+  const notificationMode = normalizeNotificationMode(alerts.notification_mode);
   const seen = new Set(state.deliveredAlertIds || []);
   const fresh = recent
-    .filter((item) => item?.desktop_enabled !== false && !seen.has(Number(item?.id || 0)))
+    .filter((item) => item?.desktop_enabled !== false && alertAllowedByNotificationMode(notificationMode, item) && !seen.has(Number(item?.id || 0)))
     .sort((a, b) => Number(a?.id || 0) - Number(b?.id || 0));
   if (!fresh.length) return;
   rememberDeliveredAlertIds(fresh.map((item) => Number(item?.id || 0)));
@@ -8801,12 +9359,23 @@ function deliverDesktopAlerts(payload = state.status) {
   });
 }
 
+function localNotificationTitle(message) {
+  const text = String(message || "").trim();
+  if (!text) return "Notification";
+  if (/failed to fetch/i.test(text)) return compactAlertTitle({ title: "", message: text });
+  if (/autosave failed/i.test(text)) return "Settings autosave failed";
+  if (/failed/i.test(text)) return text.split(":")[0].slice(0, 88) || "Action failed";
+  if (/update/i.test(text)) return "Update";
+  return text.split(/[.!?]\s/)[0].replace(/\.$/, "").slice(0, 88) || "Notification";
+}
+
 function renderAutomationSettingsPanel(config = state.configData || defaultConfigData()) {
   const container = $("automationSettingsPanel");
   if (!container) return;
   const alerts = {
     ...defaultAlertSettings(),
     ...(config.alerts || {}),
+    notification_mode: normalizeNotificationMode(config.alerts?.notification_mode),
     rules: {
       ...defaultAlertSettings().rules,
       ...((config.alerts && config.alerts.rules) || {}),
@@ -8835,6 +9404,13 @@ function renderAutomationSettingsPanel(config = state.configData || defaultConfi
   };
   const cycleDurationSeconds = streamCycleEntryDurationSeconds(cycleEntry);
   const cycleDurationHours = Math.round((cycleDurationSeconds / 3600) * 100) / 100;
+  const rawCycleCooldownSeconds = Number(cycles.restart_delay_seconds ?? 180);
+  const cycleCooldownSeconds = Number.isFinite(rawCycleCooldownSeconds) ? Math.max(0, Math.round(rawCycleCooldownSeconds)) : 180;
+  const cycleDurationRandomFallback = Math.max(0, Number(cycleEntry.duration_max_seconds) - cycleDurationSeconds);
+  const cycleCooldownRandomFallback = Math.max(0, Number(cycles.restart_delay_max_seconds) - cycleCooldownSeconds);
+  const cycleDurationRandomMinutes = streamCycleRandomMinutes(cycleEntry, "duration_random_minutes", cycleDurationRandomFallback);
+  const cycleCooldownRandomMinutes = streamCycleRandomMinutes(cycles, "restart_delay_random_minutes", cycleCooldownRandomFallback);
+  const cycleRandomTooltip = `After the end time of your set stream, Castarro will randomly end the stream within a maximum of ${cycleDurationRandomMinutes || "n"} minutes.`;
   const schedulerStatus = Array.isArray(state.status?.scheduler?.channels)
     ? state.status.scheduler.channels.find((item) => String(item?.channel || "") === channelName)
     : null;
@@ -8849,6 +9425,15 @@ function renderAutomationSettingsPanel(config = state.configData || defaultConfi
           <p class="helper">Choose which major events should surface on desktop and paired phones.</p>
         </div>
         <div class="automation-toggle-grid">
+          <div class="automation-toggle automation-toggle-wide">
+            <label for="notificationMode">Notification delivery</label>
+            <select id="notificationMode" onchange="updateAlertToggle('notification_mode', this.value)">
+              <option value="all" ${alerts.notification_mode === "all" ? "selected" : ""}>All enabled alerts</option>
+              <option value="critical" ${alerts.notification_mode === "critical" ? "selected" : ""}>Critical only</option>
+              <option value="off" ${alerts.notification_mode === "off" ? "selected" : ""}>Off</option>
+            </select>
+            <span class="helper">Controls desktop and paired-phone notifications while keeping in-app history available.</span>
+          </div>
           <div class="automation-toggle">
             <label><input type="checkbox" ${alerts.desktop_notifications_enabled ? "checked" : ""} onchange="updateAlertToggle('desktop_notifications_enabled', this.checked)"> Desktop system notifications</label>
             <span class="helper">Uses the desktop shell to surface critical stream alerts outside the app window.</span>
@@ -8935,7 +9520,7 @@ function renderAutomationSettingsPanel(config = state.configData || defaultConfi
           </label>
           <label>
             <span class="field-hint">Cooldown seconds</span>
-            <input type="number" min="60" step="30" value="${escapeAttr(String(cycles.restart_delay_seconds ?? 180))}" onchange="updateStreamCycleSetting('restart_delay_seconds', this.value)">
+            <input type="number" min="0" step="30" value="${escapeAttr(String(cycleCooldownSeconds))}" onchange="updateStreamCycleSetting('restart_delay_seconds', this.value)">
           </label>
           <div>
             <span class="field-hint">Status</span>
@@ -8958,9 +9543,28 @@ function renderAutomationSettingsPanel(config = state.configData || defaultConfi
             </label>
             <div>
               <span class="field-hint">Configured duration</span>
-              <div>${escapeHtml(durationText(cycleDurationSeconds))}</div>
+              <div>${escapeHtml(cycles.randomized ? streamCycleRandomSummary(cycleDurationSeconds, cycleDurationRandomMinutes) : durationText(cycleDurationSeconds))}</div>
             </div>
           </div>
+          <label class="switch stream-cycle-randomize">
+            <input type="checkbox" ${cycles.randomized ? "checked" : ""} onchange="updateStreamCycleSetting('randomized', this.checked)">
+            <span>Randomize stream and cooldown</span>
+            ${streamCycleInfoIcon(cycleRandomTooltip)}
+          </label>
+          ${cycles.randomized ? `
+            <div class="stream-cycle-random-fields">
+              <label>
+                <span class="field-hint">Stream random duration</span>
+                <input type="number" min="0" step="1" value="${escapeAttr(String(cycleDurationRandomMinutes))}" onchange="updateChannelStreamCycleSetting('duration_random_minutes', this.value)">
+                <span class="setting-note">minutes after the set stream time</span>
+              </label>
+              <label>
+                <span class="field-hint">Cooldown random duration</span>
+                <input type="number" min="0" step="1" value="${escapeAttr(String(cycleCooldownRandomMinutes))}" onchange="updateStreamCycleSetting('restart_delay_random_minutes', this.value)">
+                <span class="setting-note">minutes added before restart</span>
+              </label>
+            </div>
+          ` : ""}
         ` : `<p class="helper">Create or select a channel to configure cycle restarts.</p>`}
       </section>
     </div>
@@ -9026,8 +9630,9 @@ function toast(message) {
   state.localNotifications = [
     {
       id: `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      title: "Update",
+      title: localNotificationTitle(text),
       message: text,
+      detail: text,
       severity: "info",
       created_at: new Date().toISOString(),
       local: true,
@@ -9402,6 +10007,7 @@ window.addEventListener("message", (event) => {
 });
 
 readOnboardingState();
+readWorkspaceAlertIds();
 applySettingsSection(state.settingsTab);
 applyLegacyTabView("control");
 renderChannelTools();

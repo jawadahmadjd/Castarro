@@ -659,6 +659,87 @@ def assert_live_chat_routes_to_linked_channel_account() -> None:
     assert "T" in payload["messages"][0]["received_at"]
 
 
+def assert_live_chat_auto_links_active_broadcast() -> None:
+    working = make_config()
+    captured: dict = {}
+
+    original_load = web_ui.load_config_or_none
+    original_save = web_ui.save_config
+    original_valid_token = web_ui.youtube_service.valid_access_token
+    original_profile = web_ui.youtube_service.connected_account_profile
+    original_list_broadcasts = web_ui.youtube_service.list_broadcasts_by_status
+    original_messages = web_ui.youtube_service.list_live_chat_messages
+    original_record_event = app_db.record_event
+
+    def fake_load(_config_name: str):
+        return working, None
+
+    def fake_save(_config_name: str, updated: dict):
+        captured["saved"] = copy.deepcopy(updated)
+
+    def fake_valid_access_token(_root: Path, scoped_config: dict):
+        captured["tokens_file"] = scoped_config["youtube"]["tokens_file"]
+        return "token-b", {}
+
+    def fake_profile(_token: str):
+        return {"channel_id": "yt-b", "channel_title": "B", "channel_handle": "@b"}
+
+    def fake_list_broadcasts(token: str, status: str, limit: int = 25):
+        captured["list_token"] = token
+        captured["status"] = status
+        captured["limit"] = limit
+        return [
+            {
+                "id": "active-broadcast-b",
+                "title": "B Active Live",
+                "live_chat_id": "chat-active-b",
+                "life_cycle_status": "live",
+                "bound_stream_id": "stream-b",
+                "studio_url": "https://studio.youtube.com/video/active-broadcast-b/livestreaming",
+            }
+        ]
+
+    def fake_messages(token: str, *, live_chat_id: str, page_token: str = "", max_results: int = 200):
+        captured["messages_token"] = token
+        captured["live_chat_id"] = live_chat_id
+        return {"messages": [], "next_page_token": "", "polling_interval_millis": 5000, "offline_at": ""}
+
+    def fake_record_event(event_type: str, config_name: str | None, channel_name: str | None, details: dict | None = None):
+        captured["event"] = (event_type, config_name, channel_name, copy.deepcopy(details or {}))
+        return 1
+
+    web_ui.load_config_or_none = fake_load
+    web_ui.save_config = fake_save
+    web_ui.youtube_service.valid_access_token = fake_valid_access_token
+    web_ui.youtube_service.connected_account_profile = fake_profile
+    web_ui.youtube_service.list_broadcasts_by_status = fake_list_broadcasts
+    web_ui.youtube_service.list_live_chat_messages = fake_messages
+    app_db.record_event = fake_record_event
+    try:
+        payload = web_ui.youtube_live_chat("config.ready.json", "B")
+    finally:
+        web_ui.load_config_or_none = original_load
+        web_ui.save_config = original_save
+        web_ui.youtube_service.valid_access_token = original_valid_token
+        web_ui.youtube_service.connected_account_profile = original_profile
+        web_ui.youtube_service.list_broadcasts_by_status = original_list_broadcasts
+        web_ui.youtube_service.list_live_chat_messages = original_messages
+        app_db.record_event = original_record_event
+
+    saved_channel = captured["saved"]["channels"][1]
+    assert payload["account_id"] == "acct-b"
+    assert payload["broadcast_id"] == "active-broadcast-b"
+    assert payload["broadcast_title"] == "B Active Live"
+    assert payload["live_chat_id"] == "chat-active-b"
+    assert saved_channel["youtube_broadcast_id"] == "active-broadcast-b"
+    assert saved_channel["youtube_stream_id"] == "stream-b"
+    assert captured["tokens_file"] == ".runtime/b.json"
+    assert captured["status"] == "active"
+    assert captured["messages_token"] == "token-b"
+    assert captured["live_chat_id"] == "chat-active-b"
+    assert captured["event"][0] == "youtube_broadcast_auto_linked"
+
+
 def assert_live_chat_reply_posts_to_linked_channel_account() -> None:
     config = make_config()
     config["channels"][2]["youtube_broadcast_id"] = "broadcast-c"
@@ -732,6 +813,7 @@ def main() -> int:
     assert_oauth_callback_exchanges_with_stored_redirect_uri()
     assert_history_and_activity_are_channel_specific()
     assert_live_chat_routes_to_linked_channel_account()
+    assert_live_chat_auto_links_active_broadcast()
     assert_live_chat_reply_posts_to_linked_channel_account()
     print("channel_workspace_contract_test: PASS")
     return 0

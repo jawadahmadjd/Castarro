@@ -94,6 +94,7 @@
     }
   },
   "alerts": {
+    "notification_mode": "all",
     "desktop_notifications_enabled": true,
     "mobile_notifications_enabled": true,
     "cooldown_seconds": 300,
@@ -108,6 +109,13 @@
     "enabled": false,
     "timezone": "local",
     "poll_seconds": 20,
+    "channels": []
+  },
+  "stream_cycles": {
+    "enabled": false,
+    "restart_delay_seconds": 180,
+    "randomized": false,
+    "restart_delay_random_minutes": 0,
     "channels": []
   },
   "ui": {

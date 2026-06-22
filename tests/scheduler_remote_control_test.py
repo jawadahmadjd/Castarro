@@ -178,11 +178,82 @@ def assert_stream_cycle_restarts_after_duration() -> None:
             web_ui.unregister_cloud_assets = original_unregister_cloud_assets
 
 
+def assert_stream_cycle_uses_random_duration_and_cooldown_minutes() -> None:
+    original_state = web_ui.STATE
+    original_stop_stream = web_ui.stream_manager.stop_stream
+    original_randint = web_ui.random.randint
+    original_record_event = web_ui.app_db.record_event
+    original_record_stream_stop = web_ui.app_db.record_stream_stop
+    original_unregister_cloud_assets = web_ui.unregister_cloud_assets
+
+    events: list[tuple[str, dict]] = []
+    with tempfile.TemporaryDirectory(prefix="castarro-random-cycle-", dir=str(ROOT)) as temp_dir:
+        temp_root = Path(temp_dir)
+        running = fake_running_stream("Inside Us", log_dir=temp_root / "logs", pid=3001)
+        stream_state = web_ui.StreamState("config.ready.json", running)
+        stream_state.started_at = time.time() - 91
+        config = {
+            "stream_cycles": {
+                "enabled": True,
+                "randomized": True,
+                "restart_delay_seconds": 10,
+                "restart_delay_random_minutes": 2,
+                "channels": [
+                    {
+                        "channel": "Inside Us",
+                        "enabled": True,
+                        "duration_seconds": 30,
+                        "duration_random_minutes": 1,
+                    },
+                ],
+            },
+            "channels": [
+                {"name": "Inside Us", "enabled": True, "stream_key_env": "abcd-efgh-ijkl"},
+            ],
+        }
+
+        def fake_stop_stream(running_stream: web_ui.stream_manager.RunningStream) -> None:
+            running_stream.stop_requested = True
+            running_stream.process.returncode = 0
+
+        try:
+            web_ui.STATE = web_ui.AppState()
+            web_ui.STATE.streams["Inside Us"] = stream_state
+            web_ui.stream_manager.stop_stream = fake_stop_stream
+            web_ui.random.randint = lambda _start, end: end
+            web_ui.app_db.record_event = lambda event, _config, _channel, details: events.append((event, details))
+            web_ui.app_db.record_stream_stop = lambda *_args, **_kwargs: None
+            web_ui.unregister_cloud_assets = lambda _asset_ids: None
+
+            web_ui.evaluate_stream_cycles_for_config("config.ready.json", config)
+            runtime = web_ui.STATE.stream_cycle_channels[("config.ready.json", "Inside Us")]
+            assert runtime["duration_seconds"] == 90, "Randomized duration should add up to the configured extra minutes."
+            assert running.process.poll() == 0, "Expired randomized cycle should stop the stream."
+            assert runtime["restart_delay_seconds"] == 130, "Randomized cooldown should add up to the configured extra minutes."
+            assert any(
+                event == "stream_cycle_stopped" and details.get("restart_delay_seconds") == 130
+                for event, details in events
+            )
+        finally:
+            for state in list(web_ui.STATE.streams.values()):
+                if state.running.log_handle and not state.running.log_handle.closed:
+                    state.running.log_handle.close()
+            if running.log_handle and not running.log_handle.closed:
+                running.log_handle.close()
+            web_ui.STATE = original_state
+            web_ui.stream_manager.stop_stream = original_stop_stream
+            web_ui.random.randint = original_randint
+            web_ui.app_db.record_event = original_record_event
+            web_ui.app_db.record_stream_stop = original_record_stream_stop
+            web_ui.unregister_cloud_assets = original_unregister_cloud_assets
+
+
 def main() -> int:
     assert_schedule_is_active_for_daytime_window()
     assert_schedule_is_active_for_overnight_window()
     assert_remote_control_dispatches_expected_action()
     assert_stream_cycle_restarts_after_duration()
+    assert_stream_cycle_uses_random_duration_and_cooldown_minutes()
     print("scheduler_remote_control_test: PASS")
     return 0
 

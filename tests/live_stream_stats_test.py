@@ -13,6 +13,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import app_db  # noqa: E402
 import stream_manager  # noqa: E402
 import web_ui  # noqa: E402
+import youtube_service  # noqa: E402
 
 
 class FakeProcess:
@@ -139,10 +140,115 @@ def assert_status_payload_includes_target_fps_for_running_stream() -> None:
             app_db.stats = original_stats
 
 
+def assert_youtube_health_overrides_local_delivery_warning() -> None:
+    original_state = web_ui.STATE
+    original_load_config = web_ui.load_config_or_none
+    original_ensure_media_folders = web_ui.ensure_media_folders
+    original_recent_stream_sessions = app_db.recent_stream_sessions
+    original_recent_app_events = app_db.recent_app_events
+    original_stream_transfer_today_bytes = app_db.stream_transfer_today_bytes
+    original_stats = app_db.stats
+    original_valid_access_token = youtube_service.valid_access_token
+    original_live_stream_by_id = youtube_service.live_stream_by_id
+
+    with tempfile.TemporaryDirectory(prefix="castarro-youtube-health-", dir=str(ROOT)) as temp_dir:
+        temp_root = Path(temp_dir)
+        log_path = temp_root / "logs" / "inside-us.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text(
+            "\n".join(
+                [
+                    "frame=150",
+                    "fps=30.0",
+                    "total_size=100000",
+                    "out_time_us=5000000",
+                    "drop_frames=0",
+                    "speed=1.00x",
+                    "progress=continue",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        log_handle = log_path.open("ab")
+
+        def fake_load_config_or_none(_config_name: str):
+            return {
+                "youtube": {
+                    "accounts": [
+                        {"id": "acct-a", "tokens_file": ".runtime/youtube_tokens_acct-a.json"},
+                    ],
+                },
+                "channels": [
+                    {
+                        "name": "Inside Us",
+                        "enabled": True,
+                        "stream_key_env": "abcd-efgh-ijkl",
+                        "youtube_account_id": "acct-a",
+                        "youtube_stream_id": "stream-a",
+                        "live_profile": {"fps": 30},
+                    }
+                ],
+            }, None
+
+        def fake_live_stream_by_id(_access_token: str, _stream_id: str):
+            return {
+                "id": "stream-a",
+                "status": {
+                    "streamStatus": "active",
+                    "healthStatus": {
+                        "status": "good",
+                        "lastUpdateTimeSeconds": 1718376000,
+                        "configurationIssues": [],
+                    },
+                },
+            }
+
+        try:
+            web_ui.STATE = web_ui.AppState()
+            running = stream_manager.RunningStream(
+                channel={"name": "Inside Us"},
+                process=FakeProcess(4242),
+                log_handle=log_handle,
+                command=["ffmpeg"],
+                preview_manifest=None,
+                preview_warning=None,
+            )
+            web_ui.STATE.streams["Inside Us"] = web_ui.StreamState("config.ready.json", running)
+            web_ui.load_config_or_none = fake_load_config_or_none
+            web_ui.ensure_media_folders = lambda _config: None
+            app_db.recent_stream_sessions = lambda *_args, **_kwargs: []
+            app_db.recent_app_events = lambda *_args, **_kwargs: []
+            app_db.stream_transfer_today_bytes = lambda *_args, **_kwargs: 0
+            app_db.stats = lambda: {}
+            youtube_service.valid_access_token = lambda *_args, **_kwargs: ("token", {})
+            youtube_service.live_stream_by_id = fake_live_stream_by_id
+
+            payload = web_ui.status_payload("config.ready.json")
+            stats = payload["streams"]["Inside Us"]["stream_stats"]
+            assert stats["local_health_label"] == "Poor"
+            assert stats["health_source"] == "youtube"
+            assert stats["youtube_health_status"] == "good"
+            assert stats["youtube_stream_status"] == "active"
+            assert stats["health_label"] == "Excellent"
+        finally:
+            if not log_handle.closed:
+                log_handle.close()
+            web_ui.STATE = original_state
+            web_ui.load_config_or_none = original_load_config
+            web_ui.ensure_media_folders = original_ensure_media_folders
+            app_db.recent_stream_sessions = original_recent_stream_sessions
+            app_db.recent_app_events = original_recent_app_events
+            app_db.stream_transfer_today_bytes = original_stream_transfer_today_bytes
+            app_db.stats = original_stats
+            youtube_service.valid_access_token = original_valid_access_token
+            youtube_service.live_stream_by_id = original_live_stream_by_id
+
+
 def main() -> int:
     assert_progress_parser_reports_live_delivery()
     assert_timestamped_stats_line_still_parses()
     assert_status_payload_includes_target_fps_for_running_stream()
+    assert_youtube_health_overrides_local_delivery_warning()
     print("live_stream_stats_test: PASS")
     return 0
 
