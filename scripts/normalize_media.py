@@ -391,10 +391,12 @@ def adaptive_lower_variants(config: dict[str, Any], channel: dict[str, Any]) -> 
     live_profile = stream_manager.live_profile(config, channel)
     adaptive = stream_manager.adaptive_profile(live_profile)
     variants = list(adaptive.get("variants") or [])
-    if len(variants) <= 1:
-        return []
-    max_height = max(int(variant.get("height") or 0) for variant in variants)
-    return [variant for variant in variants if int(variant.get("height") or 0) < max_height]
+    source_profile = profile(config, channel)
+    try:
+        source_height = int(source_profile.get("height") or DEFAULT_PROFILE["height"])
+    except (TypeError, ValueError):
+        source_height = int(DEFAULT_PROFILE["height"])
+    return [variant for variant in variants if int(variant.get("height") or 0) < source_height]
 
 
 def normalize_channel_renditions(

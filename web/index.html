@@ -50,6 +50,7 @@
           <button class="sidebar-tool-item hidden" id="railOpenLive" data-route="youtube" type="button">Live</button>
           <button class="sidebar-tool-item" id="railOpenHistory" data-route="history" type="button">History</button>
           <button class="sidebar-tool-item" id="railOpenTroubleshoot" data-route="troubleshoot" type="button">Troubleshoot</button>
+          <button class="sidebar-tool-item" id="railOpenTransfer" data-route="transfer" type="button">Transfer</button>
         </nav>
 
         <div class="sidebar-footer">
@@ -228,6 +229,7 @@
               <button class="tab" id="settingsStorageTab" type="button">Storage</button>
               <button class="tab active" id="settingsYoutubeTab" type="button">YouTube</button>
               <button class="tab" id="settingsAutomationTab" type="button">Automation</button>
+              <button class="tab" id="settingsTransferTab" type="button">Transfer</button>
               <button class="tab" id="settingsLiveHistoryTab" type="button">Live History</button>
               <button class="tab" id="settingsTroubleshootingTab" type="button">Troubleshooting</button>
             </div>
@@ -286,6 +288,34 @@
               </div>
             </div>
             <div id="automationSettingsPanel"></div>
+          </section>
+        </section>
+
+        <section id="settingsTransferView" class="settings-section">
+          <section class="panel">
+            <div class="section-head">
+              <div>
+                <h2>Transfer Package</h2>
+                <p class="helper">Move channels, settings, videos, playlists, runtime tokens, and history to another PC.</p>
+              </div>
+            </div>
+            <div class="transfer-package-grid">
+              <section class="transfer-package-card">
+                <div>
+                  <h3>Export from this PC</h3>
+                  <p class="helper">Create a folder package you can copy by USB drive, external SSD, cloud storage, or network share.</p>
+                </div>
+                <button class="pill primary" id="exportTransferPackage" type="button">Create Package</button>
+              </section>
+              <section class="transfer-package-card">
+                <div>
+                  <h3>Import on this PC</h3>
+                  <p class="helper">Restore a Castarro transfer package. Current data is backed up before replacement.</p>
+                </div>
+                <button class="pill" id="importTransferPackage" type="button">Import Package</button>
+              </section>
+            </div>
+            <div class="notice hidden transfer-package-status" id="transferPackageStatus"></div>
           </section>
         </section>
 

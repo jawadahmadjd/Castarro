@@ -553,6 +553,40 @@ def assert_oauth_callback_exchanges_with_stored_redirect_uri() -> None:
     assert captured["code_verifier"] == "verifier-123"
 
 
+def assert_youtube_status_keeps_connected_when_profile_refresh_fails() -> None:
+    config = make_config()
+    config["youtube"]["accounts"][0].update(
+        {
+            "channel_id": "yt-a",
+            "channel_title": "A",
+            "channel_handle": "@a",
+            "last_connected_at": "2026-06-23T00:00:00Z",
+        }
+    )
+
+    original_load = web_ui.load_config_or_none
+    original_load_tokens = web_ui.youtube_service.load_tokens
+    original_valid_token = web_ui.youtube_service.valid_access_token
+    original_profile = web_ui.youtube_service.connected_account_profile
+
+    web_ui.load_config_or_none = lambda _name: (config, None)
+    web_ui.youtube_service.load_tokens = lambda *_args, **_kwargs: {"access_token": "token", "expires_at": "2099-01-01T00:00:00Z"}
+    web_ui.youtube_service.valid_access_token = lambda *_args, **_kwargs: ("token", {"scope": "youtube", "expires_at": "2099-01-01T00:00:00Z"})
+    web_ui.youtube_service.connected_account_profile = lambda _token: (_ for _ in ()).throw(RuntimeError("temporary profile lookup failure"))
+    try:
+        payload = web_ui.youtube_status("config.ready.json")
+    finally:
+        web_ui.load_config_or_none = original_load
+        web_ui.youtube_service.load_tokens = original_load_tokens
+        web_ui.youtube_service.valid_access_token = original_valid_token
+        web_ui.youtube_service.connected_account_profile = original_profile
+
+    account = next(item for item in payload["accounts"] if item["id"] == "acct-a")
+    assert payload["connected"] is True
+    assert account["connected"] is True
+    assert "Could not refresh YouTube profile" in account["message"]
+
+
 def assert_history_and_activity_are_channel_specific() -> None:
     original_root = app_db.ROOT
     original_db_path = app_db.DB_PATH
@@ -799,6 +833,109 @@ def assert_live_chat_auto_links_active_broadcast() -> None:
     assert captured["recorded_chat"][0:4] == ("config.ready.json", "B", "active-broadcast-b", "chat-active-b")
 
 
+def assert_live_chat_replaces_ended_broadcast_with_active_broadcast() -> None:
+    working = make_config()
+    working["channels"][1]["youtube_broadcast_id"] = "old-broadcast-b"
+    working["channels"][1]["youtube_stream_id"] = "old-stream-b"
+    captured: dict = {"events": [], "saves": [], "message_calls": []}
+
+    original_load = web_ui.load_config_or_none
+    original_save = web_ui.save_config
+    original_valid_token = web_ui.youtube_service.valid_access_token
+    original_profile = web_ui.youtube_service.connected_account_profile
+    original_broadcast = web_ui.youtube_service.broadcast_chat_details_by_id
+    original_list_broadcasts = web_ui.youtube_service.list_broadcasts_by_status
+    original_messages = web_ui.youtube_service.list_live_chat_messages
+    original_record_event = app_db.record_event
+    original_record_messages = app_db.record_live_chat_messages
+
+    def fake_load(_config_name: str):
+        return working, None
+
+    def fake_save(_config_name: str, updated: dict):
+        captured["saves"].append(copy.deepcopy(updated))
+
+    def fake_valid_access_token(_root: Path, scoped_config: dict):
+        captured["tokens_file"] = scoped_config["youtube"]["tokens_file"]
+        return "token-b", {}
+
+    def fake_profile(_token: str):
+        return {"channel_id": "yt-b", "channel_title": "B", "channel_handle": "@b"}
+
+    def fake_broadcast(token: str, broadcast_id: str):
+        captured["old_broadcast_id"] = broadcast_id
+        return {"id": broadcast_id, "title": "Old B Live", "live_chat_id": "old-chat-b", "life_cycle_status": "live"}
+
+    def fake_list_broadcasts(token: str, status: str, limit: int = 25):
+        captured["list_status"] = status
+        return [
+            {
+                "id": "current-broadcast-b",
+                "title": "B Current Live",
+                "live_chat_id": "current-chat-b",
+                "life_cycle_status": "live",
+                "bound_stream_id": "current-stream-b",
+                "studio_url": "https://studio.youtube.com/video/current-broadcast-b/livestreaming",
+            }
+        ]
+
+    def fake_messages(token: str, *, live_chat_id: str, page_token: str = "", max_results: int = 200):
+        captured["message_calls"].append(live_chat_id)
+        if live_chat_id == "old-chat-b":
+            raise ValueError("liveChatEnded: The live chat is no longer live.")
+        return {
+            "messages": [{"id": "m-current", "display_message": "current hello"}],
+            "next_page_token": "next-current",
+            "polling_interval_millis": 9000,
+            "offline_at": "",
+        }
+
+    def fake_record_event(event_type: str, config_name: str | None, channel_name: str | None, details: dict | None = None):
+        captured["events"].append((event_type, config_name, channel_name, copy.deepcopy(details or {})))
+        return len(captured["events"])
+
+    def fake_record_messages(config_name: str, channel_name: str, broadcast_id: str, live_chat_id: str, messages: list):
+        captured["recorded_chat"] = (config_name, channel_name, broadcast_id, live_chat_id, copy.deepcopy(messages))
+
+    web_ui.load_config_or_none = fake_load
+    web_ui.save_config = fake_save
+    web_ui.youtube_service.valid_access_token = fake_valid_access_token
+    web_ui.youtube_service.connected_account_profile = fake_profile
+    web_ui.youtube_service.broadcast_chat_details_by_id = fake_broadcast
+    web_ui.youtube_service.list_broadcasts_by_status = fake_list_broadcasts
+    web_ui.youtube_service.list_live_chat_messages = fake_messages
+    app_db.record_event = fake_record_event
+    app_db.record_live_chat_messages = fake_record_messages
+    try:
+        payload = web_ui.youtube_live_chat("config.ready.json", "B", "old-page")
+    finally:
+        web_ui.load_config_or_none = original_load
+        web_ui.save_config = original_save
+        web_ui.youtube_service.valid_access_token = original_valid_token
+        web_ui.youtube_service.connected_account_profile = original_profile
+        web_ui.youtube_service.broadcast_chat_details_by_id = original_broadcast
+        web_ui.youtube_service.list_broadcasts_by_status = original_list_broadcasts
+        web_ui.youtube_service.list_live_chat_messages = original_messages
+        app_db.record_event = original_record_event
+        app_db.record_live_chat_messages = original_record_messages
+
+    saved_channel = captured["saves"][-1]["channels"][1]
+    assert payload["ok"] is True
+    assert payload["broadcast_id"] == "current-broadcast-b"
+    assert payload["live_chat_id"] == "current-chat-b"
+    assert payload["next_page_token"] == "next-current"
+    assert captured["old_broadcast_id"] == "old-broadcast-b"
+    assert captured["message_calls"] == ["old-chat-b", "current-chat-b"]
+    assert saved_channel["youtube_broadcast_id"] == "current-broadcast-b"
+    assert saved_channel["youtube_stream_id"] == "current-stream-b"
+    assert [event[0] for event in captured["events"]] == [
+        "youtube_broadcast_link_cleared",
+        "youtube_broadcast_auto_linked",
+    ]
+    assert captured["events"][0][3]["reason"] == "live_chat_ended"
+    assert captured["recorded_chat"][0:4] == ("config.ready.json", "B", "current-broadcast-b", "current-chat-b")
+
+
 def assert_live_chat_reply_posts_to_linked_channel_account() -> None:
     config = make_config()
     config["channels"][2]["youtube_broadcast_id"] = "broadcast-c"
@@ -864,6 +1001,40 @@ def assert_live_chat_reply_posts_to_linked_channel_account() -> None:
     assert captured["recorded_chat"][4][0]["sent_at"]
 
 
+def assert_live_chat_parser_keeps_event_comments_and_emoji() -> None:
+    member_message = web_ui.youtube_service.live_chat_message_from_resource(
+        {
+            "id": "member-1",
+            "snippet": {
+                "type": "memberMilestoneChatEvent",
+                "publishedAt": "2026-06-25T10:00:00Z",
+                "memberMilestoneChatDetails": {"userComment": "said hi"},
+            },
+            "authorDetails": {"displayName": "Viewer A"},
+        }
+    )
+    emoji_message = web_ui.youtube_service.live_chat_message_from_resource(
+        {
+            "id": "emoji-1",
+            "snippet": {
+                "type": "textMessageEvent",
+                "publishedAt": "2026-06-25T10:00:10Z",
+                "textMessageDetails": {
+                    "messageText": ":hand-pink-waving: :face-red-heart-shape: :face-fuchsia-poop-shape:",
+                },
+            },
+            "authorDetails": {"displayName": "Viewer B"},
+        }
+    )
+
+    assert member_message is not None
+    assert member_message["message_text"] == "said hi"
+    assert member_message["display_message"] == "said hi"
+    assert emoji_message is not None
+    assert emoji_message["display_message"] == "\U0001f44b \U0001f970 \U0001f4a9"
+    assert emoji_message["message_parts"][0]["text"] == "\U0001f44b \U0001f970 \U0001f4a9"
+
+
 def assert_live_chat_messages_are_saved_with_stream_history() -> None:
     original_root = app_db.ROOT
     original_db_path = app_db.DB_PATH
@@ -897,6 +1068,7 @@ def assert_live_chat_messages_are_saved_with_stream_history() -> None:
                         "id": "msg-2",
                         "author_display_name": "Viewer Two",
                         "display_message": "Audio is clear",
+                        "message_parts": [{"type": "text", "text": "Audio is clear"}],
                         "received_at": "2026-06-22T10:00:05+05:00",
                     },
                 ],
@@ -921,6 +1093,7 @@ def assert_live_chat_messages_are_saved_with_stream_history() -> None:
             assert sessions[0]["comment_count"] == 2
             assert [item["id"] for item in sessions[0]["recent_comments"]] == ["msg-2", "msg-1"]
             assert sessions[0]["recent_comments"][0]["display_message"] == "Audio is clear"
+            assert sessions[0]["recent_comments"][0]["message_parts"] == [{"type": "text", "text": "Audio is clear"}]
         finally:
             app_db.ROOT = original_root
             app_db.DB_PATH = original_db_path
@@ -940,11 +1113,14 @@ def main() -> int:
     assert_auth_start_creates_standalone_slot_for_unlinked_channel()
     assert_auth_start_uses_runtime_desktop_redirect_uri()
     assert_oauth_callback_exchanges_with_stored_redirect_uri()
+    assert_youtube_status_keeps_connected_when_profile_refresh_fails()
     assert_history_and_activity_are_channel_specific()
     assert_stream_log_history_keeps_three_sessions_per_channel()
     assert_live_chat_routes_to_linked_channel_account()
     assert_live_chat_auto_links_active_broadcast()
+    assert_live_chat_replaces_ended_broadcast_with_active_broadcast()
     assert_live_chat_reply_posts_to_linked_channel_account()
+    assert_live_chat_parser_keeps_event_comments_and_emoji()
     assert_live_chat_messages_are_saved_with_stream_history()
     print("channel_workspace_contract_test: PASS")
     return 0

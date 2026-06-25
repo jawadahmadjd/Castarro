@@ -207,6 +207,33 @@ def assert_renditions_only_prints_lower_resolution_commands() -> None:
     assert len(ready_channel["rendition_playlist"]) == 2
 
 
+def assert_renditions_only_encodes_single_selected_lower_rung() -> None:
+    with tempfile.TemporaryDirectory(prefix="castarro-renditions-single-test-", dir=str(ROOT)) as temp_dir:
+        temp_root = Path(temp_dir)
+        source = temp_root / "Go Live" / "channel_1" / "ready-1080.mp4"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_bytes(b"fixture")
+        config = make_config()
+        channel = dict(config["channels"][0])
+        channel["playlist"] = ["Go Live/channel_1/ready-1080.mp4"]
+        channel["live_profile"] = {
+            "mode": "adaptive",
+            "adaptive": {
+                "variants": [
+                    {"id": "1080p", "label": "1080p", "width": 1920, "height": 1080, "video_bitrate": "6800k", "audio_bitrate": "128k", "enabled": False},
+                    {"id": "720p", "label": "720p", "width": 1280, "height": 720, "video_bitrate": "3500k", "audio_bitrate": "128k", "enabled": True},
+                    {"id": "480p", "label": "480p", "width": 854, "height": 480, "video_bitrate": "1800k", "audio_bitrate": "96k", "enabled": False},
+                ],
+            },
+        }
+        ready_channel, outputs = normalize_media.normalize_channel_renditions(config, temp_root, channel, False, True)
+
+    output_text = "\n".join(str(path) for path in outputs)
+    assert "720p" in output_text, output_text
+    assert "1080p" not in output_text and "480p" not in output_text, output_text
+    assert len(ready_channel["rendition_playlist"]) == 1
+
+
 def main() -> int:
     assert_transcode_preview_uses_transcode_args()
     assert_copy_preview_still_uses_copy()
@@ -214,6 +241,7 @@ def main() -> int:
     assert_preview_only_copy_uses_single_copy_output()
     assert_adaptive_stream_builds_bounded_ladder_buffer()
     assert_renditions_only_prints_lower_resolution_commands()
+    assert_renditions_only_encodes_single_selected_lower_rung()
     print("preview_command_test: PASS")
     return 0
 

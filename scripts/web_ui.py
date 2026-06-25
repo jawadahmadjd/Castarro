@@ -11,6 +11,7 @@ import re
 import secrets
 import shutil
 import signal
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -43,6 +44,8 @@ DEFAULT_CONFIG = runtime_paths.default_config_name()
 VIDEO_EXTENSIONS = {".mp4", ".m4v", ".mov", ".flv", ".mkv"}
 THUMBNAIL_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".bmp"}
 THUMBNAIL_MAX_BYTES = 2 * 1024 * 1024
+TRANSFER_MANIFEST_NAME = "castarro-transfer-manifest.json"
+TRANSFER_PACKAGE_VERSION = 1
 YOUTUBE_CHANNEL_NAME_MATCH_THRESHOLD = 0.80
 UI_PORT = int(os.environ.get("STREAM_UI_PORT", "8765"))
 MEDIA_DURATION_CACHE: dict[tuple[str, int, int, str], float | None] = {}
@@ -50,6 +53,8 @@ SCHEDULER_DAY_ORDER = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 ALERT_SEVERITY_RANK = {"info": 0, "warn": 1, "danger": 2}
 YOUTUBE_HEALTH_CACHE_SECONDS = 30.0
 YOUTUBE_HEALTH_ERROR_CACHE_SECONDS = 60.0
+YOUTUBE_LIVE_CHAT_CONTEXT_CACHE_SECONDS = 10 * 60.0
+YOUTUBE_LIVE_CHAT_QUOTA_COOLDOWN_SECONDS = 60 * 60.0
 FFMPEG_SIZE_PATTERN = re.compile(r"size=\s*([0-9]+(?:\.[0-9]+)?)\s*([KMGT]?i?B|[kmgt]?B)", re.IGNORECASE)
 FFMPEG_BITRATE_PATTERN = re.compile(r"bitrate=\s*([0-9]+(?:\.[0-9]+)?)\s*([kmg]?bits/s)", re.IGNORECASE)
 FFMPEG_STATS_FRAME_PATTERN = re.compile(r"frame=\s*([0-9]+)")
@@ -748,6 +753,8 @@ class AppState:
         self.stream_exit_recorded: set[tuple[str, str]] = set()
         self.connection_watch: dict[tuple[str, str], dict[str, Any]] = {}
         self.youtube_health_cache: dict[tuple[str, str], dict[str, Any]] = {}
+        self.youtube_live_chat_context_cache: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+        self.youtube_live_chat_quota_cooldowns: dict[tuple[str, str], dict[str, Any]] = {}
 
 
 STATE = AppState()
@@ -1745,6 +1752,12 @@ def youtube_status(config_name: str) -> dict[str, Any]:
         item["expires_at"] = tokens.get("expires_at")
         try:
             access_token, valid_tokens = youtube_service.valid_access_token(ROOT, scoped_config)
+        except Exception as exc:
+            item["message"] = str(exc)
+            account_statuses.append(item)
+            continue
+
+        try:
             profile = youtube_service.connected_account_profile(access_token)
             mismatch_message = youtube_profile_mismatch_message(item["expected_channel_name"], profile)
             item.update(
@@ -1767,7 +1780,14 @@ def youtube_status(config_name: str) -> dict[str, Any]:
             item["message"] = "Connected."
             connected_count += 1
         except Exception as exc:
-            item["message"] = str(exc)
+            if item["channel_id"] or item["channel_title"] or item["channel_handle"]:
+                item["connected"] = True
+                item["scopes"] = valid_tokens.get("scope")
+                item["expires_at"] = valid_tokens.get("expires_at")
+                item["message"] = f"Connected. Could not refresh YouTube profile: {exc}"
+                connected_count += 1
+            else:
+                item["message"] = str(exc)
         account_statuses.append(item)
 
     connected_accounts = [item for item in account_statuses if item.get("connected")]
@@ -2473,15 +2493,22 @@ def auto_link_active_youtube_broadcast(
     config: dict[str, Any],
     channel: dict[str, Any],
     access_token: str,
+    *,
+    allow_stream_mismatch: bool = False,
 ) -> dict[str, Any] | None:
     channel_name = str(channel.get("name") or "").strip()
     stream_id = str(channel.get("youtube_stream_id") or "").strip()
     active_broadcasts = youtube_service.list_broadcasts_by_status(access_token, "active", limit=10)
+    used_stream_mismatch_fallback = False
     if stream_id:
+        unfiltered_active_broadcasts = list(active_broadcasts)
         active_broadcasts = [
             item for item in active_broadcasts
             if str(item.get("bound_stream_id") or "").strip() == stream_id
         ]
+        if not active_broadcasts and allow_stream_mismatch:
+            active_broadcasts = unfiltered_active_broadcasts
+            used_stream_mismatch_fallback = True
     if not active_broadcasts:
         return None
 
@@ -2496,7 +2523,7 @@ def auto_link_active_youtube_broadcast(
         return rank, str(item.get("scheduled_start_time") or "")
 
     active_broadcasts.sort(key=rank_broadcast)
-    if len(active_broadcasts) > 1 and not stream_id:
+    if len(active_broadcasts) > 1 and (not stream_id or used_stream_mismatch_fallback):
         raise ValueError("Multiple active YouTube broadcasts were found. Link the intended broadcast first.")
 
     broadcast = active_broadcasts[0]
@@ -2518,6 +2545,98 @@ def auto_link_active_youtube_broadcast(
     return broadcast
 
 
+def clear_youtube_broadcast_link(config_name: str, config: dict[str, Any], channel: dict[str, Any], reason: str) -> None:
+    channel_name = str(channel.get("name") or "").strip()
+    old_broadcast_id = str(channel.get("youtube_broadcast_id") or "").strip()
+    old_stream_id = str(channel.get("youtube_stream_id") or "").strip()
+    channel["youtube_broadcast_id"] = ""
+    channel["youtube_broadcast_title"] = ""
+    channel["youtube_studio_url"] = ""
+    channel["youtube_stream_id"] = ""
+    save_config(config_name, config)
+    clear_youtube_chat_context_for_channel(config_name, channel_name)
+    app_db.record_event(
+        "youtube_broadcast_link_cleared",
+        config_name,
+        channel_name,
+        {"broadcast_id": old_broadcast_id, "stream_id": old_stream_id, "reason": reason},
+    )
+
+
+def is_youtube_quota_error(exc: BaseException) -> bool:
+    text = str(exc or "").lower()
+    return "quotaexceeded" in text or "exceeded your quota" in text or "quota exceeded" in text
+
+
+def is_youtube_live_chat_ended_error(exc: BaseException) -> bool:
+    text = str(exc or "").lower()
+    return "livechatended" in text or "live chat is no longer live" in text
+
+
+def youtube_live_chat_cache_key(config_name: str, channel: dict[str, Any], account_id: str) -> tuple[str, str, str, str]:
+    return (
+        str(config_name or ""),
+        str(channel.get("name") or ""),
+        normalize_account_id(account_id),
+        str(channel.get("youtube_broadcast_id") or "").strip() or "auto",
+    )
+
+
+def cached_youtube_chat_context(cache_key: tuple[str, str, str, str]) -> dict[str, Any] | None:
+    now = time.time()
+    with STATE.lock:
+        cached = STATE.youtube_live_chat_context_cache.get(cache_key)
+        if cached and float(cached.get("expires_at") or 0.0) > now:
+            return dict(cached.get("payload") or {})
+        if cached:
+            STATE.youtube_live_chat_context_cache.pop(cache_key, None)
+    return None
+
+
+def save_youtube_chat_context(cache_key: tuple[str, str, str, str], payload: dict[str, Any]) -> None:
+    with STATE.lock:
+        STATE.youtube_live_chat_context_cache[cache_key] = {
+            "expires_at": time.time() + YOUTUBE_LIVE_CHAT_CONTEXT_CACHE_SECONDS,
+            "payload": dict(payload),
+        }
+
+
+def clear_youtube_chat_context_for_channel(config_name: str, channel_name: str) -> None:
+    config_key = str(config_name or "")
+    channel_key = str(channel_name or "")
+    with STATE.lock:
+        for key in [key for key in STATE.youtube_live_chat_context_cache if key[0] == config_key and key[1] == channel_key]:
+            STATE.youtube_live_chat_context_cache.pop(key, None)
+
+
+def youtube_live_chat_quota_key(config_name: str, channel_name: str) -> tuple[str, str]:
+    return str(config_name or ""), str(channel_name or "")
+
+
+def active_youtube_live_chat_quota_cooldown(config_name: str, channel_name: str) -> dict[str, Any] | None:
+    key = youtube_live_chat_quota_key(config_name, channel_name)
+    now = time.time()
+    with STATE.lock:
+        cooldown = STATE.youtube_live_chat_quota_cooldowns.get(key)
+        if cooldown and float(cooldown.get("expires_at") or 0.0) > now:
+            return dict(cooldown)
+        if cooldown:
+            STATE.youtube_live_chat_quota_cooldowns.pop(key, None)
+    return None
+
+
+def set_youtube_live_chat_quota_cooldown(config_name: str, channel_name: str, message: str) -> dict[str, Any]:
+    expires_at = time.time() + YOUTUBE_LIVE_CHAT_QUOTA_COOLDOWN_SECONDS
+    payload = {
+        "expires_at": expires_at,
+        "retry_after_seconds": int(YOUTUBE_LIVE_CHAT_QUOTA_COOLDOWN_SECONDS),
+        "message": message,
+    }
+    with STATE.lock:
+        STATE.youtube_live_chat_quota_cooldowns[youtube_live_chat_quota_key(config_name, channel_name)] = payload
+    return payload
+
+
 def youtube_chat_context(config_name: str, channel_name: str) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], str, dict[str, Any], str]:
     channel_name = str(channel_name or "").strip()
     if not channel_name:
@@ -2534,6 +2653,18 @@ def youtube_chat_context(config_name: str, channel_name: str) -> tuple[dict[str,
     account = find_youtube_account(config, account_id)
     if not account:
         raise ValueError(f"Unknown YouTube account slot: {account_id}")
+    cache_key = youtube_live_chat_cache_key(config_name, channel, account_id)
+    cached = cached_youtube_chat_context(cache_key)
+    if cached:
+        return (
+            config,
+            channel,
+            account,
+            str(cached.get("access_token") or ""),
+            dict(cached.get("broadcast") or {}),
+            str(cached.get("live_chat_id") or ""),
+        )
+
     scoped_config = account_config_view(config, account)
     access_token, _tokens = youtube_service.valid_access_token(ROOT, scoped_config)
     profile = youtube_service.connected_account_profile(access_token)
@@ -2544,14 +2675,39 @@ def youtube_chat_context(config_name: str, channel_name: str) -> tuple[dict[str,
     broadcast_id = str(channel.get("youtube_broadcast_id") or "").strip()
     if broadcast_id:
         broadcast = youtube_service.broadcast_chat_details_by_id(access_token, broadcast_id)
+        life_cycle_status = str((broadcast or {}).get("life_cycle_status") or "").strip().lower()
+        if life_cycle_status in {"complete", "completed", "revoked"}:
+            clear_youtube_broadcast_link(config_name, config, channel, f"stale_{life_cycle_status}")
+            broadcast = auto_link_active_youtube_broadcast(
+                config_name,
+                config,
+                channel,
+                access_token,
+                allow_stream_mismatch=True,
+            )
+            broadcast_id = str(broadcast.get("id") or "").strip() if isinstance(broadcast, dict) else ""
     else:
-        broadcast = auto_link_active_youtube_broadcast(config_name, config, channel, access_token)
+        broadcast = auto_link_active_youtube_broadcast(
+            config_name,
+            config,
+            channel,
+            access_token,
+            allow_stream_mismatch=True,
+        )
         broadcast_id = str(broadcast.get("id") or "").strip() if isinstance(broadcast, dict) else ""
     if not broadcast:
         raise ValueError("No active YouTube broadcast was found for this linked account.")
     live_chat_id = str(broadcast.get("live_chat_id") or "").strip()
     if not live_chat_id:
         raise ValueError("Live chat is not enabled or available for this YouTube broadcast yet.")
+    save_youtube_chat_context(
+        youtube_live_chat_cache_key(config_name, channel, account_id),
+        {
+            "access_token": access_token,
+            "broadcast": dict(broadcast),
+            "live_chat_id": live_chat_id,
+        },
+    )
     return config, channel, account, access_token, broadcast, live_chat_id
 
 
@@ -2568,13 +2724,86 @@ def stamp_live_chat_message(message: Any, timestamp: str, field_name: str) -> An
 
 
 def youtube_live_chat(config_name: str, channel_name: str, page_token: str = "") -> dict[str, Any]:
-    _config, channel, account, access_token, broadcast, live_chat_id = youtube_chat_context(config_name, channel_name)
+    cooldown = active_youtube_live_chat_quota_cooldown(config_name, channel_name)
+    if cooldown:
+        retry_after = max(1, int(float(cooldown.get("expires_at") or 0.0) - time.time()))
+        return {
+            "ok": False,
+            "quota_cooldown": True,
+            "retry_after_seconds": retry_after,
+            "polling_interval_millis": retry_after * 1000,
+            "messages": [],
+            "next_page_token": page_token,
+            "error": str(cooldown.get("message") or "YouTube API quota is exhausted. Live chat refresh is paused temporarily."),
+        }
+
+    channel: dict[str, Any] = {}
+    account: dict[str, Any] = {}
+    broadcast: dict[str, Any] = {}
+    config: dict[str, Any] = {}
+    live_chat_id = ""
+    try:
+        config, channel, account, access_token, broadcast, live_chat_id = youtube_chat_context(config_name, channel_name)
+        chat = youtube_service.list_live_chat_messages(
+            access_token,
+            live_chat_id=live_chat_id,
+            page_token=page_token,
+        )
+    except Exception as exc:
+        if is_youtube_quota_error(exc):
+            message = (
+                "YouTube API quota is exhausted. Live chat refresh is paused for 60 minutes "
+                "so the app does not keep spending quota immediately after reset."
+            )
+            cooldown = set_youtube_live_chat_quota_cooldown(config_name, channel_name, message)
+            retry_after = int(float(cooldown.get("retry_after_seconds") or YOUTUBE_LIVE_CHAT_QUOTA_COOLDOWN_SECONDS))
+            return {
+                "ok": False,
+                "quota_cooldown": True,
+                "retry_after_seconds": retry_after,
+                "polling_interval_millis": retry_after * 1000,
+                "messages": [],
+                "next_page_token": page_token,
+                "error": message,
+            }
+        if is_youtube_live_chat_ended_error(exc):
+            clear_youtube_chat_context_for_channel(config_name, channel_name)
+            retry_error = ""
+            if channel and config:
+                clear_youtube_broadcast_link(config_name, config, channel, "live_chat_ended")
+                try:
+                    config, channel, account, access_token, broadcast, live_chat_id = youtube_chat_context(config_name, channel_name)
+                    chat = youtube_service.list_live_chat_messages(
+                        access_token,
+                        live_chat_id=live_chat_id,
+                        page_token="",
+                    )
+                    page_token = ""
+                except Exception as retry_exc:
+                    retry_error = str(retry_exc)
+            if not retry_error and live_chat_id and "chat" in locals():
+                pass
+            else:
+                return {
+                    "ok": False,
+                    "live_chat_ended": True,
+                    "channel": str(channel.get("name") or channel_name),
+                    "account_id": str(account.get("id") or ""),
+                    "broadcast_id": str(broadcast.get("id") or ""),
+                    "broadcast_title": str(broadcast.get("title") or ""),
+                    "broadcast_studio_url": str(broadcast.get("studio_url") or channel.get("youtube_studio_url") or ""),
+                    "broadcast_stream_id": str(broadcast.get("bound_stream_id") or channel.get("youtube_stream_id") or ""),
+                    "live_chat_id": str(live_chat_id or ""),
+                    "messages": [],
+                    "next_page_token": "",
+                    "polling_interval_millis": 60000,
+                    "offline_at": live_chat_local_timestamp(),
+                    "error": retry_error or "This YouTube broadcast's live chat has ended. No current active broadcast was found for the linked YouTube account.",
+                }
+        if not is_youtube_live_chat_ended_error(exc):
+            raise
+
     received_at = live_chat_local_timestamp()
-    chat = youtube_service.list_live_chat_messages(
-        access_token,
-        live_chat_id=live_chat_id,
-        page_token=page_token,
-    )
     chat["messages"] = [
         stamp_live_chat_message(message, received_at, "received_at")
         for message in chat.get("messages", [])
@@ -3655,6 +3884,304 @@ def available_configs() -> list[str]:
     return sorted(path.name for path in ROOT.glob("*.json") if path.is_file())
 
 
+def is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
+def transfer_timestamp() -> str:
+    return datetime.now().strftime("%Y%m%d-%H%M%S")
+
+
+def transfer_package_name() -> str:
+    version = app_version() or "unknown"
+    safe_version = re.sub(r"[^A-Za-z0-9._-]+", "-", version).strip("-") or "unknown"
+    return f"Castarro-Transfer-{safe_version}-{transfer_timestamp()}"
+
+
+def transfer_copy_file(source: Path, target: Path) -> dict[str, Any]:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, target)
+    return transfer_file_record(target)
+
+
+def transfer_file_record(target: Path) -> dict[str, Any]:
+    digest = hashlib.sha256()
+    size = 0
+    with target.open("rb") as fh:
+        while True:
+            chunk = fh.read(1024 * 1024)
+            if not chunk:
+                break
+            size += len(chunk)
+            digest.update(chunk)
+    return {
+        "path": target.as_posix(),
+        "bytes": size,
+        "sha256": digest.hexdigest(),
+    }
+
+
+def transfer_copy_database(source: Path, target: Path) -> dict[str, Any]:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    source_connection: sqlite3.Connection | None = None
+    target_connection: sqlite3.Connection | None = None
+    try:
+        source_connection = sqlite3.connect(str(source), timeout=30)
+        target_connection = sqlite3.connect(str(target), timeout=30)
+        source_connection.backup(target_connection)
+        target_connection.commit()
+    finally:
+        if target_connection is not None:
+            target_connection.close()
+        if source_connection is not None:
+            source_connection.close()
+    return transfer_file_record(target)
+
+
+def copy_transfer_item(source: Path, target: Path, manifest_root: Path) -> list[dict[str, Any]]:
+    files: list[dict[str, Any]] = []
+    if source.is_file():
+        record = transfer_copy_database(source, target) if source.name == "stream_control.db" else transfer_copy_file(source, target)
+        record["path"] = target.relative_to(manifest_root).as_posix()
+        files.append(record)
+        return files
+
+    if not source.is_dir():
+        return files
+
+    target.mkdir(parents=True, exist_ok=True)
+    for child in sorted(source.rglob("*")):
+        relative = child.relative_to(source)
+        destination = target / relative
+        if child.is_dir():
+            destination.mkdir(parents=True, exist_ok=True)
+            continue
+        if child.is_file():
+            record = transfer_copy_database(child, destination) if child.name == "stream_control.db" else transfer_copy_file(child, destination)
+            record["path"] = destination.relative_to(manifest_root).as_posix()
+            files.append(record)
+    return files
+
+
+def transfer_source_items() -> list[tuple[str, Path]]:
+    items: list[tuple[str, Path]] = []
+    seen: set[str] = set()
+    ignored_json = {"package.json", "package-lock.json", "config.example.json"}
+    for path in sorted(ROOT.glob("*.json")):
+        if not path.is_file() or path.name in ignored_json:
+            continue
+        items.append((path.name, path))
+        seen.add(path.name)
+    for name in runtime_paths.MUTABLE_FILES:
+        if name in seen:
+            continue
+        path = ROOT / name
+        if path.exists() and path.is_file():
+            items.append((name, path))
+            seen.add(name)
+    for name in runtime_paths.MUTABLE_DIRECTORIES:
+        path = ROOT / name
+        if path.exists() and path.is_dir():
+            items.append((name, path))
+    return items
+
+
+def checkpoint_transfer_database() -> None:
+    connection: sqlite3.Connection | None = None
+    try:
+        connection = app_db.connect()
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        connection.commit()
+    except Exception as exc:
+        print(f"[transfer] database checkpoint skipped: {exc}")
+    finally:
+        if connection is not None:
+            connection.close()
+
+
+def assert_external_transfer_parent(path: Path) -> None:
+    root = ROOT.resolve()
+    resolved = path.resolve()
+    if resolved == root or is_relative_to(resolved, root):
+        raise ValueError("Choose a package location outside the Castarro data folder.")
+
+
+def assert_transfer_member_name(name: str) -> str:
+    text = str(name or "").strip()
+    if not text or text in {".", ".."} or "/" in text or "\\" in text or "\x00" in text:
+        raise ValueError("Transfer package contains an invalid top-level item.")
+    target = (ROOT / text).resolve()
+    if target.parent != ROOT.resolve():
+        raise ValueError("Transfer package contains an unsafe item path.")
+    return text
+
+
+def manifest_name_list(manifest: dict[str, Any], key: str) -> list[Any]:
+    value = manifest.get(key)
+    return value if isinstance(value, list) else []
+
+
+def create_transfer_package(body: dict[str, Any]) -> dict[str, Any]:
+    destination_value = str(body.get("destination") or "").strip()
+    if not destination_value:
+        raise ValueError("Choose a folder where Castarro should create the transfer package.")
+
+    parent = Path(destination_value).expanduser().resolve()
+    assert_external_transfer_parent(parent)
+    parent.mkdir(parents=True, exist_ok=True)
+    if not parent.is_dir():
+        raise ValueError("Transfer package destination must be a folder.")
+
+    package_dir = unique_path(parent / transfer_package_name())
+    data_dir = package_dir / "data"
+    package_dir.mkdir(parents=True, exist_ok=False)
+    data_dir.mkdir(parents=True, exist_ok=True)
+
+    checkpoint_transfer_database()
+    manifest_files: list[dict[str, Any]] = []
+    source_items = transfer_source_items()
+    for relative_name, source in source_items:
+        manifest_files.extend(copy_transfer_item(source, data_dir / relative_name, package_dir))
+
+    total_bytes = sum(int(item.get("bytes") or 0) for item in manifest_files)
+    manifest = {
+        "schemaVersion": TRANSFER_PACKAGE_VERSION,
+        "app": "Castarro",
+        "appVersion": app_version(),
+        "createdAt": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "sourceDataRoot": str(ROOT),
+        "fileCount": len(manifest_files),
+        "totalBytes": total_bytes,
+        "mutableDirectories": runtime_paths.MUTABLE_DIRECTORIES,
+        "mutableFiles": sorted({name for name, path in source_items if path.is_file()}),
+        "files": manifest_files,
+    }
+    (package_dir / TRANSFER_MANIFEST_NAME).write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    app_db.record_event(
+        "transfer_package_exported",
+        details={"package": str(package_dir), "file_count": len(manifest_files), "total_bytes": total_bytes},
+    )
+    return {
+        "ok": True,
+        "packagePath": str(package_dir),
+        "fileCount": len(manifest_files),
+        "totalBytes": total_bytes,
+    }
+
+
+def load_transfer_manifest(package_dir: Path) -> dict[str, Any]:
+    manifest_path = package_dir / TRANSFER_MANIFEST_NAME
+    if not manifest_path.exists() or not manifest_path.is_file():
+        raise ValueError("That folder is not a Castarro transfer package.")
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise ValueError(f"Transfer package manifest could not be read: {exc}") from exc
+    if not isinstance(manifest, dict) or int(manifest.get("schemaVersion") or 0) != TRANSFER_PACKAGE_VERSION:
+        raise ValueError("Transfer package version is not supported.")
+    if not (package_dir / "data").is_dir():
+        raise ValueError("Transfer package is missing its data folder.")
+    return manifest
+
+
+def running_transfer_blockers() -> list[str]:
+    blockers: list[str] = []
+    with STATE.lock:
+        active_streams = [
+            name for name, stream in STATE.streams.items()
+            if stream.running.process.poll() is None or stream.recovering
+        ]
+        active_tasks = [task.name for task in STATE.tasks if task.process.poll() is None]
+    if active_streams:
+        blockers.append(f"{len(active_streams)} live stream{'s' if len(active_streams) != 1 else ''}")
+    if active_tasks:
+        blockers.append(f"{len(active_tasks)} running task{'s' if len(active_tasks) != 1 else ''}")
+    return blockers
+
+
+def backup_existing_transfer_data() -> Path:
+    checkpoint_transfer_database()
+    backup_root = ROOT / "transfer-import-backups"
+    backup_root.mkdir(parents=True, exist_ok=True)
+    backup_dir = unique_path(backup_root / f"before-import-{transfer_timestamp()}")
+    data_dir = backup_dir / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    for relative_name, source in transfer_source_items():
+        copy_transfer_item(source, data_dir / relative_name, backup_dir)
+    return backup_dir
+
+
+def clear_transfer_target(relative_name: str) -> None:
+    target = ROOT / relative_name
+    if target.is_dir():
+        shutil.rmtree(target)
+    elif target.exists():
+        target.unlink()
+
+
+def import_transfer_package(body: dict[str, Any]) -> dict[str, Any]:
+    package_value = str(body.get("packagePath") or body.get("package_path") or "").strip()
+    if not package_value:
+        raise ValueError("Choose a Castarro transfer package folder to import.")
+
+    blockers = running_transfer_blockers()
+    if blockers:
+        raise ValueError(f"Stop {', '.join(blockers)} before importing a transfer package.")
+
+    package_dir = Path(package_value).expanduser().resolve()
+    assert_external_transfer_parent(package_dir)
+    manifest = load_transfer_manifest(package_dir)
+    package_data = package_dir / "data"
+
+    backup_dir = backup_existing_transfer_data()
+    imported: list[str] = []
+    restored_names = sorted(
+        {
+            assert_transfer_member_name(str(name))
+            for name in [
+                *manifest_name_list(manifest, "mutableDirectories"),
+                *manifest_name_list(manifest, "mutableFiles"),
+            ]
+            if str(name).strip()
+        }
+    )
+    if not restored_names:
+        restored_names = [assert_transfer_member_name(item.name) for item in package_data.iterdir()]
+
+    for relative_name in restored_names:
+        source = package_data / relative_name
+        if not source.exists():
+            continue
+        if relative_name != "stream_control.db":
+            clear_transfer_target(relative_name)
+        copy_transfer_item(source, ROOT / relative_name, ROOT)
+        imported.append(relative_name)
+
+    for config_name in available_configs():
+        config, _error = load_config_or_none(config_name)
+        if config:
+            ensure_media_folders(config)
+            storage_providers.ensure_storage_dirs(config, ROOT)
+            app_db.sync_config(config_name, config, "transfer-import")
+
+    app_db.record_event(
+        "transfer_package_imported",
+        details={"package": str(package_dir), "backup": str(backup_dir), "items": imported},
+    )
+    return {
+        "ok": True,
+        "packagePath": str(package_dir),
+        "backupPath": str(backup_dir),
+        "imported": imported,
+        "fileCount": manifest.get("fileCount"),
+        "totalBytes": manifest.get("totalBytes"),
+    }
+
+
 def task_command(
     action: str,
     config_name: str,
@@ -4337,9 +4864,13 @@ def status_payload(config_name: str) -> dict[str, Any]:
     active_stream_names = {
         name
         for name, stream in streams.items()
-        if stream.get("running")
+        if stream.get("process_running", stream.get("running"))
     }
-    active_transfer_bytes = sum(int(stream.get("transferred_bytes") or 0) for stream in streams.values())
+    active_transfer_bytes = sum(
+        int(stream.get("transferred_bytes") or 0)
+        for stream in streams.values()
+        if stream.get("process_running", stream.get("running"))
+    )
     stream_history = app_db.recent_stream_sessions(config_name, limit=12)
     for session in stream_history:
         session["is_active"] = (
@@ -5644,6 +6175,14 @@ class Handler(BaseHTTPRequestHandler):
                 parsed_json = json.loads(text)
                 save_config(config_name, parsed_json)
                 json_response(self, {"ok": True, "config": config_name})
+                return
+
+            if parsed.path == "/api/transfer/export":
+                json_response(self, create_transfer_package(body))
+                return
+
+            if parsed.path == "/api/transfer/import":
+                json_response(self, import_transfer_package(body))
                 return
 
             if parsed.path == "/api/sync/register":

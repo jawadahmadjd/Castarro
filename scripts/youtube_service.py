@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import re
 import secrets
 import time
 import urllib.error
@@ -18,6 +19,55 @@ YOUTUBE_DEFAULT_SCOPES = [
     "https://www.googleapis.com/auth/youtube",
     "https://www.googleapis.com/auth/youtube.force-ssl",
 ]
+
+YOUTUBE_EMOJI_SHORTCODE_RE = re.compile(r":([a-z0-9][a-z0-9_+-]*(?:-[a-z0-9_+-]+)*):", re.IGNORECASE)
+YOUTUBE_EMOJI_SHORTCODE_FALLBACKS = {
+    "hand-pink-waving": "\U0001f44b",
+    "person-turquoise-waving": "\U0001f44b",
+    "person-turqouise-waving": "\U0001f44b",
+    "face-red-heart-shape": "\U0001f970",
+    "eyes-pink-heart-shape": "\U0001f60d",
+    "face-fuchsia-poop-shape": "\U0001f4a9",
+    "face-blue-smiling": "\U0001f642",
+    "face-green-smiling": "\U0001f60a",
+    "face-red-droopy-eyes": "\U0001f97a",
+    "face-purple-crying": "\U0001f62d",
+    "eyes-purple-crying": "\U0001f62d",
+    "face-pink-tears": "\U0001f979",
+    "face-fuchsia-wide-eyes": "\U0001f633",
+    "face-blue-wide-eyes": "\U0001f632",
+    "face-purple-wide-eyes": "\U0001f62e",
+    "face-orange-frowning": "\u2639\ufe0f",
+    "face-orange-raised-eyebrow": "\U0001f928",
+    "face-fuchsia-tongue-out": "\U0001f61c",
+    "face-orange-biting-nails": "\U0001f62c",
+    "glasses-purple-yellow-diamond": "\U0001f60e",
+    "cat-orange-whistling": "\U0001f63d",
+    "body-blue-raised-arms": "\U0001f64c",
+    "body-pink-dancing": "\U0001f483",
+    "body-turquoise-yoga-pose": "\U0001f9d8",
+    "body-green-covering-eyes": "\U0001f648",
+    "hand-orange-covering-eyes": "\U0001f648",
+    "hand-purple-blue-peace": "\u270c\ufe0f",
+    "hand-green-crystal-ball": "\U0001f52e",
+    "face-blue-question-mark": "\u2753",
+    "face-blue-covering-eyes": "\U0001f648",
+    "face-turquoise-drinking-coffee": "\u2615",
+    "body-green-shirt": "\U0001f455",
+    "trophy-yellow-smiling": "\U0001f3c6",
+    "smile": "\U0001f604",
+    "joy": "\U0001f602",
+    "laughing": "\U0001f606",
+    "heart": "\u2764\ufe0f",
+    "red-heart": "\u2764\ufe0f",
+    "fire": "\U0001f525",
+    "pray": "\U0001f64f",
+    "folded-hands": "\U0001f64f",
+    "folded_hands": "\U0001f64f",
+    "thumbs-up": "\U0001f44d",
+    "thumbsup": "\U0001f44d",
+    "clap": "\U0001f44f",
+}
 
 
 def default_settings(redirect_uri: str | None = None) -> dict[str, Any]:
@@ -57,6 +107,98 @@ def merge_settings(config: dict[str, Any], redirect_uri: str | None = None) -> d
     merged["default_auto_start"] = bool(merged.get("default_auto_start", True))
     merged["default_auto_stop"] = bool(merged.get("default_auto_stop", True))
     return merged
+
+
+def replace_youtube_emoji_shortcodes(value: str) -> str:
+    def replacement(match: re.Match[str]) -> str:
+        shortcode = match.group(1).lower()
+        return YOUTUBE_EMOJI_SHORTCODE_FALLBACKS.get(shortcode, match.group(0))
+
+    return YOUTUBE_EMOJI_SHORTCODE_RE.sub(replacement, str(value or ""))
+
+
+def live_chat_text_from_details(details: Any, *keys: str) -> str:
+    if not isinstance(details, dict):
+        return ""
+    for key in keys:
+        text = str(details.get(key) or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def live_chat_message_text_from_snippet(snippet: dict[str, Any]) -> str:
+    candidates = [
+        live_chat_text_from_details(snippet.get("textMessageDetails"), "messageText"),
+        live_chat_text_from_details(snippet.get("memberMilestoneChatDetails"), "userComment"),
+        live_chat_text_from_details(snippet.get("superChatDetails"), "userComment"),
+        live_chat_text_from_details(snippet.get("fanFundingEventDetails"), "userComment"),
+        live_chat_text_from_details(snippet.get("superStickerDetails"), "altText"),
+        live_chat_text_from_details(
+            (snippet.get("superStickerDetails") or {}).get("superStickerMetadata")
+            if isinstance(snippet.get("superStickerDetails"), dict)
+            else {},
+            "altText",
+        ),
+        live_chat_text_from_details(
+            (snippet.get("giftEventDetails") or {}).get("giftMetadata")
+            if isinstance(snippet.get("giftEventDetails"), dict)
+            else {},
+            "altText",
+            "giftName",
+        ),
+        str(snippet.get("displayMessage") or "").strip(),
+    ]
+    return next((text for text in candidates if text), "")
+
+
+def live_chat_emoji_part_from_resource(part: dict[str, Any]) -> dict[str, str] | None:
+    emoji = part.get("emoji") if isinstance(part.get("emoji"), dict) else {}
+    if not emoji:
+        return None
+    image = emoji.get("image") if isinstance(emoji.get("image"), dict) else {}
+    shortcuts = emoji.get("shortcuts")
+    shortcode = ""
+    if isinstance(shortcuts, list) and shortcuts:
+        shortcode = str(shortcuts[0] or "")
+    elif isinstance(emoji.get("shortcut"), str):
+        shortcode = str(emoji.get("shortcut") or "")
+    text = str(part.get("text") or part.get("displayText") or shortcode or emoji.get("emojiId") or "").strip()
+    if not text:
+        return None
+    image_url = str(emoji.get("imageUrl") or image.get("url") or "").strip()
+    alt = str(emoji.get("altText") or text or shortcode or "Emoji").strip()
+    return {
+        "type": "emoji",
+        "text": replace_youtube_emoji_shortcodes(text or alt),
+        "alt": replace_youtube_emoji_shortcodes(alt),
+        "shortcode": shortcode,
+        "image_url": image_url,
+    }
+
+
+def live_chat_message_parts_from_snippet(snippet: dict[str, Any], display_message: str) -> list[dict[str, str]]:
+    raw_parts = snippet.get("messageParts")
+    parts: list[dict[str, str]] = []
+    if isinstance(raw_parts, list):
+        for part in raw_parts:
+            if isinstance(part, str):
+                if part:
+                    parts.append({"type": "text", "text": replace_youtube_emoji_shortcodes(part)})
+                continue
+            if not isinstance(part, dict):
+                continue
+            emoji_part = live_chat_emoji_part_from_resource(part)
+            if emoji_part:
+                parts.append(emoji_part)
+                continue
+            text = str(part.get("text") or part.get("displayText") or "").strip()
+            if text:
+                parts.append({"type": "text", "text": replace_youtube_emoji_shortcodes(text)})
+    if parts:
+        return parts
+    text = replace_youtube_emoji_shortcodes(display_message)
+    return [{"type": "text", "text": text}] if text else []
 
 
 def ensure_shape(config: dict[str, Any], redirect_uri: str | None = None) -> dict[str, Any]:
@@ -543,14 +685,17 @@ def live_chat_message_from_resource(item: dict[str, Any]) -> dict[str, Any] | No
         return None
     snippet = item.get("snippet", {}) if isinstance(item.get("snippet"), dict) else {}
     author = item.get("authorDetails", {}) if isinstance(item.get("authorDetails"), dict) else {}
-    text_details = snippet.get("textMessageDetails", {}) if isinstance(snippet.get("textMessageDetails"), dict) else {}
-    message_text = str(text_details.get("messageText") or snippet.get("displayMessage") or "").strip()
+    raw_message_text = live_chat_message_text_from_snippet(snippet)
+    display_message = str(snippet.get("displayMessage") or raw_message_text).strip()
+    message_text = replace_youtube_emoji_shortcodes(raw_message_text or display_message)
+    display_message = replace_youtube_emoji_shortcodes(display_message or message_text)
     return {
         "id": str(item.get("id") or ""),
         "type": str(snippet.get("type") or ""),
         "published_at": str(snippet.get("publishedAt") or ""),
-        "display_message": str(snippet.get("displayMessage") or message_text),
+        "display_message": display_message,
         "message_text": message_text,
+        "message_parts": live_chat_message_parts_from_snippet(snippet, display_message),
         "author_channel_id": str(author.get("channelId") or ""),
         "author_display_name": str(author.get("displayName") or ""),
         "author_profile_image_url": str(author.get("profileImageUrl") or ""),

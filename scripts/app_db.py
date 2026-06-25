@@ -669,6 +669,13 @@ def live_chat_message_time(message: dict[str, Any]) -> str:
     return str(message.get("published_at") or message.get("sent_at") or message.get("received_at") or "")
 
 
+def live_chat_message_parts(message: dict[str, Any]) -> list[dict[str, Any]]:
+    parts = message.get("message_parts")
+    if isinstance(parts, list):
+        return [part for part in parts if isinstance(part, dict)]
+    return []
+
+
 def find_live_chat_stream_session_id(
     db: sqlite3.Connection,
     config_name: str,
@@ -746,6 +753,10 @@ def record_live_chat_messages(
             message_id = live_chat_message_key(message, chat_id)
             display_message = str(message.get("display_message") or "")
             message_text = str(message.get("message_text") or display_message or "")
+            normalized_message = dict(message)
+            normalized_message["display_message"] = display_message
+            normalized_message["message_text"] = message_text
+            normalized_message["message_parts"] = live_chat_message_parts(message)
             db.execute(
                 """
                 INSERT INTO live_chat_messages(
@@ -791,7 +802,7 @@ def record_live_chat_messages(
                     1 if message.get("is_chat_moderator") else 0,
                     1 if message.get("is_chat_sponsor") else 0,
                     1 if message.get("is_verified") else 0,
-                    json.dumps(message, sort_keys=True),
+                    json.dumps(normalized_message, sort_keys=True),
                     timestamp,
                     timestamp,
                 ),
@@ -873,7 +884,8 @@ def live_chat_messages_for_session(db: sqlite3.Connection, session: dict[str, An
           is_chat_owner,
           is_chat_moderator,
           is_chat_sponsor,
-          is_verified
+          is_verified,
+          raw_json
         FROM live_chat_messages
         WHERE {where_clause}
         ORDER BY datetime(COALESCE(NULLIF(published_at, ''), NULLIF(sent_at, ''), NULLIF(received_at, ''), created_at)) DESC,
@@ -884,6 +896,12 @@ def live_chat_messages_for_session(db: sqlite3.Connection, session: dict[str, An
     ).fetchall()
     messages: list[dict[str, Any]] = []
     for row in rows:
+        raw_json = {}
+        try:
+            loaded = json.loads(str(row["raw_json"] or "{}"))
+            raw_json = loaded if isinstance(loaded, dict) else {}
+        except Exception:
+            raw_json = {}
         messages.append(
             {
                 "id": str(row["youtube_message_id"] or ""),
@@ -891,6 +909,7 @@ def live_chat_messages_for_session(db: sqlite3.Connection, session: dict[str, An
                 "author_profile_image_url": str(row["author_profile_image_url"] or ""),
                 "display_message": str(row["display_message"] or ""),
                 "message_text": str(row["message_text"] or ""),
+                "message_parts": live_chat_message_parts(raw_json),
                 "published_at": str(row["published_at"] or ""),
                 "received_at": str(row["received_at"] or ""),
                 "sent_at": str(row["sent_at"] or ""),

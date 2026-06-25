@@ -93,6 +93,7 @@ const state = {
     loading: false,
     sending: false,
     error: "",
+    quotaCooldownUntil: 0,
     loadedKey: "",
     failedKey: "",
     timer: null,
@@ -131,6 +132,7 @@ const state = {
   },
   syncStatus: null,
   syncPairing: null,
+  transferBusy: "",
 };
 
 const $ = (id) => document.getElementById(id);
@@ -218,13 +220,14 @@ const YOUTUBE_STATUS_CACHE_KEY = "castarro.youtube.status.v1";
 const PREVIEW_ENABLED_KEY = "castarro.preview.enabled.v1";
 const THEME_STORAGE_KEY = "castarro.theme.v1";
 const STREAM_KEY_PLACEHOLDER = "1234-5678-9012-3456";
-const WORKSPACE_ROUTES = ["overview", "youtube", "history", "troubleshoot"];
+const WORKSPACE_ROUTES = ["overview", "youtube", "history", "troubleshoot", "transfer"];
 const SCHEDULE_DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
 let desktopStartupViewRequestLastAt = 0;
 const routeToSettingsTab = {
   youtube: "youtube",
   history: "liveHistory",
   troubleshoot: "troubleshooting",
+  transfer: "transfer",
 };
 
 function formatBytes(value) {
@@ -698,7 +701,7 @@ function isOverviewVisible() {
 }
 
 function runningPreviewCandidates(streams = state.status?.streams || {}) {
-  return Object.values(streams || {}).filter((stream) => stream?.running);
+  return Object.values(streams || {}).filter((stream) => isStreamCurrentlyRunning(stream));
 }
 
 function selectedPreviewChannelName(streams = state.status?.streams || {}) {
@@ -791,7 +794,7 @@ function getSelectedChannel(config, selectedChannelName) {
 
 function getLinkedAccountForChannel(status, channel) {
   const accountId = normalizeAccountId(channel?.youtube_account_id || "");
-  const accounts = Array.isArray(status?.accounts) ? status.accounts : [];
+  const accounts = mergedYoutubeAccounts(state.configData || defaultConfigData(), status);
   if (accountId) {
     const account = accounts.find((item) => normalizeAccountId(item?.id || "") === accountId);
     if (account) {
@@ -809,6 +812,37 @@ function getLinkedAccountForChannel(status, channel) {
     };
   }
   return null;
+}
+
+function mergedYoutubeAccounts(config = state.configData || defaultConfigData(), status = state.youtubeStatus) {
+  const merged = new Map();
+  normalizedYoutubeAccounts(config).forEach((item) => {
+    merged.set(item.id, { ...item });
+  });
+  (Array.isArray(status?.accounts) ? status.accounts : []).forEach((item) => {
+    const id = normalizeAccountId(item?.id || "");
+    if (!id) return;
+    const existing = merged.get(id) || { id, label: id, tokens_file: defaultAccountTokensFile(id) };
+    merged.set(id, { ...existing, ...item, id });
+  });
+  return Array.from(merged.values());
+}
+
+function latestStatusChannel(channelName) {
+  const name = String(channelName || "").trim();
+  if (!name) return null;
+  const channels = Array.isArray(state.status?.channels) ? state.status.channels : [];
+  return channels.find((channel) => String(channel?.name || "").trim() === name) || null;
+}
+
+function channelWithLatestStatus(configChannel, channelName = "") {
+  const name = String(channelName || configChannel?.name || "").trim();
+  const statusChannel = latestStatusChannel(name);
+  if (!configChannel && !statusChannel) return null;
+  return {
+    ...(configChannel || {}),
+    ...(statusChannel || {}),
+  };
 }
 
 function getSelectedWorkspaceChannel(config) {
@@ -889,8 +923,34 @@ function workspaceRecentAlerts(payload = state.status) {
     return !selectedChannel || !channel || channel === selectedChannel;
   });
   return [...(state.localNotifications || []), ...backendAlerts]
+    .map(normalizeWorkspaceAlert)
     .sort((a, b) => new Date(b?.created_at || 0).getTime() - new Date(a?.created_at || 0).getTime())
     .slice(0, 20);
+}
+
+function normalizeWorkspaceAlert(item = {}) {
+  const severity = normalizeWorkspaceAlertSeverity(item?.severity);
+  const detail = String(item?.detail || item?.message || item?.title || item?.key || "").trim();
+  const message = String(item?.message || detail).trim();
+  const title = compactAlertTitle({
+    ...item,
+    message,
+    title: item?.title || message || item?.key || "Notification",
+  });
+  return {
+    ...item,
+    title: title || "Notification",
+    message: message || title || "Notification",
+    detail: detail || message || title || "No additional details were provided for this notification.",
+    severity,
+  };
+}
+
+function normalizeWorkspaceAlertSeverity(value) {
+  const text = String(value || "").trim().toLowerCase();
+  if (["danger", "error", "critical", "failed", "failure"].includes(text)) return "danger";
+  if (["warn", "warning"].includes(text)) return "warn";
+  return "info";
 }
 
 function workspaceAlertId(item, index = 0) {
@@ -958,9 +1018,10 @@ function renderWorkspaceAlertItem(item, index) {
   const expanded = Boolean(state.workspace.expandedAlertIds?.[id]);
   const title = compactAlertTitle(item);
   const detail = String(item?.detail || item?.message || "").trim();
+  const severity = normalizeWorkspaceAlertSeverity(item?.severity);
   const rows = alertDetailRows(item);
   return `
-    <article class="workspace-alert-item ${escapeAttr(item?.severity || "info")} ${expanded ? "is-expanded" : ""}">
+    <article class="workspace-alert-item ${escapeAttr(severity)} ${expanded ? "is-expanded" : ""}">
       <button
         class="workspace-alert-summary"
         type="button"
@@ -1082,6 +1143,18 @@ function getChannelTasks(tasks, channelName) {
 function getChannelStreams(streams, channelName) {
   if (!channelName) return null;
   return streams?.[channelName] || null;
+}
+
+function isStreamCurrentlyRunning(stream) {
+  if (!stream) return false;
+  if (Object.prototype.hasOwnProperty.call(stream, "process_running")) {
+    return Boolean(stream.process_running);
+  }
+  return Boolean(stream.running);
+}
+
+function isStreamActive(stream) {
+  return Boolean(stream?.running || stream?.process_running || stream?.recovering);
 }
 
 function getChannelEvents(events, channelName) {
@@ -1569,12 +1642,12 @@ function renderConfigSelect(configs) {
 }
 
 function renderStatus(payload) {
-  const running = Object.values(payload.streams).filter((stream) => stream.running).length;
+  const running = Object.values(payload.streams).filter((stream) => isStreamCurrentlyRunning(stream)).length;
 
   $("serverState").textContent = payload.config_exists ? `${running} live stream${running === 1 ? "" : "s"}` : "Config needed";
   const startAllButton = $("startAll");
   if (startAllButton) {
-    const anyRunning = running > 0;
+    const anyRunning = Object.values(payload.streams).some((stream) => isStreamActive(stream));
     const importBusy = isLiveImportBusy();
     startAllButton.textContent = anyRunning ? "Stop all streams" : "Start All Streams";
     startAllButton.classList.toggle("success", !anyRunning);
@@ -1641,7 +1714,7 @@ function renderChannels(payload) {
   if (!channelsNode) return;
   channelsNode.innerHTML = payload.channels.map((channel) => {
     const stream = payload.streams[channel.name];
-    const live = stream?.running;
+    const live = isStreamCurrentlyRunning(stream);
     const importBusy = isLiveImportBusy(channel.name);
     const key = streamKeyLabel(channel);
     const autoReady = channel.youtube_auto_start && channel.youtube_auto_stop;
@@ -1750,9 +1823,11 @@ function renderFirstRunOnboarding(payload) {
 }
 
 function syncFirstRunOnboarding(payload) {
+  const route = normalizeWorkspaceRoute(state.workspace.activeRoute);
+  const transferActive = route === "transfer";
   const hasChannels = hasWorkspaceChannels(payload);
   const activeStep = activeOnboardingStep(payload);
-  const showEmptyOnboarding = !hasChannels && !state.onboarding.skipped;
+  const showEmptyOnboarding = !transferActive && !hasChannels && !state.onboarding.skipped;
   const showSetupGuide = hasChannels && Boolean(state.onboarding.active);
   const focusOnOnboardingPanel = showEmptyOnboarding || (showSetupGuide && activeStep <= 2);
   if (showSetupGuide) {
@@ -1786,6 +1861,7 @@ function normalizeWorkspaceRoute(routeName) {
     live: "youtube",
     liveHistory: "history",
     troubleshooting: "troubleshoot",
+    settings: "transfer",
   };
   const normalized = aliases[route] || route;
   return WORKSPACE_ROUTES.includes(normalized) ? normalized : "overview";
@@ -1797,6 +1873,7 @@ function workspaceRouteLabel(routeName) {
     youtube: "YouTube",
     history: "History",
     troubleshoot: "Troubleshoot",
+    transfer: "Transfer",
   }[normalizeWorkspaceRoute(routeName)] || "Dashboard";
 }
 
@@ -1808,7 +1885,7 @@ function getChannelHealthViewModel(channel, payload) {
   const check = checks.find((item) => String(item?.channel || "") === channelName);
   const connected = Boolean(linked?.connected);
   const mapped = Boolean(normalizeAccountId(channel?.youtube_account_id || ""));
-  const streamRunning = Boolean(stream?.running);
+  const streamRunning = isStreamCurrentlyRunning(stream);
   const rawCount = Number(channel?.raw_playlist_count || (Array.isArray(channel?.raw_playlist) ? channel.raw_playlist.length : 0));
   const normalizedCount = Number(channel?.normalized_count || 0);
   const hasManualKey = Boolean(String(channel?.stream_key_env || "").trim());
@@ -1919,8 +1996,9 @@ function renderWorkspaceChannelList(payload) {
     const isConnected = Boolean(linked?.connected);
     const connectionText = isConnected ? "Connected" : "Disconnected";
     const connectionClass = isConnected ? "badge live" : "badge warn";
-    const liveText = stream?.running ? "Live" : "Ready";
-    const liveClass = stream?.running ? "badge live" : "badge";
+    const streamRunning = isStreamCurrentlyRunning(stream);
+    const liveText = streamRunning ? "Live" : "Ready";
+    const liveClass = streamRunning ? "badge live" : "badge";
     const logoText = channelLogoText(channel);
     const pictureSrc = channelPictureSrc(channel);
     const check = checks.find((item) => String(item?.channel || "") === String(channel.name));
@@ -2320,24 +2398,30 @@ function renderWorkspaceHeader(payload, channel) {
   const route = normalizeWorkspaceRoute(state.workspace.activeRoute);
   const routeLabel = workspaceRouteLabel(route);
   const channelName = String(channel?.name || "No channel selected").trim();
-  const title = route === "overview" ? channelName : `${channelName} / ${routeLabel}`;
+  const title = route === "transfer" ? "Transfer Package" : route === "overview" ? channelName : `${channelName} / ${routeLabel}`;
   const breadcrumb = channel ? `Channel / ${channelName}` : "Channel / None";
   const subtitles = {
     overview: "Controls and status for this channel only.",
     youtube: "Go live, schedule broadcasts, manage stream keys, and choose videos for this channel.",
     history: "Recorded live sessions for this channel.",
     troubleshoot: "Activity and stream logs for this channel.",
+    transfer: "Create or import a complete Castarro package for moving this PC setup.",
   };
   const breadcrumbNode = $("workspaceBreadcrumb");
   const titleNode = $("workspacePageTitle");
   const legacyNameNode = $("workspaceChannelName");
   const subtitleNode = $("workspacePageSubtitle");
   const actionsNode = $("workspaceHeaderActions");
-  if (breadcrumbNode) breadcrumbNode.textContent = route === "overview" ? breadcrumb : `${channelName} / ${routeLabel}`;
+  if (breadcrumbNode) breadcrumbNode.textContent = route === "transfer" ? "Settings / Transfer" : route === "overview" ? breadcrumb : `${channelName} / ${routeLabel}`;
   if (titleNode) titleNode.textContent = title;
   if (legacyNameNode) legacyNameNode.textContent = channelName;
   if (subtitleNode) subtitleNode.textContent = subtitles[route] || subtitles.overview;
   if (!actionsNode) return;
+  if (route === "transfer") {
+    state.workspace.alertsMenuOpen = false;
+    actionsNode.innerHTML = "";
+    return;
+  }
   if (!channel) {
     state.workspace.alertsMenuOpen = false;
     actionsNode.innerHTML = `<button class="pill primary" type="button" onclick="addChannel()">Add Channel</button>`;
@@ -2346,7 +2430,7 @@ function renderWorkspaceHeader(payload, channel) {
   const alertScrollSnapshot = captureWorkspaceAlertsScroll();
   const escapedName = escapeJs(channel.name);
   const stream = payload?.streams?.[channel.name] || null;
-  const streamRunning = Boolean(stream?.running);
+  const streamRunning = isStreamActive(stream);
   const importBusy = isLiveImportBusy(channel.name);
   const streamAction = streamRunning ? "stopStream" : "startStream";
   const streamButtonClass = streamRunning ? "pill danger" : "pill success";
@@ -2474,7 +2558,8 @@ function renderOverviewPanels(payload, channel) {
     const actualBitrate = Number(stats.average_bitrate_bps);
     const targetBitrate = Number(stats.target_bitrate_bps);
     const badgeTone = ["success", "warn", "danger"].includes(String(stats.health_tone || "")) ? stats.health_tone : "";
-    const badgeLabel = String(stats.health_label || (stream?.running ? "Good" : "Offline"));
+    const streamRunning = isStreamCurrentlyRunning(stream);
+    const badgeLabel = String(stats.health_label || (streamRunning ? "Good" : "Offline"));
     const healthDetail = String(stats.detail || (
       badgeLabel === "Excellent" ? "No issues." :
         badgeLabel === "Poor" ? "Serious issues that need attention." :
@@ -2483,12 +2568,12 @@ function renderOverviewPanels(payload, channel) {
     ));
     const outputLabel = Number.isFinite(outputFps)
       ? `${formatFpsValue(outputFps)}${Number.isFinite(targetFps) ? ` / ${formatFpsValue(targetFps)}` : ""} fps`
-      : stream?.running
+      : streamRunning
         ? "Collecting"
         : "Offline";
     const outputBitrateLabel = Number.isFinite(actualBitrate)
       ? formatBitrate(actualBitrate)
-      : stream?.running
+      : streamRunning
         ? "Collecting"
         : "Offline";
     const outputTargetLabel = Number.isFinite(targetBitrate)
@@ -2497,7 +2582,7 @@ function renderOverviewPanels(payload, channel) {
     const dropFrames = Number.isFinite(Number(stats.drop_frames)) ? Number(stats.drop_frames) : 0;
     const healthClass = badgeTone === "danger" ? "text-danger" : badgeTone === "warn" ? "text-warn" : badgeTone === "success" ? "text-success" : "";
     metricsNode.innerHTML = `
-      <div class="workspace-inline-stats ${stream?.running ? "" : "idle"}">
+      <div class="workspace-inline-stats ${streamRunning ? "" : "idle"}">
         <span class="workspace-inline-stat">
           <span class="field-hint">Health</span>
           <strong class="${healthClass}">${escapeHtml(badgeLabel)}<small>${escapeHtml(healthDetail.replace(/\.$/, ""))}</small></strong>
@@ -2512,7 +2597,7 @@ function renderOverviewPanels(payload, channel) {
         </span>
         <span class="workspace-inline-stat">
           <span class="field-hint">Drop frames</span>
-          <strong>${escapeHtml(stream?.running ? String(dropFrames) : "Offline")}</strong>
+          <strong>${escapeHtml(streamRunning ? String(dropFrames) : "Offline")}</strong>
         </span>
       </div>
     `;
@@ -2532,12 +2617,14 @@ function applySettingsSection(tab) {
   $("settingsStorageTab")?.classList.toggle("active", tab === "storage");
   $("settingsYoutubeTab")?.classList.toggle("active", tab === "youtube");
   $("settingsAutomationTab")?.classList.toggle("active", tab === "automation");
+  $("settingsTransferTab")?.classList.toggle("active", tab === "transfer");
   $("settingsLiveHistoryTab")?.classList.toggle("active", tab === "liveHistory");
   $("settingsTroubleshootingTab")?.classList.toggle("active", tab === "troubleshooting");
   $("settingsNormalizeView")?.classList.toggle("active", tab === "normalize");
   $("settingsStorageView")?.classList.toggle("active", tab === "storage");
   $("settingsYoutubeView")?.classList.toggle("active", tab === "youtube");
   $("settingsAutomationView")?.classList.toggle("active", tab === "automation");
+  $("settingsTransferView")?.classList.toggle("active", tab === "transfer");
   $("settingsLiveHistoryView")?.classList.toggle("active", tab === "liveHistory");
   $("settingsTroubleshootingView")?.classList.toggle("active", tab === "troubleshooting");
 }
@@ -2690,6 +2777,10 @@ function openSettingsForWorkspace(tabName, channelName = "") {
 }
 
 function openWorkspaceRoute(routeName) {
+  if (normalizeWorkspaceRoute(routeName) === "transfer") {
+    setWorkspaceRoute("transfer");
+    return;
+  }
   const selected = String(state.workspace.selectedChannelName || "").trim();
   if (!selected) {
     toast("Select a channel first.");
@@ -2784,7 +2875,7 @@ function openOnboardingConnectionDialog() {
         </div>
         <label>
           Manual stream key
-          <input id="onboardingStreamKey" type="text" data-youtube-channel-index="${index}" data-youtube-channel-field="stream_key_env" value="${escapeAttr(streamKeyInputValue(channel))}" placeholder="${STREAM_KEY_PLACEHOLDER}">
+          <input id="onboardingStreamKey" type="password" autocomplete="off" spellcheck="false" data-youtube-channel-index="${index}" data-youtube-channel-field="stream_key_env" value="${escapeAttr(streamKeyInputValue(channel))}" placeholder="${STREAM_KEY_PLACEHOLDER}">
         </label>
       </section>
       <div class="onboarding-or-separator" aria-hidden="true"><span>or</span></div>
@@ -2846,11 +2937,11 @@ function setWorkspaceRoute(routeName) {
 }
 
 function streamKeyLabel(channel) {
-  const envFieldValue = channel.stream_key_env || "";
+  const envFieldValue = String(channel?.stream_key_env || "").trim();
   if (channel.stream_key_env && channel.stream_key_env_has_value) {
     return `key env: ${channel.stream_key_env} (set)`;
   }
-  if (looksLikeDirectStreamKey(envFieldValue)) {
+  if (looksLikeDirectStreamKey(envFieldValue) || (envFieldValue && !looksLikeStreamKeyEnvName(envFieldValue))) {
     return `direct key: ${maskSecret(envFieldValue)}`;
   }
   if (envFieldValue) {
@@ -2869,6 +2960,11 @@ function maskSecret(value) {
 function looksLikeDirectStreamKey(value) {
   const text = String(value || "").trim();
   return /^[A-Za-z0-9_-]{6,}$/.test(text) && text.includes("-");
+}
+
+function looksLikeStreamKeyEnvName(value) {
+  const text = String(value || "").trim();
+  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(text) && (text.includes("_") || text === text.toUpperCase());
 }
 
 function renderTasks(tasks, events = []) {
@@ -3678,8 +3774,86 @@ function historySessionCommentCount(session) {
   return historySessionComments(session).length;
 }
 
+const YOUTUBE_EMOJI_SHORTCODE_FALLBACKS = {
+  "hand-pink-waving": "\u{1F44B}",
+  "person-turquoise-waving": "\u{1F44B}",
+  "person-turqouise-waving": "\u{1F44B}",
+  "face-red-heart-shape": "\u{1F970}",
+  "eyes-pink-heart-shape": "\u{1F60D}",
+  "face-fuchsia-poop-shape": "\u{1F4A9}",
+  "face-blue-smiling": "\u{1F642}",
+  "face-green-smiling": "\u{1F60A}",
+  "face-red-droopy-eyes": "\u{1F97A}",
+  "face-purple-crying": "\u{1F62D}",
+  "eyes-purple-crying": "\u{1F62D}",
+  "face-pink-tears": "\u{1F979}",
+  "face-fuchsia-wide-eyes": "\u{1F633}",
+  "face-blue-wide-eyes": "\u{1F632}",
+  "face-purple-wide-eyes": "\u{1F62E}",
+  "face-orange-frowning": "\u2639\uFE0F",
+  "face-orange-raised-eyebrow": "\u{1F928}",
+  "face-fuchsia-tongue-out": "\u{1F61C}",
+  "face-orange-biting-nails": "\u{1F62C}",
+  "glasses-purple-yellow-diamond": "\u{1F60E}",
+  "cat-orange-whistling": "\u{1F63D}",
+  "body-blue-raised-arms": "\u{1F64C}",
+  "body-pink-dancing": "\u{1F483}",
+  "body-turquoise-yoga-pose": "\u{1F9D8}",
+  "body-green-covering-eyes": "\u{1F648}",
+  "hand-orange-covering-eyes": "\u{1F648}",
+  "hand-purple-blue-peace": "\u270C\uFE0F",
+  "hand-green-crystal-ball": "\u{1F52E}",
+  "face-blue-question-mark": "\u2753",
+  "face-blue-covering-eyes": "\u{1F648}",
+  "face-turquoise-drinking-coffee": "\u2615",
+  "body-green-shirt": "\u{1F455}",
+  "trophy-yellow-smiling": "\u{1F3C6}",
+  smile: "\u{1F604}",
+  joy: "\u{1F602}",
+  laughing: "\u{1F606}",
+  heart: "\u2764\uFE0F",
+  "red-heart": "\u2764\uFE0F",
+  fire: "\u{1F525}",
+  pray: "\u{1F64F}",
+  "folded-hands": "\u{1F64F}",
+  folded_hands: "\u{1F64F}",
+  "thumbs-up": "\u{1F44D}",
+  thumbsup: "\u{1F44D}",
+  clap: "\u{1F44F}",
+};
+
+function replaceYoutubeEmojiShortcodes(value) {
+  return String(value || "").replace(/:([a-z0-9][a-z0-9_+-]*(?:-[a-z0-9_+-]+)*):/gi, (match, name) => {
+    return YOUTUBE_EMOJI_SHORTCODE_FALLBACKS[String(name || "").toLowerCase()] || match;
+  });
+}
+
+function youtubeLiveChatPlainText(message) {
+  return replaceYoutubeEmojiShortcodes(message?.display_message || message?.message_text || "");
+}
+
+function youtubeLiveChatMessageParts(message) {
+  const parts = Array.isArray(message?.message_parts) ? message.message_parts : [];
+  return parts.filter((part) => part && typeof part === "object");
+}
+
+function youtubeLiveChatMessageHtml(message) {
+  const parts = youtubeLiveChatMessageParts(message);
+  if (!parts.length) return escapeHtml(youtubeLiveChatPlainText(message));
+  return parts.map((part) => {
+    const type = String(part?.type || "").toLowerCase();
+    const imageUrl = String(part?.image_url || part?.imageUrl || "").trim();
+    const text = replaceYoutubeEmojiShortcodes(part?.text || part?.alt || part?.shortcode || "");
+    if (type === "emoji" && /^https:\/\//i.test(imageUrl)) {
+      const alt = replaceYoutubeEmojiShortcodes(part?.alt || text || "Emoji");
+      return `<img class="youtube-chat-emoji" src="${escapeAttr(imageUrl)}" alt="${escapeAttr(alt)}" title="${escapeAttr(alt)}" loading="lazy" decoding="async">`;
+    }
+    return escapeHtml(text);
+  }).join("");
+}
+
 function historyCommentText(comment) {
-  return String(comment?.display_message || comment?.message_text || "").trim();
+  return youtubeLiveChatPlainText(comment).trim();
 }
 
 function historyCommentTimestamp(comment) {
@@ -3710,7 +3884,7 @@ function renderHistoryCommentMessages(session) {
           ${timestamp ? `<time datetime="${escapeAttr(timestamp)}" title="${escapeAttr(formatDateTime(timestamp))}">${escapeHtml(formatLiveChatClockTime(timestamp) || formatDateTime(timestamp))}</time>` : ""}
           ${badges.map((badge) => `<span class="badge">${escapeHtml(badge)}</span>`).join("")}
         </div>
-        <p>${escapeHtml(historyCommentText(comment) || "Comment text unavailable")}</p>
+        <p>${youtubeLiveChatMessageHtml(comment) || escapeHtml("Comment text unavailable")}</p>
       </article>
     `;
   }).join("");
@@ -5143,6 +5317,7 @@ function resetYoutubeLiveChat(nextKey = "") {
     loading: false,
     sending: false,
     error: "",
+    quotaCooldownUntil: 0,
     loadedKey: nextKey,
     failedKey: "",
     timer: null,
@@ -5171,6 +5346,7 @@ function scheduleYoutubeLiveChatPoll() {
   clearYoutubeLiveChatTimer();
   const key = youtubeLiveChatKey();
   if (!key || state.youtubeLiveChat.offlineAt || state.settingsTab !== "youtube") return;
+  if (Number(state.youtubeLiveChat.quotaCooldownUntil) > Date.now()) return;
   const interval = Math.max(3000, Math.min(Number(state.youtubeLiveChat.pollingIntervalMillis) || 5000, 60000));
   state.youtubeLiveChat.timer = window.setTimeout(() => {
     refreshYoutubeLiveChat({ silent: true }).catch(() => {});
@@ -5225,6 +5401,29 @@ async function refreshYoutubeLiveChat(options = {}) {
       query.set("pageToken", state.youtubeLiveChat.nextPageToken);
     }
     const payload = await api(`/api/youtube/live-chat?${query.toString()}`, { action: "youtube.live_chat.refresh" });
+    if (payload?.quota_cooldown) {
+      const retrySeconds = Math.max(60, Number(payload?.retry_after_seconds) || 3600);
+      state.youtubeLiveChat.error = String(payload?.error || "YouTube API quota is exhausted. Live chat refresh is paused temporarily.");
+      state.youtubeLiveChat.pollingIntervalMillis = retrySeconds * 1000;
+      state.youtubeLiveChat.quotaCooldownUntil = Date.now() + (retrySeconds * 1000);
+      state.youtubeLiveChat.failedKey = key;
+      return payload;
+    }
+    state.youtubeLiveChat.quotaCooldownUntil = 0;
+    if (payload?.live_chat_ended) {
+      state.youtubeLiveChat.channel = String(payload?.channel || channelName);
+      state.youtubeLiveChat.accountId = normalizeAccountId(payload?.account_id || channel.youtube_account_id || "");
+      state.youtubeLiveChat.broadcastId = String(payload?.broadcast_id || channel.youtube_broadcast_id || "");
+      state.youtubeLiveChat.broadcastTitle = String(payload?.broadcast_title || "");
+      state.youtubeLiveChat.liveChatId = String(payload?.live_chat_id || "");
+      state.youtubeLiveChat.nextPageToken = "";
+      state.youtubeLiveChat.pollingIntervalMillis = Number(payload?.polling_interval_millis || 60000);
+      state.youtubeLiveChat.offlineAt = String(payload?.offline_at || new Date().toISOString());
+      state.youtubeLiveChat.error = String(payload?.error || "This YouTube broadcast's live chat has ended.");
+      state.youtubeLiveChat.loadedKey = key;
+      state.youtubeLiveChat.failedKey = "";
+      return payload;
+    }
     state.youtubeLiveChat.channel = String(payload?.channel || channelName);
     state.youtubeLiveChat.accountId = normalizeAccountId(payload?.account_id || channel.youtube_account_id || "");
     state.youtubeLiveChat.broadcastId = String(payload?.broadcast_id || channel.youtube_broadcast_id || "");
@@ -5348,22 +5547,13 @@ function youtubeLiveChatIcon(name) {
 
 function youtubeLiveChatContext(config = state.configData || defaultConfigData()) {
   const channelName = String(state.workspace.selectedChannelName || "").trim();
-  const selectedChannel = (config.channels || []).find((item) => String(item?.name || "").trim() === channelName) || null;
+  const selectedConfigChannel = (config.channels || []).find((item) => String(item?.name || "").trim() === channelName) || null;
+  const selectedChannel = channelWithLatestStatus(selectedConfigChannel, channelName);
   const linkedAccountId = normalizeAccountId(selectedChannel?.youtube_account_id || "");
-  const configuredAccounts = normalizedYoutubeAccounts(config);
-  const statusAccounts = Array.isArray(state.youtubeStatus?.accounts) ? state.youtubeStatus.accounts : [];
-  const mergedAccountsMap = new Map();
-  configuredAccounts.forEach((item) => {
-    mergedAccountsMap.set(item.id, { ...item });
-  });
-  statusAccounts.forEach((item) => {
-    const id = normalizeAccountId(item.id || "");
-    if (!id) return;
-    mergedAccountsMap.set(id, { ...(mergedAccountsMap.get(id) || { id }), ...item, id });
-  });
+  const accounts = mergedYoutubeAccounts(config, state.youtubeStatus);
   return {
     selectedChannel,
-    linkedAccount: Array.from(mergedAccountsMap.values()).find((item) => item.id === linkedAccountId) || null,
+    linkedAccount: accounts.find((item) => item.id === linkedAccountId) || null,
     actionBusy: String(state.youtubeActionBusy || "").trim(),
   };
 }
@@ -5410,7 +5600,7 @@ function youtubeLiveChatBodyMarkup(selectedChannel, linkedAccount, actionBusy, o
               ${timeText ? `<time class="youtube-chat-time" datetime="${escapeAttr(timestamp)}" title="${escapeAttr(formatDateTime(timestamp))}">${escapeHtml(timeText)}</time>` : ""}
               ${badges.map((badge) => `<span class="badge">${escapeHtml(badge)}</span>`).join("")}
             </div>
-            <div class="youtube-chat-message-text">${escapeHtml(message?.display_message || message?.message_text || "")}</div>
+            <div class="youtube-chat-message-text">${youtubeLiveChatMessageHtml(message)}</div>
           </div>
         </article>
       `;
@@ -5883,24 +6073,13 @@ function renderYoutubeSettingsPanel(config) {
   const channelConfig = channelSettingsRenderConfig(config);
   const youtube = { ...defaultYoutubeSettings(), ...(config.youtube || {}) };
   const status = state.youtubeStatus || {};
-  const statusAccounts = Array.isArray(status.accounts) ? status.accounts : [];
-  const configuredAccounts = normalizedYoutubeAccounts(config);
-  const mergedAccountsMap = new Map();
-  configuredAccounts.forEach((item) => {
-    mergedAccountsMap.set(item.id, { ...item });
-  });
-  statusAccounts.forEach((item) => {
-    const id = normalizeAccountId(item.id || "");
-    if (!id) return;
-    const existing = mergedAccountsMap.get(id) || { id, label: id, tokens_file: defaultAccountTokensFile(id) };
-    mergedAccountsMap.set(id, { ...existing, ...item, id });
-  });
-  const accounts = Array.from(mergedAccountsMap.values());
+  const accounts = mergedYoutubeAccounts(config, status);
   const connectedCount = Number(status.connected_count || accounts.filter((item) => item.connected).length || 0);
   const previousScheduleChannel = String(state.workspace.selectedChannelName || "").trim();
   const selectedChannelName = previousScheduleChannel || "";
   const selectedChannelIndex = (channelConfig.channels || []).findIndex((channel) => String(channel?.name || "") === selectedChannelName);
-  const selectedChannel = selectedChannelIndex >= 0 ? channelConfig.channels[selectedChannelIndex] : null;
+  const selectedConfigChannel = selectedChannelIndex >= 0 ? channelConfig.channels[selectedChannelIndex] : null;
+  const selectedChannel = channelWithLatestStatus(selectedConfigChannel, selectedChannelName);
   const linkedAccountId = normalizeAccountId(selectedChannel?.youtube_account_id || "");
   if (linkedAccountId && accounts.some((item) => item.id === linkedAccountId)) {
     state.youtubeSelectedAccountId = linkedAccountId;
@@ -6427,13 +6606,31 @@ async function waitForYoutubeExternalAuth(accountId = "") {
     const account = accounts.find((item) => normalizeAccountId(item?.id || "") === normalizedAccountId) || null;
     if (!normalizedAccountId && state.youtubeStatus?.connected) {
       await refresh();
-      await refreshYoutubeBroadcasts(true, { silent: true });
+      try {
+        await refreshYoutubeBroadcasts(true, { silent: true });
+      } catch (error) {
+        logLocalActivityEvent(
+          "youtube_broadcast_refresh",
+          error.message || "Broadcast refresh failed after YouTube connection.",
+          { account_id: normalizedAccountId },
+          "error"
+        );
+      }
       setYoutubeAction("success", "YouTube account connected.");
       return true;
     }
     if (account?.connected || account?.wrong_account) {
       await refresh();
-      await refreshYoutubeBroadcasts(true, { silent: true });
+      try {
+        await refreshYoutubeBroadcasts(true, { silent: true });
+      } catch (error) {
+        logLocalActivityEvent(
+          "youtube_broadcast_refresh",
+          error.message || "Broadcast refresh failed after YouTube connection.",
+          { account_id: normalizedAccountId },
+          "error"
+        );
+      }
       if (account.wrong_account) {
         setYoutubeAction("error", account.message || "Connected YouTube account does not match this Castarro channel.");
       } else {
@@ -6448,6 +6645,35 @@ async function waitForYoutubeExternalAuth(accountId = "") {
     }
   }
   return false;
+}
+
+async function refreshYoutubeConnectionAfterReturn() {
+  if (state.youtubeActionBusy !== "connect") return;
+  await loadConfigText();
+  await refreshYoutubeStatus();
+  const accounts = Array.isArray(state.youtubeStatus?.accounts) ? state.youtubeStatus.accounts : [];
+  const account = accounts.find((item) => normalizeAccountId(item?.id || "") === state.youtubeSelectedAccountId) || accounts.find((item) => item?.connected) || null;
+  if (account?.wrong_account) {
+    setYoutubeAction("error", account.message || "Connected YouTube account does not match this Castarro channel.");
+    return;
+  }
+  if (!state.youtubeStatus?.connected) return;
+  await refresh();
+  try {
+    await refreshYoutubeBroadcasts(true, { silent: true });
+  } catch (error) {
+    logLocalActivityEvent(
+      "youtube_broadcast_refresh",
+      error.message || "Broadcast refresh failed after YouTube connection.",
+      { account_id: state.youtubeSelectedAccountId || "" },
+      "error"
+    );
+  }
+  const subscriberText = youtubeSubscriberText(account || state.youtubeStatus);
+  const connectedName = account?.channel_title
+    ? `Connected to ${account.channel_title}${subscriberText ? ` (${subscriberText})` : ""}.`
+    : "YouTube account connected.";
+  setYoutubeAction("success", connectedName);
 }
 
 async function connectYoutube() {
@@ -6532,7 +6758,8 @@ async function disconnectYoutube() {
   const config = state.configData || defaultConfigData();
   const accounts = normalizedYoutubeAccounts(config);
   const channelName = String(state.workspace.selectedChannelName || "").trim();
-  const selectedChannel = (config.channels || []).find((item) => String(item?.name || "").trim() === channelName) || null;
+  const selectedConfigChannel = (config.channels || []).find((item) => String(item?.name || "").trim() === channelName) || null;
+  const selectedChannel = channelWithLatestStatus(selectedConfigChannel, channelName);
   const accountId = normalizeAccountId(selectedChannel?.youtube_account_id || (!channelName ? state.youtubeSelectedAccountId || config.youtube?.default_account_id || accounts[0]?.id || "" : ""));
   if (!accountId) {
     throw new Error(channelName ? "This channel is not linked to a YouTube account." : "No YouTube account is selected.");
@@ -6672,10 +6899,11 @@ async function scheduleYoutubeBroadcast() {
   const youtube = { ...defaultYoutubeSettings(), ...(config.youtube || {}) };
   const autoStart = youtube.default_auto_start !== false;
   const autoStop = youtube.default_auto_stop !== false;
-  const channel = (config.channels || []).find((item) => String(item?.name || "").trim() === channelName);
+  const configChannel = (config.channels || []).find((item) => String(item?.name || "").trim() === channelName);
+  const channel = channelWithLatestStatus(configChannel, channelName);
   let linkedAccountId = normalizeAccountId(channel?.youtube_account_id || "");
-  const statusAccounts = Array.isArray(state.youtubeStatus?.accounts) ? state.youtubeStatus.accounts : [];
-  const linkedAccount = statusAccounts.find((item) => normalizeAccountId(item?.id || "") === linkedAccountId);
+  const accounts = mergedYoutubeAccounts(config, state.youtubeStatus);
+  const linkedAccount = accounts.find((item) => normalizeAccountId(item?.id || "") === linkedAccountId);
 
   if (!channelName) {
     logLocalActivityEvent("ui_validation", "Pick a Castarro channel first.", { action: "youtube.schedule" }, "error");
@@ -6769,7 +6997,8 @@ async function useExistingYoutubeBroadcast() {
   const channelName = String(state.workspace.selectedChannelName || "").trim();
   const importedBroadcast = selectedImportedYoutubeBroadcast();
   const config = state.configData || defaultConfigData();
-  const channel = (config.channels || []).find((item) => String(item?.name || "").trim() === channelName);
+  const configChannel = (config.channels || []).find((item) => String(item?.name || "").trim() === channelName);
+  const channel = channelWithLatestStatus(configChannel, channelName);
   const linkedAccountId = normalizeAccountId(channel?.youtube_account_id || "");
 
   if (!channelName) {
@@ -7271,7 +7500,7 @@ function streamSettingsCard(channel, index) {
       <div class="form-grid">
         <label>
           Manual stream key
-          <input type="text" data-youtube-channel-index="${index}" data-youtube-channel-field="stream_key_env" value="${escapeAttr(streamKeyInputValue(channel))}" placeholder="${STREAM_KEY_PLACEHOLDER}">
+          <input type="password" autocomplete="off" spellcheck="false" data-youtube-channel-index="${index}" data-youtube-channel-field="stream_key_env" value="${escapeAttr(streamKeyInputValue(channel))}" placeholder="${STREAM_KEY_PLACEHOLDER}">
           <span class="setting-note">Used when you are not creating the stream key through YouTube scheduling.</span>
         </label>
         <label>
@@ -9096,6 +9325,9 @@ function removeActiveSettingsChannel() {
 }
 
 async function startSettingsTask(action, index, { startIndex = 1, chooseOutputFolder = true } = {}) {
+  if (action === "renditions") {
+    syncAdaptiveLadder(index);
+  }
   const data = collectSettingsData();
   const channel = data.channels?.[index];
   if (!channel?.name) {
@@ -9858,6 +10090,124 @@ function renderAutomationSettingsPanel(config = state.configData || defaultConfi
   `;
 }
 
+function setTransferPackageStatus(message = "", tone = "") {
+  const node = $("transferPackageStatus");
+  if (!node) return;
+  const text = String(message || "").trim();
+  node.className = `notice transfer-package-status${tone ? ` ${tone}` : ""}${text ? "" : " hidden"}`;
+  node.innerHTML = text;
+}
+
+function updateTransferButtons() {
+  const exporting = state.transferBusy === "export";
+  const importing = state.transferBusy === "import";
+  const exportButton = $("exportTransferPackage");
+  const importButton = $("importTransferPackage");
+  if (exportButton) {
+    exportButton.disabled = Boolean(state.transferBusy);
+    exportButton.textContent = exporting ? "Creating..." : "Create Package";
+  }
+  if (importButton) {
+    importButton.disabled = Boolean(state.transferBusy);
+    importButton.textContent = importing ? "Importing..." : "Import Package";
+  }
+}
+
+async function pickTransferFolder(title, fallbackMessage) {
+  const bridge = desktopBridge();
+  if (bridge && typeof bridge.selectFolder === "function") {
+    const picked = await bridge.selectFolder({ title });
+    if (picked?.canceled || !picked?.path) return "";
+    return String(picked.path || "");
+  }
+
+  const value = window.prompt(fallbackMessage || `${title}\n\nPaste the full folder path:`, "");
+  return String(value || "").trim();
+}
+
+async function exportTransferPackage() {
+  if (state.transferBusy) return;
+  const destination = await pickTransferFolder(
+    "Choose where to create the Castarro transfer package",
+    "Desktop folder picker is not available in this browser window.\n\nPaste the full folder path where Castarro should create the package:"
+  );
+  if (!destination) return;
+  state.transferBusy = "export";
+  updateTransferButtons();
+  setTransferPackageStatus("Creating transfer package. Large video folders can take a while.");
+  try {
+    await flushSettingsAutosave();
+    const payload = await api("/api/transfer/export", {
+      method: "POST",
+      action: "transfer.export",
+      body: JSON.stringify({
+        config: state.config,
+        destination,
+      }),
+    });
+    setTransferPackageStatus(`
+      <strong>Package created.</strong>
+      <div>${escapeHtml(payload.fileCount || 0)} files, ${escapeHtml(formatBytes(payload.totalBytes || 0))}</div>
+      <div><span class="field-hint">Folder</span> ${escapeHtml(payload.packagePath || "")}</div>
+    `);
+    toast("Transfer package created.");
+  } catch (error) {
+    setTransferPackageStatus(`<strong>Package export failed.</strong><div>${escapeHtml(error.message || String(error))}</div>`, "warn");
+    throw error;
+  } finally {
+    state.transferBusy = "";
+    updateTransferButtons();
+  }
+}
+
+async function importTransferPackage() {
+  if (state.transferBusy) return;
+  const packagePath = await pickTransferFolder(
+    "Select a Castarro transfer package folder",
+    "Desktop folder picker is not available in this browser window.\n\nPaste the full path to the Castarro transfer package folder:"
+  );
+  if (!packagePath) return;
+  const confirmed = window.confirm(
+    "Import this Castarro transfer package now?\n\nCurrent channels, settings, videos, tokens, and history on this PC will be backed up first, then replaced by the package."
+  );
+  if (!confirmed) return;
+
+  state.transferBusy = "import";
+  updateTransferButtons();
+  setTransferPackageStatus("Importing transfer package. Keep Castarro open until this finishes.");
+  try {
+    const payload = await api("/api/transfer/import", {
+      method: "POST",
+      action: "transfer.import",
+      body: JSON.stringify({
+        config: state.config,
+        packagePath,
+      }),
+    });
+    state.configData = null;
+    state.rawFilesByChannel = {};
+    state.normalizedFilesByChannel = {};
+    state.youtubeStatus = null;
+    state.storageStatus = null;
+    hydrateYoutubeStatusFromCache(true);
+    await refresh();
+    await loadConfigText();
+    setTransferPackageStatus(`
+      <strong>Package imported.</strong>
+      <div>${escapeHtml(payload.fileCount || 0)} files, ${escapeHtml(formatBytes(payload.totalBytes || 0))}</div>
+      <div><span class="field-hint">Imported</span> ${escapeHtml((payload.imported || []).join(", ") || "data")}</div>
+      <div><span class="field-hint">Backup</span> ${escapeHtml(payload.backupPath || "")}</div>
+    `);
+    toast("Transfer package imported.");
+  } catch (error) {
+    setTransferPackageStatus(`<strong>Package import failed.</strong><div>${escapeHtml(error.message || String(error))}</div>`, "warn");
+    throw error;
+  } finally {
+    state.transferBusy = "";
+    updateTransferButtons();
+  }
+}
+
 async function startSyncPairing() {
   const payload = await api("/api/sync/pairing/start", {
     method: "POST",
@@ -9981,6 +10331,15 @@ if ($("settingsYoutubeTab")) {
 if ($("settingsAutomationTab")) {
   $("settingsAutomationTab").addEventListener("click", () => showSettingsTab("automation"));
 }
+if ($("settingsTransferTab")) {
+  $("settingsTransferTab").addEventListener("click", () => showSettingsTab("transfer"));
+}
+if ($("exportTransferPackage")) {
+  $("exportTransferPackage").addEventListener("click", () => exportTransferPackage().catch((error) => toast(error.message)));
+}
+if ($("importTransferPackage")) {
+  $("importTransferPackage").addEventListener("click", () => importTransferPackage().catch((error) => toast(error.message)));
+}
 if ($("settingsLiveHistoryRangeButton")) {
   $("settingsLiveHistoryRangeButton").addEventListener("click", (event) => {
     event.stopPropagation();
@@ -10053,10 +10412,12 @@ document.addEventListener("pointerup", stopWorkspaceChannelPictureDrag);
 document.addEventListener("pointercancel", stopWorkspaceChannelPictureDrag);
 window.addEventListener("focus", () => {
   refreshActiveRawFiles().catch((error) => toast(error.message));
+  refreshYoutubeConnectionAfterReturn().catch((error) => toast(error.message));
 });
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible") {
     refreshActiveRawFiles().catch((error) => toast(error.message));
+    refreshYoutubeConnectionAfterReturn().catch((error) => toast(error.message));
   }
 });
 
@@ -10169,7 +10530,7 @@ document.addEventListener("keydown", (event) => {
 if ($("startAll")) {
   $("startAll").addEventListener("click", () => {
     const streams = state.status?.streams || {};
-    const anyRunning = Object.values(streams).some((stream) => stream?.running);
+    const anyRunning = Object.values(streams).some((stream) => isStreamActive(stream));
     const action = anyRunning ? stopStream : startStream;
     action().catch((error) => toast(error.message));
   });
@@ -10188,6 +10549,9 @@ if ($("railOpenLive")) {
 }
 if ($("railOpenYoutube")) {
   $("railOpenYoutube").addEventListener("click", () => openWorkspaceRoute("youtube"));
+}
+if ($("railOpenTransfer")) {
+  $("railOpenTransfer").addEventListener("click", () => openWorkspaceRoute("transfer"));
 }
 if ($("previewEnabledToggle")) {
   $("previewEnabledToggle").addEventListener("change", (event) => {
