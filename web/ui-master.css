@@ -4745,9 +4745,9 @@ h1 {
 }
 
 .workspace-alerts-feed {
-  display: grid;
+  display: flex;
+  flex-direction: column;
   gap: 10px;
-  grid-auto-rows: minmax(56px, auto);
   max-height: 320px;
   overflow: auto;
 }
@@ -4758,7 +4758,8 @@ h1 {
   border-radius: 14px;
   background: var(--master-color-rgba-255-250-240-0-92);
   padding: 0;
-  display: grid;
+  display: block;
+  flex: 0 0 auto;
   min-width: 0;
   min-height: 56px;
   overflow: hidden;

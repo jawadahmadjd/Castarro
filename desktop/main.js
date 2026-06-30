@@ -817,7 +817,7 @@ async function requestQuit(source = "unknown", mode = "ui-only", options = {}) {
       try {
         autoUpdater.autoInstallOnAppQuit = true;
         autoUpdater.autoRunAppAfterInstall = true;
-        autoUpdater.quitAndInstall(false, true);
+        autoUpdater.quitAndInstall(true, true);
       } catch (error) {
         diagnosticLog("quitAndInstall failed; falling back to app quit", error);
         app.quit();

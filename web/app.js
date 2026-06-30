@@ -1064,19 +1064,21 @@ function renderWorkspaceAlertItem(item, index) {
           <span class="workspace-alert-chevron" aria-hidden="true">${expanded ? "-" : "+"}</span>
         </span>
       </button>
-      <div class="workspace-alert-detail" id="${escapeAttr(detailId)}" ${expanded ? "" : "hidden"}>
-        <p>${escapeHtml(detail || "No additional details were provided for this notification.")}</p>
-        ${rows.length ? `
-          <dl>
-            ${rows.map((row) => `
-              <div>
-                <dt>${escapeHtml(row.label)}</dt>
-                <dd>${escapeHtml(row.value)}</dd>
-              </div>
-            `).join("")}
-          </dl>
-        ` : ""}
-      </div>
+      ${expanded ? `
+        <div class="workspace-alert-detail" id="${escapeAttr(detailId)}">
+          <p>${escapeHtml(detail || "No additional details were provided for this notification.")}</p>
+          ${rows.length ? `
+            <dl>
+              ${rows.map((row) => `
+                <div>
+                  <dt>${escapeHtml(row.label)}</dt>
+                  <dd>${escapeHtml(row.value)}</dd>
+                </div>
+              `).join("")}
+            </dl>
+          ` : ""}
+        </div>
+      ` : ""}
     </article>
   `;
 }
@@ -9863,21 +9865,6 @@ function toggleWorkspaceAlertsMenu() {
   rerenderWorkspaceHeader();
 }
 
-function syncWorkspaceAlertItemExpansion(id, expanded) {
-  const key = String(id || "").trim();
-  if (!key) return;
-  const buttons = Array.from(document.querySelectorAll(".workspace-alert-summary[data-alert-id]"));
-  const button = buttons.find((node) => node.dataset.alertId === key);
-  const item = button?.closest(".workspace-alert-item");
-  const detail = item?.querySelector(".workspace-alert-detail");
-  if (!button || !item || !detail) return;
-  item.classList.toggle("is-expanded", expanded);
-  button.setAttribute("aria-expanded", expanded ? "true" : "false");
-  detail.hidden = !expanded;
-  const chevron = button.querySelector(".workspace-alert-chevron");
-  if (chevron) chevron.textContent = expanded ? "-" : "+";
-}
-
 function toggleWorkspaceAlertItem(id, event) {
   if (event && typeof event.stopPropagation === "function") {
     event.stopPropagation();
@@ -9889,7 +9876,7 @@ function toggleWorkspaceAlertItem(id, event) {
     ...(state.workspace.expandedAlertIds || {}),
     [key]: expanded,
   };
-  syncWorkspaceAlertItemExpansion(key, expanded);
+  rerenderWorkspaceHeader();
 }
 
 function closeWorkspaceAlertsMenu() {

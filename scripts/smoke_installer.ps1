@@ -40,17 +40,6 @@ if (-not (Test-Path -LiteralPath $InstallerPath)) {
     throw "Installer not found: $InstallerPath"
 }
 
-function Test-IsAdministrator {
-    try {
-        $Identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
-        $Principal = [System.Security.Principal.WindowsPrincipal]::new($Identity)
-        return $Principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
-    }
-    catch {
-        return $false
-    }
-}
-
 function Assert-NoRunningCastarro {
     $Running = @(Get-Process -Name "Castarro" -ErrorAction SilentlyContinue)
     if ($Running.Count -gt 0) {
@@ -60,52 +49,6 @@ function Assert-NoRunningCastarro {
 }
 
 Assert-NoRunningCastarro
-
-if (-not (Test-IsAdministrator)) {
-    if ($ElevatedRelaunch) {
-        throw "Installer smoke requires administrator privileges. Elevation was requested but was not granted."
-    }
-    Write-Host "Installer smoke requires administrator privileges. Requesting UAC elevation..."
-    if (-not $SmokeLogPath) {
-        $PreferredLogBase = if ($env:CASTARRO_INSTALLER_SMOKE_ROOT) { $env:CASTARRO_INSTALLER_SMOKE_ROOT } else { "C:\tmp" }
-        try {
-            New-Item -ItemType Directory -Force -Path $PreferredLogBase | Out-Null
-        }
-        catch {
-            $PreferredLogBase = [System.IO.Path]::GetTempPath()
-        }
-        $SmokeLogPath = Join-Path $PreferredLogBase "castarro-installer-smoke-elevated.log"
-    }
-    Remove-Item -LiteralPath $SmokeLogPath -Force -ErrorAction SilentlyContinue
-    $ArgumentString = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" -ElevatedRelaunch"
-    if ($InstallerPath) {
-        $ArgumentString += " -InstallerPath `"$InstallerPath`""
-    }
-    $ArgumentString += " -SmokeLogPath `"$SmokeLogPath`""
-    try {
-        $ElevatedProcess = Start-Process `
-            -FilePath "powershell.exe" `
-            -ArgumentList $ArgumentString `
-            -Verb RunAs `
-            -WorkingDirectory $Root `
-            -PassThru `
-            -Wait
-    }
-    catch {
-        throw "Installer smoke requires elevation and could not start elevated. Run PowerShell as Administrator and retry. Original error: $($_.Exception.Message)"
-    }
-    if ($ElevatedProcess.ExitCode -ne 0) {
-        if (Test-Path -LiteralPath $SmokeLogPath) {
-            Write-Host ""
-            Write-Host "Elevated installer smoke log:"
-            Write-Host "----------------------------------------"
-            Write-Host (Get-Content -Raw -LiteralPath $SmokeLogPath)
-            Write-Host "----------------------------------------"
-        }
-        throw "Elevated installer smoke failed with exit code $($ElevatedProcess.ExitCode). Log: $SmokeLogPath"
-    }
-    exit 0
-}
 
 function Remove-SmokeTree {
     param([string]$Path)

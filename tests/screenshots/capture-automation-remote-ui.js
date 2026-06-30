@@ -395,6 +395,24 @@ async function capture() {
     assert.equal(await page.locator(".workspace-alert-detail:visible").count(), 1);
     assert.equal(await alertSummary.getAttribute("aria-expanded"), "true");
     await page.screenshot({ path: path.join(OUT_DIR, "workspace-alerts-remote.png"), fullPage: true });
+    await page.setViewportSize({ width: 395, height: 427 });
+    await page.evaluate(() => {
+      const base = state.status.alerts.recent[0];
+      state.workspace.alertsMenuOpen = true;
+      state.workspace.expandedAlertIds = {};
+      state.status.alerts.recent = Array.from({ length: 20 }, (_value, index) => ({
+        ...base,
+        id: 200 - index,
+        created_at: new Date(Date.UTC(2026, 5, 25, 14, 12 - index * 5)).toISOString(),
+      }));
+      rerenderWorkspaceHeader();
+    });
+    const compactAlertSummary = page.locator(".workspace-alert-summary", { hasText: "Inside Us connection needs attention" }).first();
+    await compactAlertSummary.click();
+    await page.locator(".workspace-alert-detail", { hasText: "Stream is running, but frame delivery is below target." }).first().waitFor({ state: "visible" });
+    const expandedHeight = await page.locator(".workspace-alert-item.is-expanded").first().evaluate((node) => node.getBoundingClientRect().height);
+    assert.ok(expandedHeight > 90, `Expanded compact notification row should grow enough to show its detail; measured ${expandedHeight}.`);
+    await page.setViewportSize({ width: 1480, height: 1100 });
     await page.evaluate(() => {
       showTab("settings");
       showSettingsTab("automation");

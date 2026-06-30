@@ -760,6 +760,10 @@ class AppState:
 
 STATE = AppState()
 SYNC_PORT = 0
+SYNC_HOST = ""
+SYNC_SERVER: ThreadingHTTPServer | None = None
+SYNC_THREAD: threading.Thread | None = None
+SYNC_LOCK = threading.Lock()
 
 
 def stream_cycle_runtime_items_locked() -> list[dict[str, Any]]:
@@ -5662,7 +5666,7 @@ def sync_public_status() -> dict[str, Any]:
     return {
         **sync_service.account_status(),
         "syncServer": {
-            "host": sync_service.local_lan_ip(),
+            "host": sync_service.local_lan_ip() if SYNC_PORT else "",
             "port": SYNC_PORT,
             "running": bool(SYNC_PORT),
         },
@@ -5703,8 +5707,7 @@ def disconnect_sync_device(body: dict[str, Any]) -> dict[str, Any]:
 
 
 def start_sync_pairing(config_name: str, body: dict[str, Any]) -> dict[str, Any]:
-    if not SYNC_PORT:
-        raise ValueError("Sync server is not running.")
+    sync_port = ensure_sync_server_running()
     account = sync_service.ensure_local_account()
     config, error = load_config_or_none(config_name)
     if not config:
@@ -5712,7 +5715,7 @@ def start_sync_pairing(config_name: str, body: dict[str, Any]) -> dict[str, Any]
     pairing = sync_service.new_pairing(
         account["username"],
         config_name,
-        SYNC_PORT,
+        sync_port,
         include_videos=bool(body.get("includeVideos", False)),
     )
     with STATE.lock:
@@ -6013,6 +6016,41 @@ class SyncHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             status_code = 400 if isinstance(exc, ValueError) else 500
             json_response(self, {"error": str(exc)}, status_code)
+
+
+def sync_bind_host() -> str:
+    host = str(os.environ.get("CASTARRO_SYNC_HOST") or "0.0.0.0").strip()
+    return host or "0.0.0.0"
+
+
+def ensure_sync_server_running() -> int:
+    global SYNC_HOST, SYNC_PORT, SYNC_SERVER, SYNC_THREAD
+    with SYNC_LOCK:
+        if SYNC_SERVER is not None:
+            return SYNC_PORT
+        requested_sync_port = int(os.environ.get("CASTARRO_SYNC_PORT", "0"))
+        host = sync_bind_host()
+        server = ThreadingHTTPServer((host, requested_sync_port), SyncHandler)
+        SYNC_HOST = host
+        SYNC_PORT = int(server.server_address[1])
+        SYNC_SERVER = server
+        SYNC_THREAD = threading.Thread(target=server.serve_forever, name="castarro-sync-server", daemon=True)
+        SYNC_THREAD.start()
+        print(f"Castarro device sync available at http://{sync_service.local_lan_ip()}:{SYNC_PORT}")
+        return SYNC_PORT
+
+
+def stop_sync_server() -> None:
+    global SYNC_HOST, SYNC_PORT, SYNC_SERVER, SYNC_THREAD
+    with SYNC_LOCK:
+        server = SYNC_SERVER
+        SYNC_SERVER = None
+        SYNC_THREAD = None
+        SYNC_HOST = ""
+        SYNC_PORT = 0
+    if server is not None:
+        server.shutdown()
+        server.server_close()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -6514,7 +6552,7 @@ def shutdown_tasks() -> None:
 
 
 def main() -> int:
-    global DEFAULT_CONFIG, UI_PORT, SYNC_PORT
+    global DEFAULT_CONFIG, UI_PORT
     runtime_paths.ensure_data_root()
     migrated = runtime_paths.migrate_legacy_layout()
     if migrated:
@@ -6530,11 +6568,8 @@ def main() -> int:
     port = int(os.environ.get("STREAM_UI_PORT", "8765"))
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     UI_PORT = int(server.server_address[1])
-    requested_sync_port = int(os.environ.get("CASTARRO_SYNC_PORT", "0"))
-    sync_server = ThreadingHTTPServer(("0.0.0.0", requested_sync_port), SyncHandler)
-    SYNC_PORT = int(sync_server.server_address[1])
-    sync_thread = threading.Thread(target=sync_server.serve_forever, daemon=True)
-    sync_thread.start()
+    if os.environ.get("CASTARRO_SYNC_AUTO_START") == "1":
+        ensure_sync_server_running()
     STATE.stop_event.clear()
     automation_thread = threading.Thread(target=automation_loop, daemon=True)
     automation_thread.start()
@@ -6550,14 +6585,14 @@ def main() -> int:
     signal.signal(signal.SIGTERM, handle_stop)
 
     print(f"Castarro UI running at http://127.0.0.1:{UI_PORT}")
-    print(f"Castarro device sync available at http://{sync_service.local_lan_ip()}:{SYNC_PORT}")
+    if not SYNC_PORT:
+        print("Castarro device sync will start when QR pairing is requested.")
     print("Press Ctrl+C to stop the UI and any streams started from it.")
     try:
         server.serve_forever()
     finally:
         STATE.stop_event.set()
-        sync_server.shutdown()
-        sync_server.server_close()
+        stop_sync_server()
         shutdown_tasks()
         shutdown_streams()
         server.server_close()
