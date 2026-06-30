@@ -16,6 +16,9 @@ contextBridge.exposeInMainWorld("desktopShell", {
   getAppVersion() {
     return ipcRenderer.invoke("desktop:get-app-version");
   },
+  getBackendUrl() {
+    return ipcRenderer.invoke("desktop:get-backend-url");
+  },
   getUsageMetrics(payload = {}) {
     return ipcRenderer.invoke("desktop:get-usage-metrics", payload);
   },

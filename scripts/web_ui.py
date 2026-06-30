@@ -46,6 +46,7 @@ THUMBNAIL_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".bmp"}
 THUMBNAIL_MAX_BYTES = 2 * 1024 * 1024
 TRANSFER_MANIFEST_NAME = "castarro-transfer-manifest.json"
 TRANSFER_PACKAGE_VERSION = 1
+STREAM_CYCLE_RUNTIME_FILE = ROOT / "stream-cycle-runtime.json"
 YOUTUBE_CHANNEL_NAME_MATCH_THRESHOLD = 0.80
 UI_PORT = int(os.environ.get("STREAM_UI_PORT", "8765"))
 MEDIA_DURATION_CACHE: dict[tuple[str, int, int, str], float | None] = {}
@@ -761,6 +762,97 @@ STATE = AppState()
 SYNC_PORT = 0
 
 
+def stream_cycle_runtime_items_locked() -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for (config_name, channel_name), runtime in STATE.stream_cycle_channels.items():
+        if not isinstance(runtime, dict):
+            continue
+        if str(runtime.get("phase") or "") != "waiting_restart":
+            continue
+        items.append(
+            {
+                "config": str(config_name),
+                "channel": str(channel_name),
+                "runtime": dict(runtime),
+            }
+        )
+    return items
+
+
+def write_stream_cycle_runtime_items(items: list[dict[str, Any]]) -> None:
+    try:
+        STREAM_CYCLE_RUNTIME_FILE.parent.mkdir(parents=True, exist_ok=True)
+        if not items:
+            STREAM_CYCLE_RUNTIME_FILE.unlink(missing_ok=True)
+            return
+        payload = {
+            "version": 1,
+            "updated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+            "channels": items,
+        }
+        temp_path = STREAM_CYCLE_RUNTIME_FILE.with_suffix(f"{STREAM_CYCLE_RUNTIME_FILE.suffix}.tmp")
+        temp_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        temp_path.replace(STREAM_CYCLE_RUNTIME_FILE)
+    except Exception as exc:
+        print(f"[automation] could not persist stream cycle runtime: {exc}")
+
+
+def persist_stream_cycle_runtime() -> None:
+    with STATE.lock:
+        items = stream_cycle_runtime_items_locked()
+    write_stream_cycle_runtime_items(items)
+
+
+def set_stream_cycle_runtime(runtime_key: tuple[str, str], runtime: dict[str, Any]) -> None:
+    with STATE.lock:
+        STATE.stream_cycle_channels[runtime_key] = runtime
+        items = stream_cycle_runtime_items_locked()
+    write_stream_cycle_runtime_items(items)
+
+
+def pop_stream_cycle_runtime(runtime_key: tuple[str, str]) -> None:
+    with STATE.lock:
+        STATE.stream_cycle_channels.pop(runtime_key, None)
+        items = stream_cycle_runtime_items_locked()
+    write_stream_cycle_runtime_items(items)
+
+
+def clear_stream_cycle_runtime_for_config(config_name: str) -> None:
+    with STATE.lock:
+        for key in [key for key in STATE.stream_cycle_channels if key[0] == config_name]:
+            STATE.stream_cycle_channels.pop(key, None)
+        items = stream_cycle_runtime_items_locked()
+    write_stream_cycle_runtime_items(items)
+
+
+def load_stream_cycle_runtime() -> None:
+    try:
+        payload = json.loads(STREAM_CYCLE_RUNTIME_FILE.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return
+    except Exception as exc:
+        print(f"[automation] could not load stream cycle runtime: {exc}")
+        return
+    channels = payload.get("channels") if isinstance(payload, dict) else []
+    if not isinstance(channels, list):
+        return
+    restored: dict[tuple[str, str], dict[str, Any]] = {}
+    for item in channels:
+        if not isinstance(item, dict):
+            continue
+        config_name = str(item.get("config") or "").strip()
+        channel_name = str(item.get("channel") or "").strip()
+        runtime = item.get("runtime") if isinstance(item.get("runtime"), dict) else {}
+        if not config_name or not channel_name or str(runtime.get("phase") or "") != "waiting_restart":
+            continue
+        restored[(config_name, channel_name)] = dict(runtime)
+    if not restored:
+        return
+    with STATE.lock:
+        STATE.stream_cycle_channels.update(restored)
+    print(f"[automation] restored {len(restored)} stream cycle cooldown state(s)")
+
+
 def desktop_oauth_redirect_uri(configured_redirect_uri: Any = "") -> str:
     configured = str(configured_redirect_uri or "").strip()
     path = "/oauth2redirect"
@@ -799,6 +891,33 @@ def is_client_disconnect_error(exc: BaseException) -> bool:
     if isinstance(exc, OSError):
         return getattr(exc, "winerror", None) in {10053, 10054, 995}
     return False
+
+
+def cors_origin(handler: BaseHTTPRequestHandler) -> str | None:
+    origin = str(handler.headers.get("Origin") or "").strip()
+    if not origin:
+        return None
+    if origin == "null":
+        return origin
+    try:
+        parsed = urlparse(origin)
+    except Exception:
+        return None
+    if parsed.scheme in {"http", "https"} and parsed.hostname in {"127.0.0.1", "localhost"}:
+        return origin
+    return None
+
+
+def cors_headers(handler: BaseHTTPRequestHandler) -> dict[str, str]:
+    origin = cors_origin(handler)
+    if not origin:
+        return {}
+    return {
+        "Access-Control-Allow-Origin": origin,
+        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, X-Request-ID, X-Client-Action",
+        "Vary": "Origin",
+    }
 
 
 def new_request_id() -> str:
@@ -901,6 +1020,8 @@ def write_response(
         request_id = str((trace or {}).get("request_id") or "")
         if request_id:
             handler.send_header("X-Request-ID", request_id)
+        for key, value in cors_headers(handler).items():
+            handler.send_header(key, value)
         if extra_headers:
             for key, value in extra_headers.items():
                 handler.send_header(key, value)
@@ -4725,8 +4846,9 @@ def start_preview(config_name: str, channel_name: str | None) -> dict[str, Any]:
         return STATE.preview.as_dict()
 
 
-def stop_stream(channel_name: str | None) -> list[str]:
+def stop_stream(channel_name: str | None, *, clear_cycle_runtime: bool = True) -> list[str]:
     stopped: list[str] = []
+    cycle_runtime_changed = False
     with STATE.lock:
         targets = [channel_name] if channel_name else list(STATE.streams.keys())
         for name in targets:
@@ -4749,7 +4871,8 @@ def stop_stream(channel_name: str | None) -> list[str]:
                 STATE.preview = None
             state.recovering = False
             state.last_reconnect_status = ""
-            STATE.stream_cycle_channels.pop((state.config_name, name), None)
+            if clear_cycle_runtime and STATE.stream_cycle_channels.pop((state.config_name, name), None) is not None:
+                cycle_runtime_changed = True
             state.running.stop_requested = True
             stream_manager.stop_stream(state.running)
             if state.running.preview_manifest:
@@ -4765,6 +4888,8 @@ def stop_stream(channel_name: str | None) -> list[str]:
                 {"returncode": state.running.process.returncode, "transferred_bytes": transferred_bytes},
             )
             stopped.append(name)
+    if cycle_runtime_changed:
+        persist_stream_cycle_runtime()
     return stopped
 
 
@@ -5056,7 +5181,8 @@ def maybe_reconnect_youtube_stream(
             return True
 
     decision, message = youtube_reconnect_decision(config, channel)
-    if decision == "terminal":
+    if decision in {"terminal", "unsupported"}:
+        reconnect_status = "youtube_terminal" if decision == "terminal" else "reconnect_unsupported"
         app_db.record_event(
             "stream_reconnect_abandoned",
             state.config_name,
@@ -5065,7 +5191,7 @@ def maybe_reconnect_youtube_stream(
         )
         with STATE.lock:
             state.recovering = False
-            state.last_reconnect_status = "youtube_terminal"
+            state.last_reconnect_status = reconnect_status
             state.last_reconnect_error = message
         return False
 
@@ -5328,9 +5454,7 @@ def evaluate_scheduler_for_config(config_name: str, config: dict[str, Any]) -> N
 def evaluate_stream_cycles_for_config(config_name: str, config: dict[str, Any]) -> None:
     settings = normalize_stream_cycle_settings(config)
     if not settings.get("enabled"):
-        with STATE.lock:
-            for key in [key for key in STATE.stream_cycle_channels if key[0] == config_name]:
-                STATE.stream_cycle_channels.pop(key, None)
+        clear_stream_cycle_runtime_for_config(config_name)
         return
 
     now = time.time()
@@ -5344,8 +5468,7 @@ def evaluate_stream_cycles_for_config(config_name: str, config: dict[str, Any]) 
             continue
         entry = stream_cycle_entry_for_channel(config, channel_name)
         if not entry or not entry.get("enabled"):
-            with STATE.lock:
-                STATE.stream_cycle_channels.pop((config_name, channel_name), None)
+            pop_stream_cycle_runtime((config_name, channel_name))
             continue
 
         runtime_key = (config_name, channel_name)
@@ -5383,8 +5506,7 @@ def evaluate_stream_cycles_for_config(config_name: str, config: dict[str, Any]) 
                     "restart_at": 0.0,
                 }
             )
-            with STATE.lock:
-                STATE.stream_cycle_channels[runtime_key] = runtime
+            set_stream_cycle_runtime(runtime_key, runtime)
             if elapsed_seconds < duration_seconds:
                 continue
 
@@ -5401,9 +5523,6 @@ def evaluate_stream_cycles_for_config(config_name: str, config: dict[str, Any]) 
                     "restart_delay_seconds": restart_delay,
                 },
             )
-            stopped = stop_stream(channel_name)
-            if not stopped:
-                continue
             actual_restart_delay = restart_delay
             if settings.get("randomized") and restart_delay_random_seconds > 0:
                 actual_restart_delay += random_seconds_between(0, restart_delay_random_seconds, minimum_seconds=0)
@@ -5419,8 +5538,10 @@ def evaluate_stream_cycles_for_config(config_name: str, config: dict[str, Any]) 
                     "last_stopped_at": datetime.now().astimezone().isoformat(timespec="seconds"),
                 }
             )
-            with STATE.lock:
-                STATE.stream_cycle_channels[runtime_key] = runtime
+            set_stream_cycle_runtime(runtime_key, runtime)
+            stopped = stop_stream(channel_name, clear_cycle_runtime=False)
+            if not stopped:
+                continue
             app_db.record_event(
                 "stream_cycle_stopped",
                 config_name,
@@ -5458,8 +5579,7 @@ def evaluate_stream_cycles_for_config(config_name: str, config: dict[str, Any]) 
                     "last_error": str(exc),
                 }
             )
-            with STATE.lock:
-                STATE.stream_cycle_channels[runtime_key] = runtime
+            set_stream_cycle_runtime(runtime_key, runtime)
             app_db.record_event(
                 "stream_cycle_restart_failed",
                 config_name,
@@ -5481,8 +5601,7 @@ def evaluate_stream_cycles_for_config(config_name: str, config: dict[str, Any]) 
                     "last_error": "",
                 }
             )
-            with STATE.lock:
-                STATE.stream_cycle_channels[runtime_key] = runtime
+            set_stream_cycle_runtime(runtime_key, runtime)
             app_db.record_event(
                 "stream_cycle_restarted",
                 config_name,
@@ -5899,6 +6018,9 @@ class SyncHandler(BaseHTTPRequestHandler):
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args: Any) -> None:
         print(f"[ui] {self.address_string()} - {fmt % args}")
+
+    def do_OPTIONS(self) -> None:
+        write_response(self, 204, b"", "text/plain; charset=utf-8")
 
     def do_GET(self) -> None:
         begin_request_trace(self, "GET", self.path)
@@ -6403,6 +6525,7 @@ def main() -> int:
         config, _error = load_config_or_none(config_name)
         if config:
             app_db.sync_config(config_name, config, "startup")
+    load_stream_cycle_runtime()
 
     port = int(os.environ.get("STREAM_UI_PORT", "8765"))
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)

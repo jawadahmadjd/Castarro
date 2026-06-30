@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 import sys
@@ -111,6 +112,7 @@ def assert_stream_cycle_restarts_after_duration() -> None:
     original_record_stream_start = web_ui.app_db.record_stream_start
     original_record_stream_stop = web_ui.app_db.record_stream_stop
     original_unregister_cloud_assets = web_ui.unregister_cloud_assets
+    original_runtime_file = web_ui.STREAM_CYCLE_RUNTIME_FILE
 
     events: list[str] = []
     with tempfile.TemporaryDirectory(prefix="castarro-stream-cycle-", dir=str(ROOT)) as temp_dir:
@@ -140,6 +142,7 @@ def assert_stream_cycle_restarts_after_duration() -> None:
 
         try:
             web_ui.STATE = web_ui.AppState()
+            web_ui.STREAM_CYCLE_RUNTIME_FILE = temp_root / "stream-cycle-runtime.json"
             web_ui.STATE.streams["Inside Us"] = old_state
             web_ui.stream_manager.load_config = lambda _path: (config, temp_root)
             web_ui.stream_manager.stop_stream = fake_stop_stream
@@ -176,6 +179,7 @@ def assert_stream_cycle_restarts_after_duration() -> None:
             web_ui.app_db.record_stream_start = original_record_stream_start
             web_ui.app_db.record_stream_stop = original_record_stream_stop
             web_ui.unregister_cloud_assets = original_unregister_cloud_assets
+            web_ui.STREAM_CYCLE_RUNTIME_FILE = original_runtime_file
 
 
 def assert_stream_cycle_uses_random_duration_and_cooldown_minutes() -> None:
@@ -185,6 +189,7 @@ def assert_stream_cycle_uses_random_duration_and_cooldown_minutes() -> None:
     original_record_event = web_ui.app_db.record_event
     original_record_stream_stop = web_ui.app_db.record_stream_stop
     original_unregister_cloud_assets = web_ui.unregister_cloud_assets
+    original_runtime_file = web_ui.STREAM_CYCLE_RUNTIME_FILE
 
     events: list[tuple[str, dict]] = []
     with tempfile.TemporaryDirectory(prefix="castarro-random-cycle-", dir=str(ROOT)) as temp_dir:
@@ -218,6 +223,7 @@ def assert_stream_cycle_uses_random_duration_and_cooldown_minutes() -> None:
 
         try:
             web_ui.STATE = web_ui.AppState()
+            web_ui.STREAM_CYCLE_RUNTIME_FILE = temp_root / "stream-cycle-runtime.json"
             web_ui.STATE.streams["Inside Us"] = stream_state
             web_ui.stream_manager.stop_stream = fake_stop_stream
             web_ui.random.randint = lambda _start, end: end
@@ -246,6 +252,57 @@ def assert_stream_cycle_uses_random_duration_and_cooldown_minutes() -> None:
             web_ui.app_db.record_event = original_record_event
             web_ui.app_db.record_stream_stop = original_record_stream_stop
             web_ui.unregister_cloud_assets = original_unregister_cloud_assets
+            web_ui.STREAM_CYCLE_RUNTIME_FILE = original_runtime_file
+
+
+def assert_stream_cycle_cooldown_runtime_is_restored() -> None:
+    original_state = web_ui.STATE
+    original_runtime_file = web_ui.STREAM_CYCLE_RUNTIME_FILE
+
+    with tempfile.TemporaryDirectory(prefix="castarro-cycle-restore-", dir=str(ROOT)) as temp_dir:
+        temp_root = Path(temp_dir)
+        runtime_file = temp_root / "stream-cycle-runtime.json"
+        restart_at = time.time() + 3600
+        runtime_file.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "channels": [
+                        {
+                            "config": "config.ready.json",
+                            "channel": "Inside Us",
+                            "runtime": {
+                                "phase": "waiting_restart",
+                                "restart_at": restart_at,
+                                "restart_delay_seconds": 3600,
+                                "last_action": "stopped_for_cycle",
+                            },
+                        },
+                        {
+                            "config": "config.ready.json",
+                            "channel": "Running Channel",
+                            "runtime": {
+                                "phase": "running",
+                                "restart_at": 0,
+                            },
+                        },
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        try:
+            web_ui.STATE = web_ui.AppState()
+            web_ui.STREAM_CYCLE_RUNTIME_FILE = runtime_file
+            web_ui.load_stream_cycle_runtime()
+            restored = web_ui.STATE.stream_cycle_channels
+            assert ("config.ready.json", "Inside Us") in restored
+            assert restored[("config.ready.json", "Inside Us")]["restart_at"] == restart_at
+            assert ("config.ready.json", "Running Channel") not in restored
+        finally:
+            web_ui.STATE = original_state
+            web_ui.STREAM_CYCLE_RUNTIME_FILE = original_runtime_file
 
 
 def main() -> int:
@@ -254,6 +311,7 @@ def main() -> int:
     assert_remote_control_dispatches_expected_action()
     assert_stream_cycle_restarts_after_duration()
     assert_stream_cycle_uses_random_duration_and_cooldown_minutes()
+    assert_stream_cycle_cooldown_runtime_is_restored()
     print("scheduler_remote_control_test: PASS")
     return 0
 

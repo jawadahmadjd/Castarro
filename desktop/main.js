@@ -10,6 +10,8 @@ const { pathToFileURL } = require("url");
 const HEALTHCHECK_TIMEOUT_MS = 30000;
 const HEALTHCHECK_INTERVAL_MS = 500;
 const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const AUTO_INSTALL_UPDATE_DELAY_MS = 5000;
+const BACKEND_UPDATE_HANDOFF_INTERVAL_MS = 3000;
 const TRAY_TOOLTIP_REFRESH_MS = 5000;
 const GPU_METRICS_CACHE_MS = 10000;
 const STARTUP_SNAPSHOT_MIN_INTERVAL_MS = 15000;
@@ -31,6 +33,9 @@ let appBootstrapped = false;
 let installUpdateOnQuit = false;
 let legacyDataRoot = null;
 let updateCheckTimer = null;
+let autoInstallUpdateTimer = null;
+let backendUpdateHandoffTimer = null;
+let backendUpdateHandoffInFlight = false;
 let trayStatusTimer = null;
 let lastTrayTooltip = "";
 let lastTrayStatusLabel = "";
@@ -288,6 +293,20 @@ function setUpdateState(patch) {
   publishUpdateState();
 }
 
+function scheduleClearUpdateMessage(delayMs = 15000) {
+  setTimeout(() => {
+    if (updateState.status === "backend-updated") {
+      setUpdateState({
+        status: "idle",
+        version: null,
+        downloaded: false,
+        percent: 0,
+        message: ""
+      });
+    }
+  }, Math.max(0, Number(delayMs) || 0)).unref();
+}
+
 diagnosticLog("main loaded");
 
 process.on("uncaughtException", (error) => {
@@ -350,6 +369,18 @@ function backendInfoPath() {
   return path.join(dataRoot(), BACKEND_INFO_FILE);
 }
 
+function backendRuntimeBaseRoot() {
+  return path.join(dataRoot(), "service-runtimes");
+}
+
+function safeRuntimeVersion() {
+  return String(app.getVersion() || "dev").replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "dev";
+}
+
+function backendRuntimeRoot() {
+  return path.join(backendRuntimeBaseRoot(), safeRuntimeVersion());
+}
+
 function startupPagePath() {
   return path.join(dataRoot(), STARTUP_PAGE_FILE);
 }
@@ -385,6 +416,7 @@ function readBackendInfo() {
       port,
       pid,
       url: `http://127.0.0.1:${port}`,
+      appVersion: String(parsed.appVersion || "").trim(),
       startedAt: Number(parsed.startedAt) || null,
     };
   } catch (_error) {
@@ -400,6 +432,7 @@ function writeBackendInfo({ pid, port }) {
       {
         pid,
         port,
+        appVersion: app.getVersion(),
         startedAt: Date.now(),
       },
       null,
@@ -411,6 +444,69 @@ function writeBackendInfo({ pid, port }) {
 
 function removeBackendInfo() {
   fs.rmSync(backendInfoPath(), { force: true });
+}
+
+function copyRuntimeEntry(source, target) {
+  if (!source || !fs.existsSync(source)) return;
+  fs.rmSync(target, { recursive: true, force: true });
+  fs.cpSync(source, target, { recursive: true });
+}
+
+function prepareBackendRuntime() {
+  if (!app.isPackaged) {
+    return {
+      codeRoot: codeRoot(),
+      resourcesRoot: resourcesRoot(),
+      seedRoot: process.env.STREAM_LEGACY_ROOT
+        || (legacyDataRoot && fs.existsSync(legacyDataRoot) ? legacyDataRoot : codeRoot()),
+    };
+  }
+
+  const runtimeRoot = backendRuntimeRoot();
+  const markerPath = path.join(runtimeRoot, "runtime-ready.json");
+  try {
+    const marker = JSON.parse(fs.readFileSync(markerPath, "utf8"));
+    if (marker?.appVersion === app.getVersion()) {
+      return {
+        codeRoot: path.join(runtimeRoot, "app"),
+        resourcesRoot: runtimeRoot,
+        seedRoot: process.env.STREAM_LEGACY_ROOT
+          || (legacyDataRoot && fs.existsSync(legacyDataRoot) ? legacyDataRoot : path.join(runtimeRoot, "seed-data")),
+      };
+    }
+  } catch (_error) {
+    // Missing or partial runtime; rebuild it below.
+  }
+
+  const tempRoot = `${runtimeRoot}.tmp-${process.pid}`;
+  fs.rmSync(tempRoot, { recursive: true, force: true });
+  mkdirp(tempRoot);
+  mkdirp(path.join(tempRoot, "app"));
+  copyRuntimeEntry(path.join(codeRoot(), "scripts"), path.join(tempRoot, "app", "scripts"));
+  copyRuntimeEntry(path.join(codeRoot(), "web"), path.join(tempRoot, "app", "web"));
+  copyRuntimeEntry(path.join(resourcesRoot(), "python"), path.join(tempRoot, "python"));
+  copyRuntimeEntry(path.join(resourcesRoot(), "ffmpeg"), path.join(tempRoot, "ffmpeg"));
+  copyRuntimeEntry(path.join(resourcesRoot(), "seed-data"), path.join(tempRoot, "seed-data"));
+  for (const filename of ["package.json", "config.example.json", "README.md"]) {
+    const source = path.join(codeRoot(), filename);
+    if (fs.existsSync(source)) {
+      fs.copyFileSync(source, path.join(tempRoot, "app", filename));
+    }
+  }
+  fs.writeFileSync(
+    path.join(tempRoot, "runtime-ready.json"),
+    JSON.stringify({ appVersion: app.getVersion(), preparedAt: Date.now() }, null, 2) + "\n",
+    "utf8",
+  );
+  fs.rmSync(runtimeRoot, { recursive: true, force: true });
+  fs.renameSync(tempRoot, runtimeRoot);
+  diagnosticLog(`prepared backend runtime ${runtimeRoot}`);
+  return {
+    codeRoot: path.join(runtimeRoot, "app"),
+    resourcesRoot: runtimeRoot,
+    seedRoot: process.env.STREAM_LEGACY_ROOT
+      || (legacyDataRoot && fs.existsSync(legacyDataRoot) ? legacyDataRoot : path.join(runtimeRoot, "seed-data")),
+  };
 }
 
 function isProcessAlive(pid) {
@@ -431,23 +527,23 @@ function firstExisting(paths) {
   return paths.find((candidate) => candidate && fs.existsSync(candidate)) || null;
 }
 
-function bundledPythonPath() {
+function bundledPythonPath(root = resourcesRoot(), appCodeRoot = codeRoot()) {
   const configured = process.env.STREAM_PYTHON;
   if (configured) return configured;
   const exe = executableName("python");
   const bundled = firstExisting([
-    path.join(resourcesRoot(), "python", exe),
-    path.join(codeRoot(), "desktop", "resources", "python", exe)
+    path.join(root, "python", exe),
+    path.join(appCodeRoot, "desktop", "resources", "python", exe)
   ]);
   if (bundled) return bundled;
   return app.isPackaged ? null : "python";
 }
 
-function bundledToolPath(name) {
+function bundledToolPath(name, root = resourcesRoot(), appCodeRoot = codeRoot()) {
   const exe = executableName(name);
   return firstExisting([
-    path.join(resourcesRoot(), "ffmpeg", exe),
-    path.join(codeRoot(), "desktop", "resources", "ffmpeg", exe)
+    path.join(root, "ffmpeg", exe),
+    path.join(appCodeRoot, "desktop", "resources", "ffmpeg", exe)
   ]);
 }
 
@@ -533,20 +629,136 @@ function requestBackendPost(url, apiPath, payload = {}) {
 }
 
 async function requestStatus(url) {
-  await requestBackendStatus(url);
+  return requestBackendStatus(url);
 }
 
 async function liveStreamCount() {
   if (!backendUrl) return 0;
   try {
     const payload = await requestBackendStatus(backendUrl);
-    if (!payload || typeof payload !== "object" || typeof payload.streams !== "object" || !payload.streams) {
-      return 0;
-    }
-    return Object.values(payload.streams).filter((stream) => stream && stream.running).length;
+    return streamCountFromStatus(payload);
   } catch (error) {
     diagnosticLog("live stream status check failed", error);
     return 0;
+  }
+}
+
+function streamCountFromStatus(payload) {
+  if (!payload || typeof payload !== "object" || typeof payload.streams !== "object" || !payload.streams) {
+    return 0;
+  }
+  return Object.values(payload.streams).filter((stream) => {
+    if (!stream || typeof stream !== "object") return false;
+    if (Object.prototype.hasOwnProperty.call(stream, "process_running")) {
+      return Boolean(stream.process_running);
+    }
+    return Boolean(stream.running);
+  }).length;
+}
+
+function backendVersionFromStatus(status) {
+  return String(status?.app_version || "").trim();
+}
+
+function currentAppVersion() {
+  return String(app.getVersion() || "").trim();
+}
+
+function backendNeedsVersionHandoff(status) {
+  const backendVersion = backendVersionFromStatus(status);
+  const appVersion = currentAppVersion();
+  return Boolean(app.isPackaged && backendVersion && appVersion && backendVersion !== appVersion);
+}
+
+function stopBackendUpdateHandoffMonitor() {
+  if (backendUpdateHandoffTimer) {
+    clearInterval(backendUpdateHandoffTimer);
+    backendUpdateHandoffTimer = null;
+  }
+}
+
+function startBackendUpdateHandoffMonitor(reason = "unknown") {
+  if (!app.isPackaged || backendUpdateHandoffTimer) return;
+  diagnosticLog(`backend update handoff monitor started reason=${reason}`);
+  const tick = () => maybeHandoffIdleBackend("monitor").catch((error) => {
+    diagnosticLog("backend update handoff monitor failed", error);
+  });
+  backendUpdateHandoffTimer = setInterval(tick, BACKEND_UPDATE_HANDOFF_INTERVAL_MS);
+  backendUpdateHandoffTimer.unref();
+  setTimeout(tick, 500).unref();
+}
+
+async function maybeHandoffIdleBackend(reason = "unknown", knownStatus = null) {
+  if (!app.isPackaged || !backendUrl || backendUpdateHandoffInFlight || isQuitting) return false;
+  backendUpdateHandoffInFlight = true;
+  try {
+    const status = knownStatus || await requestBackendStatus(backendUrl);
+    if (!backendNeedsVersionHandoff(status)) {
+      stopBackendUpdateHandoffMonitor();
+      return false;
+    }
+
+    const runningStreams = streamCountFromStatus(status);
+    const backendVersion = backendVersionFromStatus(status);
+    const appVersion = currentAppVersion();
+    if (runningStreams > 0) {
+      diagnosticLog(`backend update handoff deferred old=${backendVersion} new=${appVersion} streams=${runningStreams} reason=${reason}`);
+      setUpdateState({
+        status: "backend-pending",
+        version: appVersion,
+        downloaded: false,
+        percent: 100,
+        message: `App update installed. Backend will switch from ${backendVersion} to ${appVersion} after active streams finish.`,
+      });
+      startBackendUpdateHandoffMonitor("streams-running");
+      return false;
+    }
+
+    diagnosticLog(`backend update handoff starting old=${backendVersion} new=${appVersion} reason=${reason}`);
+    setUpdateState({
+      status: "backend-handoff",
+      version: appVersion,
+      downloaded: false,
+      percent: 100,
+      message: `Switching backend from ${backendVersion} to ${appVersion}.`,
+    });
+    if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible()) {
+      await showLoading("Updating Castarro service...");
+    }
+    await requestBackendPost(backendUrl, "/api/system/shutdown", {
+      stop_streams: false,
+      stop_tasks: true,
+    });
+    const stopped = await waitForBackendToStop(backendUrl, 12000);
+    if (!stopped) {
+      diagnosticLog("backend update handoff timed out waiting for old backend to stop");
+      startBackendUpdateHandoffMonitor("shutdown-timeout");
+      return false;
+    }
+
+    backend = null;
+    removePidFile();
+    backendPort = await findOpenPort();
+    backendUrl = `http://127.0.0.1:${backendPort}`;
+    diagnosticLog(`backend update handoff new backend url ${backendUrl}`);
+    startBackend(backendPort, { persistent: true });
+    await waitForBackend(backendUrl);
+    diagnosticLog("backend update handoff complete");
+    stopBackendUpdateHandoffMonitor();
+    setUpdateState({
+      status: "backend-updated",
+      version: appVersion,
+      downloaded: false,
+      percent: 100,
+      message: `Backend updated to ${appVersion}.`,
+    });
+    scheduleClearUpdateMessage();
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      await loadApplicationUi();
+    }
+    return true;
+  } finally {
+    backendUpdateHandoffInFlight = false;
   }
 }
 
@@ -575,7 +787,10 @@ async function requestQuit(source = "unknown", mode = "ui-only", options = {}) {
   diagnosticLog(`quit requested source=${source} mode=${mode}`);
   try {
     await captureStartupSnapshot(`quit-${source}`);
-    if (mode === "stop-streams-and-exit") {
+    if (mode === "restart-to-update") {
+      quitMode = "ui-only";
+      installUpdateOnQuit = Boolean(options.installUpdate) && (updateState.downloaded || updateState.status === "downloaded");
+    } else if (mode === "stop-streams-and-exit") {
       if (backendUrl) {
         await requestBackendPost(backendUrl, "/api/stream/stop", { channel: null });
         await requestBackendPost(backendUrl, "/api/system/shutdown", {
@@ -630,6 +845,7 @@ async function requestQuit(source = "unknown", mode = "ui-only", options = {}) {
 
 ipcMain.handle("desktop:get-update-status", () => ({ ...updateState }));
 ipcMain.handle("desktop:get-app-version", () => app.getVersion());
+ipcMain.handle("desktop:get-backend-url", () => backendUrl || null);
 ipcMain.handle("desktop:get-usage-metrics", async (_event, payload) => collectUsageMetrics(payload));
 ipcMain.on("desktop:cache-startup-view", (_event, payload = {}) => {
   const reason = String(payload?.reason || "renderer");
@@ -725,7 +941,7 @@ ipcMain.handle("desktop:request-stop-streams-and-exit", async () => {
   return { ok };
 });
 ipcMain.handle("desktop:request-restart-to-update", async () => {
-  const ok = await requestQuit("renderer-update", "stop-streams-and-exit", { installUpdate: true });
+  const ok = await requestQuit("renderer-update", "restart-to-update", { installUpdate: true });
   return { ok };
 });
 
@@ -734,8 +950,7 @@ async function waitForBackend(url) {
   let lastError = null;
   while (Date.now() - startedAt < HEALTHCHECK_TIMEOUT_MS) {
     try {
-      await requestStatus(url);
-      return;
+      return await requestStatus(url);
     } catch (error) {
       lastError = error;
       await new Promise((resolve) => setTimeout(resolve, HEALTHCHECK_INTERVAL_MS));
@@ -744,24 +959,56 @@ async function waitForBackend(url) {
   throw lastError || new Error("Backend did not become ready.");
 }
 
+async function waitForBackendToStop(url, timeoutMs = 8000) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    try {
+      await requestBackendStatus(url);
+      await new Promise((resolve) => setTimeout(resolve, HEALTHCHECK_INTERVAL_MS));
+    } catch (_error) {
+      return true;
+    }
+  }
+  return false;
+}
+
 async function connectOrStartBackend() {
   const existing = readBackendInfo();
   if (existing?.url) {
     if (isProcessAlive(existing.pid)) {
       try {
-        await waitForBackend(existing.url);
-        backendPort = existing.port;
-        backendUrl = existing.url;
-        diagnosticLog(`connected to existing backend pid=${existing.pid} port=${existing.port}`);
-        return;
+        const status = await waitForBackend(existing.url);
+        const existingVersion = String(status?.app_version || existing.appVersion || "").trim();
+        const currentVersion = String(app.getVersion() || "").trim();
+        const runningStreams = streamCountFromStatus(status);
+        if (app.isPackaged && existingVersion && currentVersion && existingVersion !== currentVersion && runningStreams === 0) {
+          backendPort = existing.port;
+          backendUrl = existing.url;
+          const handedOff = await maybeHandoffIdleBackend("startup-idle", status);
+          if (handedOff) return;
+          startBackendUpdateHandoffMonitor("startup-idle-retry");
+          diagnosticLog(`connected to idle older backend until handoff can retry old=${existingVersion} new=${currentVersion}`);
+          return;
+        } else {
+          if (app.isPackaged && existingVersion && currentVersion && existingVersion !== currentVersion) {
+            diagnosticLog(`connected to older streaming backend old=${existingVersion} new=${currentVersion} streams=${runningStreams}`);
+            startBackendUpdateHandoffMonitor("startup-streaming");
+          } else {
+            stopBackendUpdateHandoffMonitor();
+          }
+          backendPort = existing.port;
+          backendUrl = existing.url;
+          diagnosticLog(`connected to existing backend pid=${existing.pid} port=${existing.port}`);
+          return;
+        }
       } catch (error) {
         diagnosticLog("existing backend did not respond; starting new backend", error);
+        removePidFile();
       }
     } else {
       diagnosticLog(`stale backend info found for dead pid ${existing.pid}; removing`);
+      removePidFile();
     }
-    removeBackendInfo();
-    removePidFile();
   }
 
   backendPort = await findOpenPort();
@@ -769,6 +1016,7 @@ async function connectOrStartBackend() {
   diagnosticLog(`backend url ${backendUrl}`);
   startBackend(backendPort, { persistent: true });
   await waitForBackend(backendUrl);
+  stopBackendUpdateHandoffMonitor();
   diagnosticLog("backend healthy");
 }
 
@@ -845,6 +1093,14 @@ function showLoading(message) {
   });
 }
 
+function loadApplicationUi() {
+  if (!mainWindow || mainWindow.isDestroyed()) return Promise.resolve();
+  if (app.isPackaged) {
+    return mainWindow.loadFile(path.join(codeRoot(), "web", "index.html"));
+  }
+  return mainWindow.loadURL(backendUrl);
+}
+
 function showError(error) {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   const message = `${error.message}\n\nLogs: ${logRoot()}\nData: ${dataRoot()}`;
@@ -862,6 +1118,7 @@ function createMainWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      webSecurity: !app.isPackaged,
       preload: path.join(appRoot(), "desktop", "preload.js")
     }
   });
@@ -896,7 +1153,7 @@ function createMenu() {
     {
       label: "App",
       submenu: [
-        { label: "Reload UI", click: () => backendUrl && mainWindow && mainWindow.loadURL(backendUrl) },
+        { label: "Reload UI", click: () => backendUrl && mainWindow && loadApplicationUi().catch((error) => showError(error)) },
         { label: "Open Data Folder", click: () => shell.openPath(dataRoot()) },
         { label: "Open Logs Folder", click: () => shell.openPath(logRoot()) },
         { type: "separator" },
@@ -978,6 +1235,42 @@ async function refreshTrayPresentation() {
   }
 }
 
+function clearAutoInstallUpdateTimer() {
+  if (autoInstallUpdateTimer) {
+    clearTimeout(autoInstallUpdateTimer);
+    autoInstallUpdateTimer = null;
+  }
+}
+
+function scheduleAutomaticUpdateInstall(version = null) {
+  if (!app.isPackaged || process.env.STREAM_DISABLE_AUTO_UPDATE === "1" || process.env.STREAM_HEADLESS_SMOKE === "1") return;
+  clearAutoInstallUpdateTimer();
+  autoInstallUpdateTimer = setTimeout(() => {
+    autoInstallUpdateTimer = null;
+    installDownloadedUpdateAutomatically(version).catch((error) => {
+      diagnosticLog("automatic update install failed", error);
+      setUpdateState({
+        status: "error",
+        message: error?.message || String(error || "Automatic update install failed")
+      });
+    });
+  }, AUTO_INSTALL_UPDATE_DELAY_MS);
+  autoInstallUpdateTimer.unref();
+}
+
+async function installDownloadedUpdateAutomatically(version = null) {
+  if (isQuitting || !autoUpdater || !(updateState.downloaded || updateState.status === "downloaded")) return;
+  diagnosticLog(`automatic update install starting ${version || ""}`);
+  setUpdateState({
+    status: "installing",
+    version: version || updateState.version || null,
+    downloaded: true,
+    percent: 100,
+    message: "Installing update. Live streams will keep running.",
+  });
+  await requestQuit("auto-update", "restart-to-update", { installUpdate: true });
+}
+
 function configureAutoUpdates() {
   if (!app.isPackaged || process.env.STREAM_DISABLE_AUTO_UPDATE === "1" || process.env.STREAM_HEADLESS_SMOKE === "1") {
     diagnosticLog("auto updates skipped");
@@ -1044,14 +1337,15 @@ function configureAutoUpdates() {
   });
   autoUpdater.on("update-downloaded", (info) => {
     const version = info.version || null;
-    diagnosticLog(`update downloaded ${version || ""}; will install when app quits`);
+    diagnosticLog(`update downloaded ${version || ""}; scheduling automatic install`);
     setUpdateState({
       status: "downloaded",
       version,
       downloaded: true,
       percent: 100,
-      message: "Update downloaded and ready for next restart."
+      message: "Update downloaded. Castarro will restart the UI automatically and keep live streams running."
     });
+    scheduleAutomaticUpdateInstall(version);
   });
   autoUpdater.on("error", (error) => {
     diagnosticLog("auto update failed", error);
@@ -1094,7 +1388,10 @@ function killProcessTree(pid) {
 
 function startBackend(port, { persistent = true } = {}) {
   diagnosticLog(`starting backend on ${port}`);
-  const python = bundledPythonPath();
+  const runtime = prepareBackendRuntime();
+  const backendCodeRoot = runtime.codeRoot;
+  const backendResourcesRoot = runtime.resourcesRoot;
+  const python = bundledPythonPath(backendResourcesRoot, backendCodeRoot);
   if (!python) {
     throw new Error("Bundled Python runtime was not found. Put python.exe under desktop/resources/python before building.");
   }
@@ -1102,23 +1399,22 @@ function startBackend(port, { persistent = true } = {}) {
   mkdirp(dataRoot());
   mkdirp(logRoot());
 
-  const scriptPath = path.join(codeRoot(), "scripts", "web_ui.py");
+  const scriptPath = path.join(backendCodeRoot, "scripts", "web_ui.py");
   const outLog = fs.openSync(path.join(logRoot(), "backend.out.log"), "a");
   const errLog = fs.openSync(path.join(logRoot(), "backend.err.log"), "a");
-  const ffmpegPath = bundledToolPath("ffmpeg");
-  const ffprobePath = bundledToolPath("ffprobe");
+  const ffmpegPath = bundledToolPath("ffmpeg", backendResourcesRoot, backendCodeRoot);
+  const ffprobePath = bundledToolPath("ffprobe", backendResourcesRoot, backendCodeRoot);
   const ffmpegDir = ffmpegPath ? path.dirname(ffmpegPath) : "";
-  const scriptsDir = path.join(codeRoot(), "scripts");
-  const packagedSeedRoot = app.isPackaged ? path.join(resourcesRoot(), "seed-data") : codeRoot();
+  const scriptsDir = path.join(backendCodeRoot, "scripts");
   const legacyRoot = process.env.STREAM_LEGACY_ROOT
-    || (legacyDataRoot && fs.existsSync(legacyDataRoot) ? legacyDataRoot : packagedSeedRoot);
+    || runtime.seedRoot;
 
   const env = {
     ...process.env,
     STREAM_UI_PORT: String(port),
-    STREAM_APP_CODE_DIR: codeRoot(),
+    STREAM_APP_CODE_DIR: backendCodeRoot,
     STREAM_APP_DATA_DIR: dataRoot(),
-    STREAM_WEB_ROOT: path.join(codeRoot(), "web"),
+    STREAM_WEB_ROOT: path.join(backendCodeRoot, "web"),
     STREAM_LEGACY_ROOT: legacyRoot,
     PYTHONPATH: process.env.PYTHONPATH ? `${scriptsDir}${path.delimiter}${process.env.PYTHONPATH}` : scriptsDir,
     PATH: ffmpegDir ? `${ffmpegDir}${path.delimiter}${process.env.PATH || ""}` : process.env.PATH
@@ -1129,7 +1425,7 @@ function startBackend(port, { persistent = true } = {}) {
   diagnosticLog(`backend python ${python}`);
   diagnosticLog(`backend script ${scriptPath}`);
   diagnosticLog(`backend cwd ${dataRoot()}`);
-  diagnosticLog(`backend code root ${codeRoot()}`);
+  diagnosticLog(`backend code root ${backendCodeRoot}`);
   const child = spawn(python, [scriptPath], {
     cwd: dataRoot(),
     env,
@@ -1210,7 +1506,7 @@ async function boot() {
   }
   await showLoading("Preparing Castarro...");
   await connectOrStartBackend();
-  await mainWindow.loadURL(backendUrl);
+  await loadApplicationUi();
 }
 
 app.whenReady().then(() => {
@@ -1231,7 +1527,7 @@ app.on("activate", () => {
       return;
     }
     createMainWindow();
-    mainWindow.loadURL(backendUrl).catch((error) => showError(error));
+    loadApplicationUi().catch((error) => showError(error));
   }
 });
 
@@ -1243,6 +1539,8 @@ app.on("before-quit", (event) => {
   }
   diagnosticLog(`before quit mode=${quitMode}`);
   if (updateCheckTimer) clearInterval(updateCheckTimer);
+  clearAutoInstallUpdateTimer();
+  stopBackendUpdateHandoffMonitor();
   if (trayStatusTimer) clearInterval(trayStatusTimer);
   if (startupSnapshotTimer) clearTimeout(startupSnapshotTimer);
   if (quitMode === "full-stop") {

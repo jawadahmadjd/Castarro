@@ -82,7 +82,7 @@ def assert_no_hardcoded_visual_style_writes(relative_path):
 def test_ui_master_is_loaded_by_the_app():
     index = read("web/index.html")
     styles = read("web/styles.css").strip()
-    assert 'href="/ui-master.css"' in index
+    assert 'href="ui-master.css"' in index
     assert styles == "@import url('/ui-master.css');"
 
 
@@ -102,7 +102,7 @@ def test_special_desktop_web_pages_use_ui_master():
     app_js = read("web/app.js")
     desktop = read("desktop/main.js")
     backend = read("scripts/web_ui.py")
-    assert '<link rel="stylesheet" href="/ui-master.css">' in app_js
+    assert "localAssetUrl(\"ui-master.css\")" in app_js
     assert "uiMasterCss()" in desktop
     assert '<body class="startup-page">' in desktop
     assert backend.count('<link rel="stylesheet" href="/ui-master.css">') >= 2

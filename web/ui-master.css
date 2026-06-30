@@ -1881,7 +1881,7 @@ textarea {
 .settings-history-head,
 .settings-history-row {
   display: grid;
-  grid-template-columns: minmax(135px, 0.8fr) minmax(120px, 0.65fr) minmax(190px, 1.1fr) minmax(96px, 0.5fr) minmax(170px, 0.95fr) minmax(92px, 0.45fr);
+  grid-template-columns: minmax(124px, 0.85fr) minmax(116px, 0.75fr) minmax(180px, 1.2fr) minmax(124px, 0.58fr) minmax(132px, 0.95fr) minmax(78px, 0.42fr);
   gap: 12px;
   align-items: center;
 }
@@ -1943,7 +1943,7 @@ textarea {
 }
 
 .settings-history-status {
-  justify-self: start;
+  justify-self: center;
 }
 
 .settings-history-comments-cell {
@@ -1961,6 +1961,12 @@ textarea {
   text-overflow: ellipsis;
   white-space: nowrap;
   width: 100%;
+}
+
+.settings-history-row > div:nth-child(4) {
+  display: flex;
+  justify-content: center;
+  min-width: 0;
 }
 
 .settings-history-comments-panel {
@@ -3864,6 +3870,55 @@ pre {
   }
 }
 
+@media (max-width: 1180px) {
+  .live-history-settings-head {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+
+  .settings-history-controls {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(154px, 220px);
+    align-items: end;
+    justify-content: stretch;
+    min-width: 0;
+    width: 100%;
+  }
+
+  .history-search-field,
+  .history-filter-wrap,
+  .history-range-button {
+    width: 100%;
+  }
+
+  .settings-history-head {
+    display: none;
+  }
+
+  .settings-history-row {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 12px 14px;
+    align-items: center;
+    padding: 14px;
+  }
+
+  .settings-history-row > .settings-history-primary:nth-child(3) {
+    grid-column: span 2;
+  }
+
+  .settings-history-row > div:nth-child(4) {
+    justify-content: start;
+  }
+
+  .settings-history-comments-cell {
+    grid-column: span 2;
+  }
+
+  .settings-history-status {
+    justify-self: end;
+  }
+}
+
 @media (max-width: 780px) {
   .hero,
   .grid,
@@ -4024,6 +4079,7 @@ pre {
 
   .settings-history-controls {
     display: grid;
+    grid-template-columns: 1fr;
     justify-content: stretch;
     min-width: 0;
   }
@@ -4781,6 +4837,10 @@ h1 {
   padding: 11px 13px 13px 14px;
   display: grid;
   gap: 10px;
+}
+
+.workspace-alert-detail[hidden] {
+  display: none;
 }
 
 .workspace-alert-detail p {

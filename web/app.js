@@ -58,6 +58,7 @@ const state = {
   previewHls: null,
   theme: "light",
   appVersion: null,
+  backendBaseUrl: "",
   updateStatus: null,
   usageMetrics: null,
   youtubeStatus: null,
@@ -139,6 +140,30 @@ const $ = (id) => document.getElementById(id);
 let youtubeLiveChatPopoutWindow = null;
 const desktopBridge = () => (window.desktopShell && typeof window.desktopShell === "object" ? window.desktopShell : null);
 
+function normalizeBackendBaseUrl(value) {
+  return String(value || "").trim().replace(/\/+$/, "");
+}
+
+function apiBaseUrl() {
+  return normalizeBackendBaseUrl(state.backendBaseUrl);
+}
+
+function apiRequestUrl(path) {
+  const text = String(path || "");
+  if (/^https?:\/\//i.test(text)) return text;
+  const base = apiBaseUrl();
+  if (!base) return text;
+  return text.startsWith("/") ? `${base}${text}` : `${base}/${text}`;
+}
+
+function apiUrlOrigin() {
+  return apiBaseUrl() || window.location.origin;
+}
+
+function localAssetUrl(path) {
+  return new URL(String(path || "").replace(/^\/+/, ""), window.location.href).href;
+}
+
 function liveImportProgressForChannel(channelName) {
   const progress = state.liveImportProgress;
   if (!progress) return null;
@@ -203,7 +228,7 @@ function uiMasterNumber(name, fallback) {
 
 function authPopupLoadingHtml(title) {
   return `
-        <link rel="stylesheet" href="/ui-master.css">
+        <link rel="stylesheet" href="${escapeAttr(localAssetUrl("ui-master.css"))}">
         <main class="auth-popup-page">
           <h1>${escapeHtml(title)}</h1>
           <p>You can continue in this window once Google sign-in loads.</p>
@@ -1015,18 +1040,21 @@ function alertDetailRows(item) {
 
 function renderWorkspaceAlertItem(item, index) {
   const id = workspaceAlertId(item, index);
+  const detailId = `workspace-alert-detail-${index}`;
   const expanded = Boolean(state.workspace.expandedAlertIds?.[id]);
   const title = compactAlertTitle(item);
   const detail = String(item?.detail || item?.message || "").trim();
   const severity = normalizeWorkspaceAlertSeverity(item?.severity);
   const rows = alertDetailRows(item);
   return `
-    <article class="workspace-alert-item ${escapeAttr(severity)} ${expanded ? "is-expanded" : ""}">
+    <article class="workspace-alert-item ${escapeAttr(severity)} ${expanded ? "is-expanded" : ""}" data-alert-id="${escapeAttr(id)}">
       <button
         class="workspace-alert-summary"
         type="button"
+        data-alert-id="${escapeAttr(id)}"
         aria-expanded="${expanded ? "true" : "false"}"
-        onclick="event.stopPropagation(); toggleWorkspaceAlertItem('${escapeJs(id)}')"
+        aria-controls="${escapeAttr(detailId)}"
+        onclick="toggleWorkspaceAlertItem('${escapeJs(id)}', event)"
       >
         <span class="workspace-alert-summary-main">
           <strong>${escapeHtml(title)}</strong>
@@ -1036,21 +1064,19 @@ function renderWorkspaceAlertItem(item, index) {
           <span class="workspace-alert-chevron" aria-hidden="true">${expanded ? "-" : "+"}</span>
         </span>
       </button>
-      ${expanded ? `
-        <div class="workspace-alert-detail">
-          <p>${escapeHtml(detail || "No additional details were provided for this notification.")}</p>
-          ${rows.length ? `
-            <dl>
-              ${rows.map((row) => `
-                <div>
-                  <dt>${escapeHtml(row.label)}</dt>
-                  <dd>${escapeHtml(row.value)}</dd>
-                </div>
-              `).join("")}
-            </dl>
-          ` : ""}
-        </div>
-      ` : ""}
+      <div class="workspace-alert-detail" id="${escapeAttr(detailId)}" ${expanded ? "" : "hidden"}>
+        <p>${escapeHtml(detail || "No additional details were provided for this notification.")}</p>
+        ${rows.length ? `
+          <dl>
+            ${rows.map((row) => `
+              <div>
+                <dt>${escapeHtml(row.label)}</dt>
+                <dd>${escapeHtml(row.value)}</dd>
+              </div>
+            `).join("")}
+          </dl>
+        ` : ""}
+      </div>
     </article>
   `;
 }
@@ -1237,7 +1263,7 @@ function logLocalActivityEvent(eventType, message, details = {}, status = "info"
 
 function channelNameFromApiRequest(path, options = {}) {
   try {
-    const url = new URL(String(path || ""), window.location.origin);
+    const url = new URL(String(path || ""), apiUrlOrigin());
     const queryChannel = String(url.searchParams.get("channel") || "").trim();
     if (queryChannel) return queryChannel;
   } catch {
@@ -1258,7 +1284,7 @@ function apiRequestLabel(path, action = "") {
   if (actionText) return actionText;
   let pathname = "";
   try {
-    pathname = new URL(String(path || ""), window.location.origin).pathname;
+    pathname = new URL(String(path || ""), apiUrlOrigin()).pathname;
   } catch {
     pathname = String(path || "");
   }
@@ -1285,8 +1311,9 @@ async function api(path, options = {}) {
   } = options;
   const requestId = makeRequestId();
   let response;
+  const requestUrl = apiRequestUrl(path);
   try {
-    response = await fetch(path, {
+    response = await fetch(requestUrl, {
       headers: {
         "Content-Type": "application/json",
         "X-Request-ID": requestId,
@@ -1527,6 +1554,14 @@ async function initDesktopIntegration() {
   if (stopAndExitButton) stopAndExitButton.hidden = !canStopAndExit;
   if (!bridge) return;
 
+  if (typeof bridge.getBackendUrl === "function") {
+    try {
+      state.backendBaseUrl = normalizeBackendBaseUrl(await bridge.getBackendUrl());
+    } catch (_error) {
+      state.backendBaseUrl = "";
+    }
+  }
+
   if (typeof bridge.getUpdateStatus === "function") {
     try {
       state.updateStatus = await bridge.getUpdateStatus();
@@ -1609,7 +1644,19 @@ function renderUpdateBanner() {
   } else if (status === "downloaded") {
     show = true;
     ready = true;
-    message = `Update${version} is ready and will install automatically on your next restart.`;
+    message = update.message || `Update${version} is ready. Castarro will restart the UI automatically; live streams will keep running.`;
+  } else if (status === "installing") {
+    show = true;
+    message = update.message || `Installing update${version}. Live streams will keep running.`;
+  } else if (status === "backend-pending") {
+    show = true;
+    message = update.message || `Update${version} is installed. Backend will switch after active streams finish.`;
+  } else if (status === "backend-handoff") {
+    show = true;
+    message = update.message || `Switching backend to update${version}.`;
+  } else if (status === "backend-updated") {
+    show = true;
+    message = update.message || `Backend updated${version}.`;
   } else if (status === "error") {
     show = true;
     hasError = true;
@@ -4158,7 +4205,7 @@ function renderPreview(streams) {
     detachPreviewPlayer();
     return;
   }
-  attachPreviewPlayer(selected.preview_url);
+  attachPreviewPlayer(apiRequestUrl(selected.preview_url));
 }
 
 function attachPreviewPlayer(url) {
@@ -4557,9 +4604,10 @@ async function loadConfigText() {
   try {
     const requestId = makeRequestId();
     const path = `/api/config?config=${encodeURIComponent(state.config)}`;
+    const requestUrl = apiRequestUrl(path);
     let response;
     try {
-      response = await fetch(path, {
+      response = await fetch(requestUrl, {
         headers: {
           "X-Request-ID": requestId,
           "X-Client-Action": "config.load",
@@ -5715,7 +5763,7 @@ function renderYoutubeLiveChatPopout(selectedChannel, linkedAccount, actionBusy)
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <title>YouTube Live Chat</title>
-        <link rel="stylesheet" href="/ui-master.css">
+        <link rel="stylesheet" href="${escapeAttr(localAssetUrl("ui-master.css"))}">
       </head>
       <body class="youtube-chat-popout-root">
         <main class="youtube-chat-popout">
@@ -7059,9 +7107,10 @@ async function uploadYoutubeThumbnail(file, broadcastId, accountId) {
     filename: file.name || "thumbnail",
   });
   const path = `/api/youtube/thumbnail?${query.toString()}`;
+  const requestUrl = apiRequestUrl(path);
   let response;
   try {
-    response = await fetch(path, {
+    response = await fetch(requestUrl, {
       method: "POST",
       headers: {
         "Content-Type": file.type || "application/octet-stream",
@@ -7803,7 +7852,7 @@ function liveVideoOption(file, index, channelName) {
         <span aria-hidden="true">::</span>
       </button>
       <span class="video-thumb-wrap">
-        <img class="video-thumb" src="/api/video-thumbnail?${thumbnailQuery.toString()}" alt="" loading="lazy" onerror="this.classList.add('missing')">
+        <img class="video-thumb" src="${escapeAttr(apiRequestUrl(`/api/video-thumbnail?${thumbnailQuery.toString()}`))}" alt="" loading="lazy" onerror="this.classList.add('missing')">
         ${durationBadge}
       </span>
       <span class="video-option-text">
@@ -8685,10 +8734,11 @@ async function uploadRawVideos(index, files) {
     for (const file of selectedFiles) {
       toast(`Adding ${file.name}...`);
       const url = `/api/raw-files/upload?config=${encodeURIComponent(state.config)}&channel=${encodeURIComponent(channel.name)}&filename=${encodeURIComponent(file.name)}`;
+      const requestUrl = apiRequestUrl(url);
       const requestId = makeRequestId();
       let response;
       try {
-        response = await fetch(url, {
+        response = await fetch(requestUrl, {
           method: "POST",
           headers: {
             "X-Request-ID": requestId,
@@ -8773,10 +8823,11 @@ async function uploadLiveVideos(index, files) {
       toast(`Copying ${itemIndex + 1} of ${selectedFiles.length}: ${file.name}`);
       if (!await waitForLiveImportResume()) break;
       const url = `/api/normalized-files/upload?config=${encodeURIComponent(state.config)}&channel=${encodeURIComponent(channel.name)}&filename=${encodeURIComponent(file.name)}`;
+      const requestUrl = apiRequestUrl(url);
       const requestId = makeRequestId();
       let response;
       try {
-        response = await fetch(url, {
+        response = await fetch(requestUrl, {
           method: "POST",
           headers: {
             "X-Request-ID": requestId,
@@ -9812,14 +9863,33 @@ function toggleWorkspaceAlertsMenu() {
   rerenderWorkspaceHeader();
 }
 
-function toggleWorkspaceAlertItem(id) {
+function syncWorkspaceAlertItemExpansion(id, expanded) {
   const key = String(id || "").trim();
   if (!key) return;
+  const buttons = Array.from(document.querySelectorAll(".workspace-alert-summary[data-alert-id]"));
+  const button = buttons.find((node) => node.dataset.alertId === key);
+  const item = button?.closest(".workspace-alert-item");
+  const detail = item?.querySelector(".workspace-alert-detail");
+  if (!button || !item || !detail) return;
+  item.classList.toggle("is-expanded", expanded);
+  button.setAttribute("aria-expanded", expanded ? "true" : "false");
+  detail.hidden = !expanded;
+  const chevron = button.querySelector(".workspace-alert-chevron");
+  if (chevron) chevron.textContent = expanded ? "-" : "+";
+}
+
+function toggleWorkspaceAlertItem(id, event) {
+  if (event && typeof event.stopPropagation === "function") {
+    event.stopPropagation();
+  }
+  const key = String(id || "").trim();
+  if (!key) return;
+  const expanded = !state.workspace.expandedAlertIds?.[key];
   state.workspace.expandedAlertIds = {
     ...(state.workspace.expandedAlertIds || {}),
-    [key]: !state.workspace.expandedAlertIds?.[key],
+    [key]: expanded,
   };
-  rerenderWorkspaceHeader();
+  syncWorkspaceAlertItemExpansion(key, expanded);
 }
 
 function closeWorkspaceAlertsMenu() {
@@ -10589,6 +10659,8 @@ function isTrustedGoogleAuthOrigin(origin) {
   try {
     const incoming = new URL(origin);
     const current = new URL(window.location.href);
+    const backendBase = apiBaseUrl();
+    if (backendBase && incoming.origin === new URL(backendBase).origin) return true;
     const redirectCandidates = [
       String((state.configData || {}).youtube?.redirect_uri || defaultYoutubeSettings().redirect_uri || ""),
       ...normalizedStorageProviders(state.configData || defaultConfigData()).map((provider) => String(provider?.oauth?.redirect_uri || "")),
@@ -10663,9 +10735,10 @@ applySettingsSection(state.settingsTab);
 applyLegacyTabView("control");
 renderChannelTools();
 initActivityStreamSplitter();
-initDesktopIntegration().catch(() => {});
 renderCachedDashboard();
-refresh()
+initDesktopIntegration()
+  .catch(() => {})
+  .then(() => refresh())
   .then(loadConfigText)
   .then(() => {
     hydrateYoutubeStatusFromCache(true);

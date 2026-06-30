@@ -261,6 +261,12 @@ async function installHistoryFixture(page) {
     await page.waitForTimeout(700);
     await page.screenshot({ path: path.join(OUT_DIR, "live-history-settings.png"), fullPage: true });
 
+    await page.setViewportSize({ width: 960, height: 790 });
+    await page.waitForTimeout(250);
+    await page.screenshot({ path: path.join(OUT_DIR, "live-history-settings-compact.png"), fullPage: true });
+    await page.setViewportSize({ width: 1490, height: 930 });
+    await page.waitForTimeout(250);
+
     await page.locator("#settingsLiveHistoryRangeButton").click();
     await page.waitForSelector("#settingsLiveHistoryDateMenu:not(.hidden)");
     await page.waitForTimeout(250);

@@ -3,6 +3,7 @@ const os = require("node:os");
 const path = require("node:path");
 const http = require("node:http");
 const { spawn } = require("node:child_process");
+const assert = require("node:assert/strict");
 const { chromium } = require("playwright");
 
 const ROOT = process.cwd();
@@ -386,6 +387,13 @@ async function capture() {
     await page.waitForSelector("#channelWorkspaceRail:not(.hidden)");
     await page.waitForTimeout(500);
     await seedUiState(page);
+    await page.locator(".workspace-alerts-toggle").click();
+    assert.equal(await page.locator(".workspace-alert-detail:visible").count(), 0);
+    const alertSummary = page.locator(".workspace-alert-summary", { hasText: "Inside Us connection needs attention" }).first();
+    await alertSummary.click();
+    await page.locator(".workspace-alert-detail", { hasText: "Stream is running, but frame delivery is below target." }).waitFor({ state: "visible" });
+    assert.equal(await page.locator(".workspace-alert-detail:visible").count(), 1);
+    assert.equal(await alertSummary.getAttribute("aria-expanded"), "true");
     await page.screenshot({ path: path.join(OUT_DIR, "workspace-alerts-remote.png"), fullPage: true });
     await page.evaluate(() => {
       showTab("settings");

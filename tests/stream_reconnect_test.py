@@ -58,7 +58,7 @@ def base_config() -> dict:
     }
 
 
-def run_with_reconnect_fakes(broadcast_status: str) -> tuple[list, list, web_ui.StreamState]:
+def run_with_reconnect_fakes(broadcast_status: str | BaseException) -> tuple[list, list, web_ui.StreamState]:
     original_state = web_ui.STATE
     original_load_config_or_none = web_ui.load_config_or_none
     original_valid_access_token = youtube_service.valid_access_token
@@ -81,6 +81,8 @@ def run_with_reconnect_fakes(broadcast_status: str) -> tuple[list, list, web_ui.
             return config, None
 
         def fake_broadcast_by_id(_access_token: str, _broadcast_id: str):
+            if isinstance(broadcast_status, BaseException):
+                raise broadcast_status
             return {
                 "id": "broadcast-a",
                 "life_cycle_status": broadcast_status,
@@ -131,10 +133,20 @@ def assert_network_exit_stops_when_youtube_is_complete() -> None:
     assert any(event == "stream_reconnect_abandoned" for event, _payload in events), "Terminal YouTube state should be logged."
 
 
+def assert_network_exit_stops_when_youtube_check_is_unsupported() -> None:
+    events, stops, state = run_with_reconnect_fakes(RuntimeError("quotaExceeded: quota exhausted"))
+    assert stops == [("Inside Us", 4294957242)], "Unsupported YouTube checks should not keep a dead FFmpeg process live."
+    assert state.running.process.pid == 1001, "FFmpeg should not restart when YouTube status cannot be verified."
+    assert not state.recovering, "Unsupported YouTube checks should clear recovering state."
+    assert state.last_reconnect_status == "reconnect_unsupported"
+    assert any(event == "stream_reconnect_abandoned" for event, _payload in events), "Unsupported checks should be logged."
+
+
 def main() -> int:
     assert stream_manager.is_recoverable_network_exit(4294957242)
     assert_network_exit_reconnects_when_youtube_is_live()
     assert_network_exit_stops_when_youtube_is_complete()
+    assert_network_exit_stops_when_youtube_check_is_unsupported()
     print("stream_reconnect_test: PASS")
     return 0
 
