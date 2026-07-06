@@ -44,6 +44,8 @@ desktop/resources/ffmpeg/*
 !desktop/resources/ffmpeg/LICENSE
 !desktop/resources/seed-data/
 !desktop/resources/seed-data/.gitkeep
+desktop/resources/seed-data/*.json
+!desktop/resources/seed-data/*.example.json
 
 # Python and test output
 __pycache__/

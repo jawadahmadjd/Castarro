@@ -47,15 +47,30 @@ THUMBNAIL_MAX_BYTES = 2 * 1024 * 1024
 TRANSFER_MANIFEST_NAME = "castarro-transfer-manifest.json"
 TRANSFER_PACKAGE_VERSION = 1
 STREAM_CYCLE_RUNTIME_FILE = ROOT / "stream-cycle-runtime.json"
+INTERNAL_JSON_FILES = {
+    "backend-info.json",
+    "castarro-transfer-manifest.json",
+    "config.example.json",
+    "package-lock.json",
+    "package.json",
+    "stream-cycle-runtime.json",
+}
 YOUTUBE_CHANNEL_NAME_MATCH_THRESHOLD = 0.80
 UI_PORT = int(os.environ.get("STREAM_UI_PORT", "8765"))
 MEDIA_DURATION_CACHE: dict[tuple[str, int, int, str], float | None] = {}
 SCHEDULER_DAY_ORDER = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 ALERT_SEVERITY_RANK = {"info": 0, "warn": 1, "danger": 2}
-YOUTUBE_HEALTH_CACHE_SECONDS = 30.0
-YOUTUBE_HEALTH_ERROR_CACHE_SECONDS = 60.0
+YOUTUBE_HEALTH_CACHE_SECONDS = max(5 * 60.0, float(os.environ.get("YOUTUBE_HEALTH_CACHE_SECONDS", "1800")))
+YOUTUBE_HEALTH_ERROR_CACHE_SECONDS = max(5 * 60.0, float(os.environ.get("YOUTUBE_HEALTH_ERROR_CACHE_SECONDS", "1800")))
+YOUTUBE_PROFILE_CACHE_SECONDS = max(5 * 60.0, float(os.environ.get("YOUTUBE_PROFILE_CACHE_SECONDS", "21600")))
+YOUTUBE_BROADCAST_CACHE_SECONDS = max(5 * 60.0, float(os.environ.get("YOUTUBE_BROADCAST_CACHE_SECONDS", "1800")))
+YOUTUBE_STREAM_CACHE_SECONDS = max(5 * 60.0, float(os.environ.get("YOUTUBE_STREAM_CACHE_SECONDS", "1800")))
 YOUTUBE_LIVE_CHAT_CONTEXT_CACHE_SECONDS = 10 * 60.0
 YOUTUBE_LIVE_CHAT_QUOTA_COOLDOWN_SECONDS = 60 * 60.0
+YOUTUBE_LIVE_CHAT_MIN_POLL_INTERVAL_MILLIS = max(
+    5_000,
+    int(float(os.environ.get("YOUTUBE_LIVE_CHAT_MIN_POLL_SECONDS", "120")) * 1000),
+)
 FFMPEG_SIZE_PATTERN = re.compile(r"size=\s*([0-9]+(?:\.[0-9]+)?)\s*([KMGT]?i?B|[kmgt]?B)", re.IGNORECASE)
 FFMPEG_BITRATE_PATTERN = re.compile(r"bitrate=\s*([0-9]+(?:\.[0-9]+)?)\s*([kmg]?bits/s)", re.IGNORECASE)
 FFMPEG_STATS_FRAME_PATTERN = re.compile(r"frame=\s*([0-9]+)")
@@ -754,6 +769,9 @@ class AppState:
         self.stream_exit_recorded: set[tuple[str, str]] = set()
         self.connection_watch: dict[tuple[str, str], dict[str, Any]] = {}
         self.youtube_health_cache: dict[tuple[str, str], dict[str, Any]] = {}
+        self.youtube_profile_cache: dict[tuple[str, str], dict[str, Any]] = {}
+        self.youtube_broadcast_cache: dict[tuple[str, str, str], dict[str, Any]] = {}
+        self.youtube_stream_cache: dict[tuple[str, str, str], dict[str, Any]] = {}
         self.youtube_live_chat_context_cache: dict[tuple[str, str, str, str], dict[str, Any]] = {}
         self.youtube_live_chat_quota_cooldowns: dict[tuple[str, str], dict[str, Any]] = {}
 
@@ -1085,7 +1103,7 @@ def unique_path(path: Path) -> Path:
 def safe_config_name(value: str | None) -> str:
     name = value or DEFAULT_CONFIG
     path = (ROOT / name).resolve()
-    if path.parent != ROOT or path.suffix.lower() != ".json":
+    if path.parent != ROOT or path.suffix.lower() != ".json" or path.name in INTERNAL_JSON_FILES:
         raise ValueError("Config must be a JSON file in the project root.")
     return path.name
 
@@ -1702,7 +1720,261 @@ def account_config_view(config: dict[str, Any], account: dict[str, Any]) -> dict
     }
 
 
-def connected_account_slots(config: dict[str, Any]) -> list[dict[str, Any]]:
+def youtube_account_cache_id(account: dict[str, Any]) -> str:
+    account_id = normalize_account_id(account.get("id") or "")
+    if account_id:
+        return account_id
+    return str(account.get("tokens_file") or "").strip() or "account"
+
+
+def youtube_profile_from_account(account: dict[str, Any]) -> dict[str, Any]:
+    profile = {
+        "channel_id": str(account.get("channel_id") or ""),
+        "channel_title": str(account.get("channel_title") or ""),
+        "channel_handle": str(account.get("channel_handle") or ""),
+        "subscriber_count": str(account.get("subscriber_count") or ""),
+        "hidden_subscriber_count": bool(account.get("hidden_subscriber_count")),
+    }
+    return profile if any(profile.get(key) for key in ("channel_id", "channel_title", "channel_handle")) else {}
+
+
+def youtube_profile_cache_key(config_name: str, account: dict[str, Any]) -> tuple[str, str]:
+    return str(config_name or DEFAULT_CONFIG), youtube_account_cache_id(account)
+
+
+def cached_connected_account_profile(
+    config_name: str,
+    account: dict[str, Any],
+    access_token: str,
+    *,
+    force_refresh: bool = False,
+) -> dict[str, Any]:
+    cache_key = youtube_profile_cache_key(config_name, account)
+    now = time.time()
+    stored_profile = youtube_profile_from_account(account)
+    if not force_refresh:
+        with STATE.lock:
+            cached = STATE.youtube_profile_cache.get(cache_key)
+            if cached and float(cached.get("expires_at") or 0.0) > now:
+                payload = cached.get("payload")
+                if isinstance(payload, dict):
+                    if stored_profile and any(
+                        str(payload.get(key) or "") != str(stored_profile.get(key) or "")
+                        for key in ("channel_id", "channel_title", "channel_handle")
+                    ):
+                        STATE.youtube_profile_cache.pop(cache_key, None)
+                    else:
+                        return dict(payload)
+                else:
+                    return {}
+            if cached:
+                STATE.youtube_profile_cache.pop(cache_key, None)
+        if stored_profile:
+            with STATE.lock:
+                STATE.youtube_profile_cache[cache_key] = {
+                    "expires_at": now + YOUTUBE_PROFILE_CACHE_SECONDS,
+                    "payload": dict(stored_profile),
+                    "source": "stored_account",
+                }
+            return stored_profile
+
+    profile = youtube_service.connected_account_profile(access_token)
+    with STATE.lock:
+        STATE.youtube_profile_cache[cache_key] = {
+            "expires_at": time.time() + YOUTUBE_PROFILE_CACHE_SECONDS,
+            "payload": dict(profile),
+            "source": "youtube",
+        }
+    return profile
+
+
+def youtube_broadcast_cache_key(config_name: str, account: dict[str, Any], bucket: str) -> tuple[str, str, str]:
+    return str(config_name or DEFAULT_CONFIG), youtube_account_cache_id(account), str(bucket or "")
+
+
+def cached_youtube_broadcast_list(
+    config_name: str,
+    account: dict[str, Any],
+    access_token: str,
+    *,
+    bucket: str,
+    loader: Any,
+) -> list[dict[str, Any]]:
+    cache_key = youtube_broadcast_cache_key(config_name, account, bucket)
+    now = time.time()
+    with STATE.lock:
+        cached = STATE.youtube_broadcast_cache.get(cache_key)
+        if cached and float(cached.get("expires_at") or 0.0) > now:
+            payload = cached.get("payload")
+            return [dict(item) for item in payload] if isinstance(payload, list) else []
+        if cached:
+            STATE.youtube_broadcast_cache.pop(cache_key, None)
+    broadcasts = loader(access_token)
+    payload = [dict(item) for item in broadcasts if isinstance(item, dict)]
+    with STATE.lock:
+        STATE.youtube_broadcast_cache[cache_key] = {
+            "expires_at": time.time() + YOUTUBE_BROADCAST_CACHE_SECONDS,
+            "payload": [dict(item) for item in payload],
+        }
+    return payload
+
+
+def cached_youtube_upcoming_broadcasts(
+    config_name: str,
+    account: dict[str, Any],
+    access_token: str,
+    *,
+    limit: int = 25,
+) -> list[dict[str, Any]]:
+    return cached_youtube_broadcast_list(
+        config_name,
+        account,
+        access_token,
+        bucket=f"upcoming:{int(limit)}",
+        loader=lambda token: youtube_service.list_upcoming_broadcasts(token, limit=limit),
+    )
+
+
+def cached_youtube_broadcasts_by_status(
+    config_name: str,
+    account: dict[str, Any],
+    access_token: str,
+    status: str,
+    *,
+    limit: int = 25,
+) -> list[dict[str, Any]]:
+    status_text = str(status or "").strip().lower() or "all"
+    return cached_youtube_broadcast_list(
+        config_name,
+        account,
+        access_token,
+        bucket=f"status:{status_text}:{int(limit)}",
+        loader=lambda token: youtube_service.list_broadcasts_by_status(token, status_text, limit=limit),
+    )
+
+
+def cached_youtube_broadcast_by_id(
+    config_name: str,
+    account: dict[str, Any],
+    access_token: str,
+    broadcast_id: str,
+) -> dict[str, Any] | None:
+    broadcast_id = str(broadcast_id or "").strip()
+    if not broadcast_id:
+        return None
+    cache_key = youtube_broadcast_cache_key(config_name, account, f"broadcast:{broadcast_id}:details")
+    now = time.time()
+    with STATE.lock:
+        cached = STATE.youtube_broadcast_cache.get(cache_key)
+        if cached and float(cached.get("expires_at") or 0.0) > now:
+            payload = cached.get("payload")
+            return dict(payload) if isinstance(payload, dict) else None
+        if cached:
+            STATE.youtube_broadcast_cache.pop(cache_key, None)
+    broadcast = youtube_service.broadcast_by_id(access_token, broadcast_id)
+    if isinstance(broadcast, dict):
+        with STATE.lock:
+            STATE.youtube_broadcast_cache[cache_key] = {
+                "expires_at": time.time() + YOUTUBE_BROADCAST_CACHE_SECONDS,
+                "payload": dict(broadcast),
+            }
+        return broadcast
+    return None
+
+
+def cached_youtube_broadcast_chat_details_by_id(
+    config_name: str,
+    account: dict[str, Any],
+    access_token: str,
+    broadcast_id: str,
+) -> dict[str, Any] | None:
+    broadcast_id = str(broadcast_id or "").strip()
+    if not broadcast_id:
+        return None
+    cache_key = youtube_broadcast_cache_key(config_name, account, f"broadcast:{broadcast_id}:chat")
+    now = time.time()
+    with STATE.lock:
+        cached = STATE.youtube_broadcast_cache.get(cache_key)
+        if cached and float(cached.get("expires_at") or 0.0) > now:
+            payload = cached.get("payload")
+            return dict(payload) if isinstance(payload, dict) else None
+        if cached:
+            STATE.youtube_broadcast_cache.pop(cache_key, None)
+    broadcast = youtube_service.broadcast_chat_details_by_id(access_token, broadcast_id)
+    if isinstance(broadcast, dict):
+        with STATE.lock:
+            STATE.youtube_broadcast_cache[cache_key] = {
+                "expires_at": time.time() + YOUTUBE_BROADCAST_CACHE_SECONDS,
+                "payload": dict(broadcast),
+            }
+        return broadcast
+    return None
+
+
+def cached_youtube_stream_by_id(
+    config_name: str,
+    account: dict[str, Any],
+    access_token: str,
+    stream_id: str,
+) -> dict[str, Any] | None:
+    stream_id = str(stream_id or "").strip()
+    if not stream_id:
+        return None
+    cache_key = (str(config_name or DEFAULT_CONFIG), youtube_account_cache_id(account), f"stream:{stream_id}")
+    now = time.time()
+    with STATE.lock:
+        cached = STATE.youtube_stream_cache.get(cache_key)
+        if cached and float(cached.get("expires_at") or 0.0) > now:
+            payload = cached.get("payload")
+            return dict(payload) if isinstance(payload, dict) else None
+        if cached:
+            STATE.youtube_stream_cache.pop(cache_key, None)
+    stream = youtube_service.live_stream_by_id(access_token, stream_id)
+    if isinstance(stream, dict):
+        with STATE.lock:
+            STATE.youtube_stream_cache[cache_key] = {
+                "expires_at": time.time() + YOUTUBE_STREAM_CACHE_SECONDS,
+                "payload": dict(stream),
+            }
+        return stream
+    return None
+
+
+def cached_youtube_mine_live_streams(
+    config_name: str,
+    account: dict[str, Any],
+    access_token: str,
+) -> list[dict[str, Any]]:
+    cache_key = (str(config_name or DEFAULT_CONFIG), youtube_account_cache_id(account), "mine_live_streams")
+    now = time.time()
+    with STATE.lock:
+        cached = STATE.youtube_stream_cache.get(cache_key)
+        if cached and float(cached.get("expires_at") or 0.0) > now:
+            payload = cached.get("payload")
+            return [dict(item) for item in payload] if isinstance(payload, list) else []
+        if cached:
+            STATE.youtube_stream_cache.pop(cache_key, None)
+    streams = youtube_service.list_mine_live_streams(access_token)
+    payload = [dict(item) for item in streams if isinstance(item, dict)]
+    with STATE.lock:
+        STATE.youtube_stream_cache[cache_key] = {
+            "expires_at": time.time() + YOUTUBE_STREAM_CACHE_SECONDS,
+            "payload": [dict(item) for item in payload],
+        }
+    return payload
+
+
+def clear_youtube_account_caches(config_name: str, account_id: str = "") -> None:
+    config_key = str(config_name or DEFAULT_CONFIG)
+    account_key = normalize_account_id(account_id or "")
+    with STATE.lock:
+        for cache in (STATE.youtube_profile_cache, STATE.youtube_broadcast_cache, STATE.youtube_stream_cache):
+            for key in list(cache):
+                if key[0] == config_key and (not account_key or key[1] == account_key):
+                    cache.pop(key, None)
+
+
+def connected_account_slots(config: dict[str, Any], config_name: str = DEFAULT_CONFIG) -> list[dict[str, Any]]:
     connected: list[dict[str, Any]] = []
     for account in normalize_youtube_accounts(config):
         try:
@@ -1711,7 +1983,7 @@ def connected_account_slots(config: dict[str, Any]) -> list[dict[str, Any]]:
             if not tokens:
                 continue
             access_token, _valid_tokens = youtube_service.valid_access_token(ROOT, scoped_config)
-            profile = youtube_service.connected_account_profile(access_token)
+            profile = cached_connected_account_profile(config_name, account, access_token)
         except Exception:
             continue
         expected_channel_name = youtube_account_expected_channel_name(config, account)
@@ -1731,16 +2003,27 @@ def connected_account_slots(config: dict[str, Any]) -> list[dict[str, Any]]:
     return connected
 
 
+def connected_account_slots_for_config(config: dict[str, Any], config_name: str) -> list[dict[str, Any]]:
+    try:
+        return connected_account_slots(config, config_name)
+    except TypeError:
+        return connected_account_slots(config)
+
+
 def channel_account_id(config: dict[str, Any], channel: dict[str, Any]) -> str:
     return normalize_account_id(channel.get("youtube_account_id") or "")
 
 
-def resolve_channel_account_for_action(config: dict[str, Any], channel: dict[str, Any]) -> tuple[str, str]:
+def resolve_channel_account_for_action(
+    config: dict[str, Any],
+    channel: dict[str, Any],
+    config_name: str = DEFAULT_CONFIG,
+) -> tuple[str, str]:
     explicit = normalize_account_id(channel.get("youtube_account_id") or "")
     if explicit:
         return explicit, ""
 
-    connected = connected_account_slots(config)
+    connected = connected_account_slots_for_config(config, config_name)
     if len(connected) > 1:
         return "", "missing_linked_account_multiple_connected"
     accounts = normalize_youtube_accounts(config)
@@ -1790,9 +2073,9 @@ def youtube_stream_health_for_channel(
     try:
         scoped_config = account_config_view(config, account)
         access_token, _tokens = youtube_service.valid_access_token(ROOT, scoped_config)
-        stream_resource = youtube_service.live_stream_by_id(access_token, stream_id) if stream_id else None
+        stream_resource = cached_youtube_stream_by_id(config_name, account, access_token, stream_id) if stream_id else None
         if not stream_resource and broadcast_id:
-            broadcast = youtube_service.broadcast_by_id(access_token, broadcast_id)
+            broadcast = cached_youtube_broadcast_by_id(config_name, account, access_token, broadcast_id)
             stream_details = broadcast.get("stream") if isinstance(broadcast, dict) and isinstance(broadcast.get("stream"), dict) else {}
         else:
             stream_details = youtube_service.stream_details_from_resource(stream_resource)
@@ -1883,7 +2166,7 @@ def youtube_status(config_name: str) -> dict[str, Any]:
             continue
 
         try:
-            profile = youtube_service.connected_account_profile(access_token)
+            profile = cached_connected_account_profile(config_name, account, access_token)
             mismatch_message = youtube_profile_mismatch_message(item["expected_channel_name"], profile)
             item.update(
                 {
@@ -2531,7 +2814,8 @@ def handle_youtube_oauth_callback(query: dict[str, list[str]]) -> str:
             code_verifier=code_verifier,
         )
         access_token, _tokens = youtube_service.valid_access_token(ROOT, scoped_config)
-        profile = youtube_service.connected_account_profile(access_token)
+        clear_youtube_account_caches(config_name, account_id)
+        profile = cached_connected_account_profile(config_name, account, access_token, force_refresh=True)
         mismatch_message = youtube_profile_mismatch_message(expected_channel_name, profile) if expected_channel_name else ""
         account["channel_id"] = str(profile.get("channel_id") or "")
         account["channel_title"] = str(profile.get("channel_title") or "")
@@ -2594,7 +2878,7 @@ def youtube_broadcasts(config_name: str, account_id: str | None = None) -> dict[
         if not target:
             raise ValueError(f"Unknown YouTube account slot: {account_id}")
     else:
-        connected = connected_account_slots(config)
+        connected = connected_account_slots_for_config(config, config_name)
         if connected:
             target = find_youtube_account(config, str(connected[0].get("id") or ""))
         if not target:
@@ -2602,14 +2886,14 @@ def youtube_broadcasts(config_name: str, account_id: str | None = None) -> dict[
 
     scoped_config = account_config_view(config, target)
     access_token, _tokens = youtube_service.valid_access_token(ROOT, scoped_config)
-    profile = youtube_service.connected_account_profile(access_token)
+    profile = cached_connected_account_profile(config_name, target, access_token)
     mismatch_message = youtube_profile_mismatch_message(youtube_account_expected_channel_name(config, target), profile)
     if mismatch_message:
         raise ValueError(mismatch_message)
     return {
         "ok": True,
         "account_id": str(target.get("id") or ""),
-        "broadcasts": youtube_service.list_upcoming_broadcasts(access_token),
+        "broadcasts": cached_youtube_upcoming_broadcasts(config_name, target, access_token),
     }
 
 
@@ -2617,13 +2901,14 @@ def auto_link_active_youtube_broadcast(
     config_name: str,
     config: dict[str, Any],
     channel: dict[str, Any],
+    account: dict[str, Any],
     access_token: str,
     *,
     allow_stream_mismatch: bool = False,
 ) -> dict[str, Any] | None:
     channel_name = str(channel.get("name") or "").strip()
     stream_id = str(channel.get("youtube_stream_id") or "").strip()
-    active_broadcasts = youtube_service.list_broadcasts_by_status(access_token, "active", limit=10)
+    active_broadcasts = cached_youtube_broadcasts_by_status(config_name, account, access_token, "active", limit=10)
     used_stream_mismatch_fallback = False
     if stream_id:
         unfiltered_active_broadcasts = list(active_broadcasts)
@@ -2672,6 +2957,7 @@ def auto_link_active_youtube_broadcast(
 
 def clear_youtube_broadcast_link(config_name: str, config: dict[str, Any], channel: dict[str, Any], reason: str) -> None:
     channel_name = str(channel.get("name") or "").strip()
+    account_id = normalize_account_id(channel.get("youtube_account_id") or "")
     old_broadcast_id = str(channel.get("youtube_broadcast_id") or "").strip()
     old_stream_id = str(channel.get("youtube_stream_id") or "").strip()
     channel["youtube_broadcast_id"] = ""
@@ -2680,6 +2966,7 @@ def clear_youtube_broadcast_link(config_name: str, config: dict[str, Any], chann
     channel["youtube_stream_id"] = ""
     save_config(config_name, config)
     clear_youtube_chat_context_for_channel(config_name, channel_name)
+    clear_youtube_account_caches(config_name, account_id)
     app_db.record_event(
         "youtube_broadcast_link_cleared",
         config_name,
@@ -2792,14 +3079,14 @@ def youtube_chat_context(config_name: str, channel_name: str) -> tuple[dict[str,
 
     scoped_config = account_config_view(config, account)
     access_token, _tokens = youtube_service.valid_access_token(ROOT, scoped_config)
-    profile = youtube_service.connected_account_profile(access_token)
+    profile = cached_connected_account_profile(config_name, account, access_token)
     mismatch_message = youtube_profile_mismatch_message(youtube_account_expected_channel_name(config, account), profile)
     if mismatch_message:
         raise ValueError(mismatch_message)
 
     broadcast_id = str(channel.get("youtube_broadcast_id") or "").strip()
     if broadcast_id:
-        broadcast = youtube_service.broadcast_chat_details_by_id(access_token, broadcast_id)
+        broadcast = cached_youtube_broadcast_chat_details_by_id(config_name, account, access_token, broadcast_id)
         life_cycle_status = str((broadcast or {}).get("life_cycle_status") or "").strip().lower()
         if life_cycle_status in {"complete", "completed", "revoked"}:
             clear_youtube_broadcast_link(config_name, config, channel, f"stale_{life_cycle_status}")
@@ -2807,6 +3094,7 @@ def youtube_chat_context(config_name: str, channel_name: str) -> tuple[dict[str,
                 config_name,
                 config,
                 channel,
+                account,
                 access_token,
                 allow_stream_mismatch=True,
             )
@@ -2816,6 +3104,7 @@ def youtube_chat_context(config_name: str, channel_name: str) -> tuple[dict[str,
             config_name,
             config,
             channel,
+            account,
             access_token,
             allow_stream_mismatch=True,
         )
@@ -2933,6 +3222,10 @@ def youtube_live_chat(config_name: str, channel_name: str, page_token: str = "")
         stamp_live_chat_message(message, received_at, "received_at")
         for message in chat.get("messages", [])
     ]
+    chat["polling_interval_millis"] = max(
+        YOUTUBE_LIVE_CHAT_MIN_POLL_INTERVAL_MILLIS,
+        int(float(chat.get("polling_interval_millis") or 5000)),
+    )
     app_db.record_live_chat_messages(
         config_name,
         str(channel.get("name") or ""),
@@ -3014,6 +3307,8 @@ def channel_effective_stream_key(channel: dict[str, Any]) -> tuple[str, str]:
 def verify_single_channel_stream_key(
     channel: dict[str, Any],
     *,
+    config_name: str,
+    account: dict[str, Any],
     mine_streams_by_id: dict[str, dict[str, Any]],
     mine_streams_by_name: dict[str, dict[str, Any]],
     access_token: str,
@@ -3052,7 +3347,7 @@ def verify_single_channel_stream_key(
             match_source = "stream_key_lookup"
 
     if not matched_stream and configured_stream_id:
-        stream_by_id = youtube_service.live_stream_by_id(access_token, configured_stream_id)
+        stream_by_id = cached_youtube_stream_by_id(config_name, account, access_token, configured_stream_id)
         if stream_by_id:
             candidate_key = youtube_service.stream_name_from_resource(stream_by_id)
             if candidate_key == key:
@@ -3174,7 +3469,7 @@ def verify_youtube_channel_keys(
             scoped_config = account_config_view(config, account)
             try:
                 access_token, _tokens = youtube_service.valid_access_token(ROOT, scoped_config)
-                profile = youtube_service.connected_account_profile(access_token)
+                profile = cached_connected_account_profile(config_name, account, access_token)
                 connected_profiles[mapped_account_id] = {
                     "channel_id": str(profile.get("channel_id") or ""),
                     "channel_title": str(profile.get("channel_title") or ""),
@@ -3182,7 +3477,7 @@ def verify_youtube_channel_keys(
                     "subscriber_count": str(profile.get("subscriber_count") or ""),
                     "hidden_subscriber_count": bool(profile.get("hidden_subscriber_count")),
                 }
-                mine_streams = youtube_service.list_mine_live_streams(access_token)
+                mine_streams = cached_youtube_mine_live_streams(config_name, account, access_token)
                 mine_streams_by_id: dict[str, dict[str, Any]] = {}
                 mine_streams_by_name: dict[str, dict[str, Any]] = {}
                 for stream in mine_streams:
@@ -3220,6 +3515,8 @@ def verify_youtube_channel_keys(
         access_token, account, mine_streams_by_id, mine_streams_by_name = stream_cache[mapped_account_id]
         result = verify_single_channel_stream_key(
             channel,
+            config_name=config_name,
+            account=account,
             mine_streams_by_id=mine_streams_by_id,
             mine_streams_by_name=mine_streams_by_name,
             access_token=access_token,
@@ -3263,7 +3560,7 @@ def assert_youtube_channel_keys_match(config_name: str, channel_name: str | None
     config, error = load_config_or_none(config_name)
     if not config:
         raise ValueError(error or "Config not found.")
-    if not connected_account_slots(config):
+    if not connected_account_slots_for_config(config, config_name):
         # If no YouTube account slots are connected for this config, skip enforcement.
         return
     report = verify_youtube_channel_keys(config_name, channel_name, only_enabled=channel_name is None)
@@ -3324,7 +3621,7 @@ def schedule_youtube(config_name: str, body: dict[str, Any]) -> dict[str, Any]:
             raise ValueError(f"Unknown channel: {channel_name}")
 
     requested_account_id = normalize_account_id(body.get("account_id") or "")
-    account_id, guard_reason = resolve_channel_account_for_action(config, selected_channel or {})
+    account_id, guard_reason = resolve_channel_account_for_action(config, selected_channel or {}, config_name)
     if not account_id:
         reason_text = (
             "No linked YouTube account slot found for this Castarro channel."
@@ -3343,7 +3640,7 @@ def schedule_youtube(config_name: str, body: dict[str, Any]) -> dict[str, Any]:
 
     scoped_config = account_config_view(config, account)
     access_token, _tokens = youtube_service.valid_access_token(ROOT, scoped_config)
-    profile = youtube_service.connected_account_profile(access_token)
+    profile = cached_connected_account_profile(config_name, account, access_token)
     mismatch_message = youtube_profile_mismatch_message(channel_name or youtube_account_expected_channel_name(config, account), profile)
     if mismatch_message:
         raise ValueError(mismatch_message)
@@ -3357,6 +3654,7 @@ def schedule_youtube(config_name: str, body: dict[str, Any]) -> dict[str, Any]:
         auto_start=auto_start,
         auto_stop=auto_stop,
     )
+    clear_youtube_account_caches(config_name, account_id)
 
     if selected_channel:
         stream_name = str(created.get("stream", {}).get("stream_name") or "").strip()
@@ -3405,7 +3703,7 @@ def use_existing_youtube_broadcast(config_name: str, body: dict[str, Any]) -> di
         raise ValueError(f"Unknown channel: {channel_name}")
 
     requested_account_id = normalize_account_id(body.get("account_id") or "")
-    account_id, guard_reason = resolve_channel_account_for_action(config, selected_channel)
+    account_id, guard_reason = resolve_channel_account_for_action(config, selected_channel, config_name)
     if not account_id:
         reason_text = (
             "No linked YouTube account slot found for this Castarro channel."
@@ -3424,15 +3722,19 @@ def use_existing_youtube_broadcast(config_name: str, body: dict[str, Any]) -> di
 
     scoped_config = account_config_view(config, account)
     access_token, _tokens = youtube_service.valid_access_token(ROOT, scoped_config)
-    profile = youtube_service.connected_account_profile(access_token)
+    profile = cached_connected_account_profile(config_name, account, access_token)
     mismatch_message = youtube_profile_mismatch_message(channel_name or youtube_account_expected_channel_name(config, account), profile)
     if mismatch_message:
         raise ValueError(mismatch_message)
 
-    broadcasts = youtube_service.list_upcoming_broadcasts(access_token, limit=50)
+    broadcasts = cached_youtube_upcoming_broadcasts(config_name, account, access_token, limit=50)
     broadcast = next((item for item in broadcasts if str(item.get("id") or "") == broadcast_id), None)
     if not broadcast:
         raise ValueError("That upcoming YouTube broadcast was not found on the linked account.")
+    if not str(broadcast.get("stream_name") or "").strip():
+        detailed_broadcast = cached_youtube_broadcast_by_id(config_name, account, access_token, broadcast_id)
+        if detailed_broadcast:
+            broadcast = detailed_broadcast
     stream_name = str(broadcast.get("stream_name") or "").strip()
     if not stream_name:
         raise ValueError("That YouTube broadcast does not have a bound stream key yet.")
@@ -3450,6 +3752,7 @@ def use_existing_youtube_broadcast(config_name: str, body: dict[str, Any]) -> di
     selected_channel["youtube_stream_id"] = str(broadcast.get("bound_stream_id") or "")
     selected_channel["youtube_broadcast_title"] = str(broadcast.get("title") or "").strip()
     save_config(config_name, config)
+    clear_youtube_account_caches(config_name, account_id)
 
     return {
         "ok": True,
@@ -4006,7 +4309,11 @@ def upload_youtube_thumbnail(handler: BaseHTTPRequestHandler, query: dict[str, l
 
 
 def available_configs() -> list[str]:
-    return sorted(path.name for path in ROOT.glob("*.json") if path.is_file())
+    return sorted(
+        path.name
+        for path in ROOT.glob("*.json")
+        if path.is_file() and path.name not in INTERNAL_JSON_FILES
+    )
 
 
 def is_relative_to(path: Path, parent: Path) -> bool:
@@ -4956,7 +5263,7 @@ def stream_log_history_for_channels(
     return history
 
 
-def status_payload(config_name: str) -> dict[str, Any]:
+def status_payload(config_name: str, *, include_youtube_health: bool = False) -> dict[str, Any]:
     config, error = load_config_or_none(config_name)
     if config:
         ensure_media_folders(config)
@@ -4982,8 +5289,9 @@ def status_payload(config_name: str) -> dict[str, Any]:
             target_fps=target_fps or None,
             target_bitrate_bps=live_profile_target_bitrate_bps(profile),
         )
-        youtube_health = youtube_stream_health_for_channel(config_name, config, channel)
-        stream["stream_stats"] = apply_youtube_health_to_stream_stats(stream["stream_stats"], youtube_health)
+        if include_youtube_health:
+            youtube_health = youtube_stream_health_for_channel(config_name, config, channel)
+            stream["stream_stats"] = apply_youtube_health_to_stream_stats(stream["stream_stats"], youtube_health)
     if preview:
         preview_channel = str(preview.get("channel") or "")
         if preview_channel in streams:
@@ -5087,7 +5395,7 @@ def is_youtube_api_network_error(exc: BaseException) -> bool:
     return "network error" in text or "timed out" in text or "temporary failure" in text or "name resolution" in text
 
 
-def youtube_reconnect_decision(config: dict[str, Any], channel: dict[str, Any]) -> tuple[str, str]:
+def youtube_reconnect_decision(config: dict[str, Any], channel: dict[str, Any], config_name: str = DEFAULT_CONFIG) -> tuple[str, str]:
     broadcast_id = str(channel.get("youtube_broadcast_id") or "").strip()
     if not broadcast_id:
         return "unsupported", "No linked YouTube broadcast is available to verify."
@@ -5100,7 +5408,7 @@ def youtube_reconnect_decision(config: dict[str, Any], channel: dict[str, Any]) 
     try:
         scoped_config = account_config_view(config, account)
         access_token, _tokens = youtube_service.valid_access_token(ROOT, scoped_config)
-        broadcast = youtube_service.broadcast_by_id(access_token, broadcast_id)
+        broadcast = cached_youtube_broadcast_by_id(config_name, account, access_token, broadcast_id)
     except Exception as exc:
         if is_youtube_api_network_error(exc):
             return "pending", f"YouTube status check is waiting for internet access: {exc}"
@@ -5184,7 +5492,7 @@ def maybe_reconnect_youtube_stream(
         if state.next_reconnect_at and time.time() < state.next_reconnect_at:
             return True
 
-    decision, message = youtube_reconnect_decision(config, channel)
+    decision, message = youtube_reconnect_decision(config, channel, state.config_name)
     if decision in {"terminal", "unsupported"}:
         reconnect_status = "youtube_terminal" if decision == "terminal" else "reconnect_unsupported"
         app_db.record_event(
@@ -6110,7 +6418,8 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path == "/api/status":
                 config_name = safe_config_name(query.get("config", [DEFAULT_CONFIG])[0])
                 update_request_trace(self, config_name=config_name)
-                json_response(self, status_payload(config_name))
+                include_youtube_health = str(query.get("youtubeHealth", [""])[0] or "").strip().lower() in {"1", "true", "yes"}
+                json_response(self, status_payload(config_name, include_youtube_health=include_youtube_health))
                 return
 
             if parsed.path == "/api/sync/status":

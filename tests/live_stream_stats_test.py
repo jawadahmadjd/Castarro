@@ -223,7 +223,7 @@ def assert_youtube_health_overrides_local_delivery_warning() -> None:
             youtube_service.valid_access_token = lambda *_args, **_kwargs: ("token", {})
             youtube_service.live_stream_by_id = fake_live_stream_by_id
 
-            payload = web_ui.status_payload("config.ready.json")
+            payload = web_ui.status_payload("config.ready.json", include_youtube_health=True)
             stats = payload["streams"]["Inside Us"]["stream_stats"]
             assert stats["local_health_label"] == "Poor"
             assert stats["health_source"] == "youtube"

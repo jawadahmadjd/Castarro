@@ -139,6 +139,31 @@ const state = {
 const $ = (id) => document.getElementById(id);
 let youtubeLiveChatPopoutWindow = null;
 const desktopBridge = () => (window.desktopShell && typeof window.desktopShell === "object" ? window.desktopShell : null);
+const INTERNAL_CONFIG_FILES = new Set([
+  "backend-info.json",
+  "castarro-transfer-manifest.json",
+  "config.example.json",
+  "package-lock.json",
+  "package.json",
+  "stream-cycle-runtime.json",
+]);
+
+function isSelectableConfigName(name) {
+  const text = String(name || "").trim();
+  return Boolean(text && text.endsWith(".json") && !INTERNAL_CONFIG_FILES.has(text));
+}
+
+function selectableConfigNames(configs = []) {
+  return (Array.isArray(configs) ? configs : []).filter(isSelectableConfigName);
+}
+
+function preferredConfigName(configs = []) {
+  const names = selectableConfigNames(configs);
+  if (names.includes(state.config)) return state.config;
+  if (names.includes("config.ready.json")) return "config.ready.json";
+  if (names.includes("config.json")) return "config.json";
+  return names[0] || "config.ready.json";
+}
 
 function normalizeBackendBaseUrl(value) {
   return String(value || "").trim().replace(/\/+$/, "");
@@ -1369,8 +1394,12 @@ async function api(path, options = {}) {
 }
 
 async function refresh() {
+  if (!isSelectableConfigName(state.config)) {
+    state.config = "config.ready.json";
+  }
   const payload = await api(`/api/status?config=${encodeURIComponent(state.config)}`);
   const visiblePayload = applyPendingChannelRemovalToStatus(payload);
+  const visibleConfigs = selectableConfigNames(visiblePayload.configs);
   const hadStatus = Boolean(state.status);
   state.status = visiblePayload;
   state.storageStatus = visiblePayload.storage || state.storageStatus;
@@ -1381,9 +1410,7 @@ async function refresh() {
   }
 
   const previousConfig = state.config;
-  if (!visiblePayload.configs.includes(state.config)) {
-    state.config = visiblePayload.configs.includes("config.json") ? "config.json" : visiblePayload.configs[0] || "config.json";
-  }
+  state.config = preferredConfigName(visibleConfigs);
   if (previousConfig !== state.config) {
     readWorkspaceAlertIds();
     readOnboardingState();
@@ -1392,7 +1419,7 @@ async function refresh() {
     hydrateYoutubeStatusFromCache();
   }
 
-  renderConfigSelect(visiblePayload.configs);
+  renderConfigSelect(visibleConfigs);
   state.appVersion = visiblePayload.app_version || state.appVersion;
   renderAppVersion();
   ensureWorkspaceChannelSelection(visiblePayload);
@@ -1517,8 +1544,11 @@ function hydrateYoutubeStatusFromCache(clearOnMiss = false) {
 function renderCachedDashboard() {
   const payload = readDashboardCache();
   if (!payload) return false;
-  if (payload.config) {
+  const cachedConfigs = selectableConfigNames(payload.configs);
+  if (isSelectableConfigName(payload.config)) {
     state.config = payload.config;
+  } else {
+    state.config = preferredConfigName(cachedConfigs);
   }
   readOnboardingState();
   state.status = payload;
@@ -1527,7 +1557,7 @@ function renderCachedDashboard() {
   }
   hydrateYoutubeStatusFromCache();
   ensureWorkspaceChannelSelection(payload);
-  renderConfigSelect(payload.configs || []);
+  renderConfigSelect(cachedConfigs);
   state.appVersion = payload.app_version || state.appVersion;
   renderAppVersion();
   renderStatus(payload);
@@ -1684,6 +1714,10 @@ function renderUpdateBanner() {
 function renderConfigSelect(configs) {
   const select = $("configSelect");
   if (!select) return;
+  configs = selectableConfigNames(configs);
+  if (!isSelectableConfigName(state.config)) {
+    state.config = preferredConfigName(configs);
+  }
   const existing = new Set(configs);
   if (!existing.has(state.config)) configs = [state.config, ...configs];
   select.innerHTML = configs.map((name) => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`).join("");
@@ -5028,6 +5062,27 @@ async function waitForStorageExternalAuth(providerId) {
   return false;
 }
 
+function hydrateStorageProviderOauthFromYoutube(config, providerId) {
+  const normalizedProviderId = String(providerId || "").trim();
+  const youtube = { ...defaultYoutubeSettings(), ...(config?.youtube || {}) };
+  const youtubeClientId = String(youtube.client_id || "").trim();
+  if (!youtubeClientId || !Array.isArray(config?.storage?.providers)) return false;
+  const provider = config.storage.providers.find((item) => String(item?.id || "").trim() === normalizedProviderId);
+  if (!provider) return false;
+  provider.oauth = { ...defaultStorageProviderOauth(), ...(provider.oauth || {}) };
+  if (String(provider.oauth.client_id || "").trim()) return false;
+  provider.oauth.client_id = youtubeClientId;
+  provider.oauth.client_secret = String(youtube.client_secret || "").trim();
+  provider.oauth.oauth_client_type = String(youtube.oauth_client_type || "desktop").trim() === "web" ? "web" : "desktop";
+  provider.oauth.use_pkce = youtube.use_pkce !== false;
+  return true;
+}
+
+function renderStorageConnectState() {
+  renderStorageSettingsPanel(state.configData || defaultConfigData());
+  renderSettingsFormsUnlessPaused();
+}
+
 async function connectStorageProvider(providerId) {
   const bridge = desktopBridge();
   const openExternal = bridge && typeof bridge.openExternal === "function" ? bridge.openExternal.bind(bridge) : null;
@@ -5045,9 +5100,10 @@ async function connectStorageProvider(providerId) {
   }
 
   state.storageConnectBusyProviderId = providerId;
-  renderStorageSettingsPanel(state.configData || defaultConfigData());
+  renderStorageConnectState();
   try {
     const data = collectSettingsData();
+    hydrateStorageProviderOauthFromYoutube(data, providerId);
     await saveConfigData(data);
     const query = new URLSearchParams({ config: state.config, provider: providerId });
     const payload = await api(`/api/storage/auth/start?${query.toString()}`, { action: "storage.connect.start" });
@@ -5081,7 +5137,7 @@ async function connectStorageProvider(providerId) {
     throw error;
   } finally {
     state.storageConnectBusyProviderId = "";
-    renderStorageSettingsPanel(state.configData || defaultConfigData());
+    renderStorageConnectState();
   }
 }
 
@@ -5397,7 +5453,7 @@ function scheduleYoutubeLiveChatPoll() {
   const key = youtubeLiveChatKey();
   if (!key || state.youtubeLiveChat.offlineAt || state.settingsTab !== "youtube") return;
   if (Number(state.youtubeLiveChat.quotaCooldownUntil) > Date.now()) return;
-  const interval = Math.max(3000, Math.min(Number(state.youtubeLiveChat.pollingIntervalMillis) || 5000, 60000));
+  const interval = Math.max(120000, Math.min(Number(state.youtubeLiveChat.pollingIntervalMillis) || 120000, 120000));
   state.youtubeLiveChat.timer = window.setTimeout(() => {
     refreshYoutubeLiveChat({ silent: true }).catch(() => {});
   }, interval);
@@ -7706,6 +7762,14 @@ function cloudVideosSection(channel, index) {
     : String(selectedItems[0]?.provider_id || selectedItems[0]?.providerId || providers[0]?.id || "");
   const activeStatus = statusById.get(activeProviderId) || null;
   const activeConnected = Boolean(activeStatus?.connected || activeStatus?.status === "connected");
+  const connectBusy = !activeConnected && state.storageConnectBusyProviderId === activeProviderId;
+  const actionLabel = activeConnected
+    ? (activeBrowser ? "Hide Drive Browser" : "Browse Google Drive")
+    : (connectBusy ? "Opening..." : "Connect Google Drive");
+  const actionDisabled = !activeProviderId || connectBusy;
+  const actionHandler = activeConnected
+    ? `toggleCloudBrowser(${index})`
+    : `connectStorageProvider('${escapeJs(activeProviderId)}').catch((error) => toast(error.message))`;
   const selectedMarkup = selectedItems.length
     ? selectedItems.map((item) => {
         const providerId = cloudVideoProviderId(item);
@@ -7780,7 +7844,7 @@ function cloudVideosSection(channel, index) {
     autoOpenWhenFocused: false,
     body: `
       <div class="row wrap">
-        <button class="pill" type="button" onclick="${activeConnected ? `toggleCloudBrowser(${index})` : `connectStorageProvider('${escapeJs(activeProviderId)}').catch((error) => toast(error.message))`}" ${activeProviderId ? "" : "disabled"}>${escapeHtml(activeConnected ? (activeBrowser ? "Hide Drive Browser" : "Browse Google Drive") : "Connect Google Drive")}</button>
+        <button class="pill" type="button" onclick="${actionHandler}" ${actionDisabled ? "disabled" : ""}>${escapeHtml(actionLabel)}</button>
       </div>
       ${activeStatus?.message ? `<div class="meta">${escapeHtml(activeStatus.message)}</div>` : ""}
       ${localOverrideNote}
@@ -9821,12 +9885,8 @@ function toggleStreamCycleForChannel(index) {
     toast("Select a channel first.");
     return;
   }
-  const cycles = config.stream_cycles = {
-    ...defaultStreamCycleSettings(),
-    ...(config.stream_cycles || {}),
-    channels: Array.isArray(config?.stream_cycles?.channels) ? [...config.stream_cycles.channels] : [],
-  };
   const entry = ensureStreamCycleChannelEntry(config, channelName);
+  const cycles = config.stream_cycles;
   const nextEnabled = !(cycles.enabled && entry.enabled);
   entry.enabled = nextEnabled;
   if (nextEnabled) {

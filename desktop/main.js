@@ -467,6 +467,7 @@ function prepareBackendRuntime() {
   try {
     const marker = JSON.parse(fs.readFileSync(markerPath, "utf8"));
     if (marker?.appVersion === app.getVersion()) {
+      copyRuntimeEntry(path.join(resourcesRoot(), "seed-data"), path.join(runtimeRoot, "seed-data"));
       return {
         codeRoot: path.join(runtimeRoot, "app"),
         resourcesRoot: runtimeRoot,

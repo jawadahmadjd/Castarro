@@ -342,6 +342,8 @@ Release build:
 npm run dist
 ```
 
+`npm run dist` also creates `desktop/resources/seed-data/youtube.oauth.seed.json` from YouTube OAuth environment variables or the local `config.json`. That generated seed is ignored by Git, but it is bundled into the installer so a fresh PC can show the YouTube Connect flow. If Google returns `client_secret is missing`, add the OAuth client secret with `CASTARRO_YOUTUBE_CLIENT_SECRET` or `youtube.client_secret` in `config.json`, rebuild, and reinstall.
+
 Before creating the installer, place these runtime files in the resource slots:
 
 ```text

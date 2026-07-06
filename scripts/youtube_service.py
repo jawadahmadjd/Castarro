@@ -5,8 +5,10 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import re
 import secrets
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -19,6 +21,12 @@ YOUTUBE_DEFAULT_SCOPES = [
     "https://www.googleapis.com/auth/youtube",
     "https://www.googleapis.com/auth/youtube.force-ssl",
 ]
+YOUTUBE_QUOTA_COOLDOWN_SECONDS = max(
+    60.0,
+    float(os.environ.get("YOUTUBE_API_QUOTA_COOLDOWN_SECONDS", "3600")),
+)
+_YOUTUBE_QUOTA_LOCK = threading.Lock()
+_YOUTUBE_QUOTA_COOLDOWN_UNTIL = 0.0
 
 YOUTUBE_EMOJI_SHORTCODE_RE = re.compile(r":([a-z0-9][a-z0-9_+-]*(?:-[a-z0-9_+-]+)*):", re.IGNORECASE)
 YOUTUBE_EMOJI_SHORTCODE_FALLBACKS = {
@@ -83,6 +91,44 @@ def default_settings(redirect_uri: str | None = None) -> dict[str, Any]:
         "default_auto_start": True,
         "default_auto_stop": True,
     }
+
+
+def is_youtube_data_api_url(url: str) -> bool:
+    text = str(url or "").lower()
+    return "youtube/v3/" in text or "youtube/v3?" in text or "/upload/youtube/v3/" in text
+
+
+def is_quota_error_message(message: str) -> bool:
+    text = str(message or "").lower()
+    return "quotaexceeded" in text or "exceeded your quota" in text or "quota exceeded" in text
+
+
+def quota_cooldown_remaining() -> int:
+    with _YOUTUBE_QUOTA_LOCK:
+        remaining = max(0.0, _YOUTUBE_QUOTA_COOLDOWN_UNTIL - time.time())
+    return int(remaining)
+
+
+def set_quota_cooldown() -> int:
+    global _YOUTUBE_QUOTA_COOLDOWN_UNTIL
+    with _YOUTUBE_QUOTA_LOCK:
+        _YOUTUBE_QUOTA_COOLDOWN_UNTIL = max(
+            _YOUTUBE_QUOTA_COOLDOWN_UNTIL,
+            time.time() + YOUTUBE_QUOTA_COOLDOWN_SECONDS,
+        )
+        remaining = max(0.0, _YOUTUBE_QUOTA_COOLDOWN_UNTIL - time.time())
+    return int(remaining)
+
+
+def assert_quota_available(url: str) -> None:
+    if not is_youtube_data_api_url(url):
+        return
+    remaining = quota_cooldown_remaining()
+    if remaining > 0:
+        raise ValueError(
+            "quotaExceeded: YouTube API quota is exhausted. "
+            f"Further YouTube API calls are paused for {remaining} second(s)."
+        )
 
 
 def merge_settings(config: dict[str, Any], redirect_uri: str | None = None) -> dict[str, Any]:
@@ -298,6 +344,9 @@ def parse_api_error(raw: bytes, fallback: str) -> str:
         payload = json.loads(raw.decode("utf-8", errors="replace"))
         if isinstance(payload, dict):
             error = payload.get("error")
+            description = str(payload.get("error_description") or "").strip()
+            if description:
+                return description
             if isinstance(error, dict):
                 details = error.get("errors")
                 if isinstance(details, list) and details:
@@ -343,12 +392,15 @@ def request_json(
             request_headers["Content-Type"] = "application/json; charset=utf-8"
 
     request = urllib.request.Request(url, data=data, method=method.upper(), headers=request_headers)
+    assert_quota_available(url)
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             raw = response.read()
     except urllib.error.HTTPError as exc:
         raw = exc.read() if hasattr(exc, "read") else b""
         message = parse_api_error(raw, f"HTTP {exc.code} from {url}")
+        if is_youtube_data_api_url(url) and is_quota_error_message(message):
+            set_quota_cooldown()
         raise ValueError(message) from exc
     except urllib.error.URLError as exc:
         raise ValueError(f"Network error while reaching YouTube/Google APIs: {exc.reason}") from exc
@@ -390,12 +442,20 @@ def exchange_code_for_tokens(
         form_body["client_secret"] = client_secret
     if code_verifier:
         form_body["code_verifier"] = code_verifier
-    payload = request_json(
-        "https://oauth2.googleapis.com/token",
-        method="POST",
-        form=True,
-        body=form_body,
-    )
+    try:
+        payload = request_json(
+            "https://oauth2.googleapis.com/token",
+            method="POST",
+            form=True,
+            body=form_body,
+        )
+    except ValueError as exc:
+        if "client_secret is missing" in str(exc).lower() and not client_secret:
+            raise ValueError(
+                "Google rejected this OAuth client because its client secret is missing. "
+                "Add the Google OAuth client secret to the YouTube owner settings, rebuild the installer, then reconnect."
+            ) from exc
+        raise
     if "access_token" not in payload:
         raise ValueError("Google token response did not include an access token.")
     if "refresh_token" not in payload:
@@ -482,12 +542,15 @@ def youtube_upload(access_token: str, url: str, data: bytes, content_type: str) 
             "Content-Type": content_type or "application/octet-stream",
         },
     )
+    assert_quota_available(url)
     try:
         with urllib.request.urlopen(request, timeout=45.0) as response:
             raw = response.read()
     except urllib.error.HTTPError as exc:
         raw = exc.read() if hasattr(exc, "read") else b""
         message = parse_api_error(raw, f"HTTP {exc.code} from {url}")
+        if is_youtube_data_api_url(url) and is_quota_error_message(message):
+            set_quota_cooldown()
         raise ValueError(message) from exc
     except urllib.error.URLError as exc:
         raise ValueError(f"Network error while reaching YouTube/Google APIs: {exc.reason}") from exc
@@ -562,7 +625,12 @@ def stream_details_from_resource(stream: dict[str, Any] | None) -> dict[str, Any
     }
 
 
-def broadcast_from_resource(access_token: str, item: dict[str, Any]) -> dict[str, Any] | None:
+def broadcast_from_resource(
+    access_token: str,
+    item: dict[str, Any],
+    *,
+    include_stream_details: bool = False,
+) -> dict[str, Any] | None:
     if not isinstance(item, dict):
         return None
     snippet = item.get("snippet", {}) if isinstance(item.get("snippet"), dict) else {}
@@ -570,7 +638,7 @@ def broadcast_from_resource(access_token: str, item: dict[str, Any]) -> dict[str
     content_details = item.get("contentDetails", {}) if isinstance(item.get("contentDetails"), dict) else {}
     broadcast_id = str(item.get("id") or "")
     bound_stream_id = str(content_details.get("boundStreamId") or "")
-    stream = live_stream_by_id(access_token, bound_stream_id) if bound_stream_id else None
+    stream = live_stream_by_id(access_token, bound_stream_id) if include_stream_details and bound_stream_id else None
     stream_details = stream_details_from_resource(stream)
     return {
         "id": broadcast_id,
@@ -604,7 +672,13 @@ def broadcast_from_resource(access_token: str, item: dict[str, Any]) -> dict[str
     }
 
 
-def list_broadcasts_by_status(access_token: str, status: str, limit: int = 25) -> list[dict[str, Any]]:
+def list_broadcasts_by_status(
+    access_token: str,
+    status: str,
+    limit: int = 25,
+    *,
+    include_stream_details: bool = False,
+) -> list[dict[str, Any]]:
     payload = youtube_get(
         access_token,
         "https://www.googleapis.com/youtube/v3/liveBroadcasts"
@@ -615,13 +689,18 @@ def list_broadcasts_by_status(access_token: str, status: str, limit: int = 25) -
         return []
     results: list[dict[str, Any]] = []
     for item in items:
-        result = broadcast_from_resource(access_token, item)
+        result = broadcast_from_resource(access_token, item, include_stream_details=include_stream_details)
         if result:
             results.append(result)
     return results
 
 
-def broadcast_by_id(access_token: str, broadcast_id: str) -> dict[str, Any] | None:
+def broadcast_by_id(
+    access_token: str,
+    broadcast_id: str,
+    *,
+    include_stream_details: bool = True,
+) -> dict[str, Any] | None:
     broadcast_id = str(broadcast_id or "").strip()
     if not broadcast_id:
         return None
@@ -634,7 +713,7 @@ def broadcast_by_id(access_token: str, broadcast_id: str) -> dict[str, Any] | No
     if not isinstance(items, list) or not items:
         return None
     first = items[0]
-    return broadcast_from_resource(access_token, first) if isinstance(first, dict) else None
+    return broadcast_from_resource(access_token, first, include_stream_details=include_stream_details) if isinstance(first, dict) else None
 
 
 def broadcast_chat_details_by_id(access_token: str, broadcast_id: str) -> dict[str, Any] | None:
@@ -660,16 +739,21 @@ def broadcast_chat_details_by_id(access_token: str, broadcast_id: str) -> dict[s
     }
 
 
-def list_upcoming_broadcasts(access_token: str, limit: int = 25) -> list[dict[str, Any]]:
+def list_upcoming_broadcasts(
+    access_token: str,
+    limit: int = 25,
+    *,
+    include_stream_details: bool = False,
+) -> list[dict[str, Any]]:
     results_by_id: dict[str, dict[str, Any]] = {}
     for status in ("upcoming", "active"):
-        for item in list_broadcasts_by_status(access_token, status, limit):
+        for item in list_broadcasts_by_status(access_token, status, limit, include_stream_details=include_stream_details):
             broadcast_id = str(item.get("id") or "")
             if broadcast_id and broadcast_id not in results_by_id:
                 results_by_id[broadcast_id] = item
 
     if not results_by_id:
-        for item in list_broadcasts_by_status(access_token, "all", limit):
+        for item in list_broadcasts_by_status(access_token, "all", limit, include_stream_details=include_stream_details):
             life_cycle_status = str(item.get("life_cycle_status") or "").lower()
             if life_cycle_status in {"complete", "revoked"}:
                 continue

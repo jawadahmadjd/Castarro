@@ -1611,6 +1611,7 @@ textarea {
 
 .transfer-package-card h3 {
   margin: 0;
+  color: var(--ui-primary);
 }
 
 .transfer-package-status {
@@ -1972,19 +1973,22 @@ textarea {
 .settings-history-comments-panel {
   display: grid;
   gap: 8px;
-  padding: 12px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  background: var(--master-color-rgba-255-255-255-0-45);
+  padding: var(--space-2);
+  border: 1px solid var(--ui-line);
+  border-radius: var(--ui-radius);
+  background: var(--component-subtle-background);
 }
 
 .history-comment-message {
   display: grid;
-  gap: 5px;
-  padding: 10px 12px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  background: var(--master-color-rgba-255-255-255-0-58);
+  gap: 6px;
+  min-width: 0;
+  padding: var(--space-2);
+  border: 1px solid var(--ui-danger);
+  border-radius: var(--ui-radius);
+  background: var(--component-card-background);
+  box-shadow: var(--ui-shadow-soft);
+  color: var(--ui-ink);
 }
 
 .history-comment-head {
@@ -1995,20 +1999,20 @@ textarea {
 }
 
 .history-comment-head strong {
-  color: var(--ink);
+  color: var(--ui-ink);
 }
 
 .history-comment-head time,
 .history-comments-empty,
 .history-comment-message p {
-  color: var(--muted);
+  color: var(--ui-muted);
   font-size: 0.82rem;
   font-weight: 700;
 }
 
 .history-comment-message p {
   margin: 0;
-  color: var(--ink);
+  color: var(--ui-ink);
   overflow-wrap: anywhere;
 }
 

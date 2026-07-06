@@ -554,6 +554,10 @@ def assert_oauth_callback_exchanges_with_stored_redirect_uri() -> None:
 
 
 def assert_youtube_status_keeps_connected_when_profile_refresh_fails() -> None:
+    with web_ui.STATE.lock:
+        web_ui.STATE.youtube_profile_cache.clear()
+        web_ui.STATE.youtube_broadcast_cache.clear()
+        web_ui.STATE.youtube_stream_cache.clear()
     config = make_config()
     config["youtube"]["accounts"][0].update(
         {
@@ -572,7 +576,13 @@ def assert_youtube_status_keeps_connected_when_profile_refresh_fails() -> None:
     web_ui.load_config_or_none = lambda _name: (config, None)
     web_ui.youtube_service.load_tokens = lambda *_args, **_kwargs: {"access_token": "token", "expires_at": "2099-01-01T00:00:00Z"}
     web_ui.youtube_service.valid_access_token = lambda *_args, **_kwargs: ("token", {"scope": "youtube", "expires_at": "2099-01-01T00:00:00Z"})
-    web_ui.youtube_service.connected_account_profile = lambda _token: (_ for _ in ()).throw(RuntimeError("temporary profile lookup failure"))
+    profile_calls = {"count": 0}
+
+    def fake_profile(_token: str):
+        profile_calls["count"] += 1
+        raise RuntimeError("temporary profile lookup failure")
+
+    web_ui.youtube_service.connected_account_profile = fake_profile
     try:
         payload = web_ui.youtube_status("config.ready.json")
     finally:
@@ -584,7 +594,8 @@ def assert_youtube_status_keeps_connected_when_profile_refresh_fails() -> None:
     account = next(item for item in payload["accounts"] if item["id"] == "acct-a")
     assert payload["connected"] is True
     assert account["connected"] is True
-    assert "Could not refresh YouTube profile" in account["message"]
+    assert account["message"] == "Connected."
+    assert profile_calls["count"] == 2
 
 
 def assert_history_and_activity_are_channel_specific() -> None:
