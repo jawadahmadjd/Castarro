@@ -238,6 +238,8 @@ The default normalization profile creates consistent H.264/AAC files:
 - 2-second keyframe interval
 - `yuv420p` pixel format
 
+The default source encoder is `auto`: Castarro probes the local FFmpeg build and GPU stack before encoding, then chooses the first working H.264 encoder in this order: NVIDIA NVENC, Intel Quick Sync, AMD AMF, then `libx264` CPU encoding. Use `auto_hardware` when a channel must use GPU encoding only.
+
 Set YouTube stream keys as environment variables:
 
 ```powershell
@@ -342,7 +344,7 @@ Release build:
 npm run dist
 ```
 
-`npm run dist` also creates `desktop/resources/seed-data/youtube.oauth.seed.json` from YouTube OAuth environment variables or the local `config.json`. That generated seed is ignored by Git, but it is bundled into the installer so a fresh PC can show the YouTube Connect flow. If Google returns `client_secret is missing`, add the OAuth client secret with `CASTARRO_YOUTUBE_CLIENT_SECRET` or `youtube.client_secret` in `config.json`, rebuild, and reinstall.
+`npm run dist` also creates `desktop/resources/seed-data/youtube.oauth.seed.json` from YouTube OAuth environment variables or the local `config.json`. That generated seed is ignored by Git, but it is bundled into the installer so a fresh PC can show the YouTube Connect flow. For the default desktop OAuth flow, use a Desktop client ID with PKCE; any configured client secret is ignored during token requests so a stale secret cannot break reconnects. Only set `CASTARRO_YOUTUBE_CLIENT_SECRET` or `youtube.client_secret` when `youtube.oauth_client_type` is `web`.
 
 Before creating the installer, place these runtime files in the resource slots:
 

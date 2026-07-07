@@ -118,7 +118,7 @@ def exchange_code_for_tokens(
 ) -> dict[str, Any]:
     oauth = provider_oauth(provider)
     client_id = str(oauth.get("client_id") or "").strip()
-    client_secret = str(oauth.get("client_secret") or "").strip()
+    client_secret = youtube_service.token_request_client_secret(oauth)
     if not client_id:
         raise ValueError("Missing Google Drive OAuth client ID.")
     if oauth.get("oauth_client_type") == "web" and not client_secret:
@@ -157,16 +157,20 @@ def refresh_access_token(root: Path, provider: dict[str, Any], tokens: dict[str,
     if not refresh_token:
         raise ValueError("No refresh token is available. Reconnect Google Drive.")
 
+    form_body: dict[str, Any] = {
+        "refresh_token": refresh_token,
+        "client_id": oauth.get("client_id"),
+        "grant_type": "refresh_token",
+    }
+    client_secret = youtube_service.token_request_client_secret(oauth)
+    if client_secret:
+        form_body["client_secret"] = client_secret
+
     payload = youtube_service.request_json(
         GOOGLE_TOKEN_URL,
         method="POST",
         form=True,
-        body={
-            "refresh_token": refresh_token,
-            "client_id": oauth.get("client_id"),
-            "grant_type": "refresh_token",
-            "client_secret": oauth.get("client_secret") or None,
-        },
+        body=form_body,
     )
     if "access_token" not in payload:
         raise ValueError("Token refresh did not return an access token.")

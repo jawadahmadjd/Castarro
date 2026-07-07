@@ -234,6 +234,87 @@ def assert_renditions_only_encodes_single_selected_lower_rung() -> None:
     assert len(ready_channel["rendition_playlist"]) == 1
 
 
+def assert_nvenc_driver_failure_falls_back_to_libx264_profile() -> None:
+    reason = normalize_media.hardware_encoder_fallback_reason(
+        "h264_nvenc",
+        [
+            "[h264_nvenc] Driver does not support the required nvenc API version.",
+            "[h264_nvenc] The minimum required Nvidia driver for nvenc is 610.00 or newer",
+            "Task finished with error code: -40 (Function not implemented)",
+        ],
+        4294967256,
+    )
+    fallback = normalize_media.libx264_fallback_profile(
+        {
+            "video_encoder": "h264_nvenc",
+            "x264_preset": "p5",
+            "x264_profile": "high",
+            "video_bitrate": "6000k",
+        }
+    )
+
+    assert reason and "driver" in reason.lower()
+    assert normalize_media.signed_return_code(4294967256) == -40
+    assert normalize_media.cpu_fallback_enabled({"video_encoder": "h264_nvenc"}) is False
+    assert normalize_media.cpu_fallback_enabled({"video_encoder": "h264_nvenc", "allow_cpu_fallback": True}) is True
+    assert fallback["video_encoder"] == "libx264"
+    assert fallback["x264_preset"] == "medium"
+
+
+def assert_auto_encoder_selects_first_working_machine_encoder() -> None:
+    original_probe = normalize_media.probe_video_encoder
+    attempts: list[str] = []
+
+    def fake_probe(_ffmpeg_path: str, selected_profile: dict) -> tuple[bool, str]:
+        encoder = selected_profile["video_encoder"]
+        attempts.append(encoder)
+        return (encoder == "h264_qsv", "" if encoder == "h264_qsv" else "not available")
+
+    normalize_media.probe_video_encoder = fake_probe
+    try:
+        selected = normalize_media.resolve_encoder_profile(
+            "ffmpeg",
+            {
+                "video_encoder": "auto",
+                "x264_preset": "p5",
+                "x264_profile": "high",
+            },
+        )
+    finally:
+        normalize_media.probe_video_encoder = original_probe
+
+    assert attempts == ["h264_nvenc", "h264_qsv"]
+    assert selected["video_encoder"] == "h264_qsv"
+    assert selected["x264_preset"] == "medium"
+
+
+def assert_auto_encoder_can_fall_back_to_cpu_when_no_gpu_works() -> None:
+    original_probe = normalize_media.probe_video_encoder
+    attempts: list[str] = []
+
+    def fake_probe(_ffmpeg_path: str, selected_profile: dict) -> tuple[bool, str]:
+        encoder = selected_profile["video_encoder"]
+        attempts.append(encoder)
+        return (encoder == "libx264", "" if encoder == "libx264" else "not available")
+
+    normalize_media.probe_video_encoder = fake_probe
+    try:
+        selected = normalize_media.resolve_encoder_profile(
+            "ffmpeg",
+            {
+                "video_encoder": "auto",
+                "x264_preset": "p5",
+                "x264_profile": "high",
+            },
+        )
+    finally:
+        normalize_media.probe_video_encoder = original_probe
+
+    assert attempts == ["h264_nvenc", "h264_qsv", "h264_amf", "libx264"]
+    assert selected["video_encoder"] == "libx264"
+    assert selected["x264_preset"] == "medium"
+
+
 def main() -> int:
     assert_transcode_preview_uses_transcode_args()
     assert_copy_preview_still_uses_copy()
@@ -242,6 +323,9 @@ def main() -> int:
     assert_adaptive_stream_builds_bounded_ladder_buffer()
     assert_renditions_only_prints_lower_resolution_commands()
     assert_renditions_only_encodes_single_selected_lower_rung()
+    assert_nvenc_driver_failure_falls_back_to_libx264_profile()
+    assert_auto_encoder_selects_first_working_machine_encoder()
+    assert_auto_encoder_can_fall_back_to_cpu_when_no_gpu_works()
     print("preview_command_test: PASS")
     return 0
 

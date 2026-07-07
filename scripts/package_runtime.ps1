@@ -1,7 +1,8 @@
 param(
     [string]$PythonVersion = "3.13.7",
     [string]$PythonUrl = "",
-    [string]$FFmpegUrl = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
+    [string]$FFmpegUrl = "",
+    [string]$ExpectedFFmpegVersion = "8.1.1",
     [switch]$SkipDownload
 )
 
@@ -39,6 +40,21 @@ function Clear-Directory {
         Get-ChildItem -LiteralPath $Path -Force | Remove-Item -Recurse -Force
     }
     New-Item -ItemType Directory -Force -Path $Path | Out-Null
+}
+
+function Assert-FFmpegVersion {
+    param([Parameter(Mandatory = $true)][string]$ExePath)
+
+    if (-not $ExpectedFFmpegVersion) {
+        return
+    }
+    if (-not (Test-Path -LiteralPath $ExePath)) {
+        throw "FFmpeg executable not found: $ExePath"
+    }
+    $VersionLine = (& $ExePath -hide_banner -version | Select-Object -First 1)
+    if ($VersionLine -notmatch [regex]::Escape($ExpectedFFmpegVersion)) {
+        throw "Unexpected FFmpeg version. Expected $ExpectedFFmpegVersion, got: $VersionLine"
+    }
 }
 
 function Update-PythonPathFile {
@@ -85,13 +101,17 @@ function Install-PythonRuntime {
 
 function Install-FFmpegRuntime {
     if ((Test-Path -LiteralPath (Join-Path $FFmpegDir "ffmpeg.exe")) -and
-        (Test-Path -LiteralPath (Join-Path $FFmpegDir "ffprobe.exe")) -and
-        -not $SkipDownload) {
+        (Test-Path -LiteralPath (Join-Path $FFmpegDir "ffprobe.exe"))) {
+        Assert-FFmpegVersion -ExePath (Join-Path $FFmpegDir "ffmpeg.exe")
         Write-Host "FFmpeg tools already exist at $FFmpegDir"
         return
     }
 
-    $Archive = Join-Path $CacheDir "ffmpeg-release-essentials.zip"
+    if (-not $SkipDownload -and -not $FFmpegUrl) {
+        throw "No vetted FFmpeg runtime is bundled. Provide -FFmpegUrl explicitly after validating GPU encoder compatibility."
+    }
+
+    $Archive = Join-Path $CacheDir ("ffmpeg-" + ($ExpectedFFmpegVersion -replace '[^A-Za-z0-9._-]', '_') + "-essentials.zip")
     if (-not $SkipDownload) {
         Invoke-Download -Url $FFmpegUrl -OutFile $Archive
     }
@@ -112,6 +132,7 @@ function Install-FFmpegRuntime {
     Clear-Directory -Path $FFmpegDir
     Copy-Item -LiteralPath $Ffmpeg.FullName -Destination (Join-Path $FFmpegDir "ffmpeg.exe") -Force
     Copy-Item -LiteralPath $Ffprobe.FullName -Destination (Join-Path $FFmpegDir "ffprobe.exe") -Force
+    Assert-FFmpegVersion -ExePath (Join-Path $FFmpegDir "ffmpeg.exe")
 
     $LicenseRoot = Split-Path -Parent (Split-Path -Parent $Ffmpeg.FullName)
     Get-ChildItem -LiteralPath $LicenseRoot -File -Include "LICENSE*", "README*" -ErrorAction SilentlyContinue |

@@ -5,12 +5,15 @@ from __future__ import annotations
 
 from pathlib import Path
 import sys
+import tempfile
+from typing import Any
 
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import google_drive_provider  # noqa: E402
+import youtube_service  # noqa: E402
 
 
 def main() -> int:
@@ -22,6 +25,49 @@ def main() -> int:
     }
     assert google_drive_provider.credentials_ready(provider) is True
     assert google_drive_provider.credentials_ready({"id": "google-drive-main", "oauth": {}}) is False
+
+    captured: list[dict[str, Any]] = []
+    original_request_json = youtube_service.request_json
+
+    def fake_request_json(_url: str, **kwargs: Any) -> dict[str, Any]:
+        body = kwargs.get("body")
+        captured.append(dict(body) if isinstance(body, dict) else {})
+        return {
+            "access_token": f"access-{len(captured)}",
+            "refresh_token": "refresh-token",
+            "expires_in": 3600,
+        }
+
+    try:
+        youtube_service.request_json = fake_request_json
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            desktop_provider = {
+                "id": "google-drive-main",
+                "oauth": {
+                    "client_id": "desktop-client-id",
+                    "client_secret": "stale-secret-that-google-would-reject",
+                    "oauth_client_type": "desktop",
+                    "tokens_file": "drive_tokens.json",
+                },
+            }
+            google_drive_provider.exchange_code_for_tokens(
+                root,
+                desktop_provider,
+                "auth-code",
+                "http://127.0.0.1:8765/oauth2redirect",
+                code_verifier="verifier",
+            )
+            assert "client_secret" not in captured[-1], captured[-1]
+
+            google_drive_provider.refresh_access_token(
+                root,
+                desktop_provider,
+                {"refresh_token": "refresh-token"},
+            )
+            assert "client_secret" not in captured[-1], captured[-1]
+    finally:
+        youtube_service.request_json = original_request_json
 
     try:
         google_drive_provider.validate_drive_file_metadata({"mimeType": "application/vnd.google-apps.document"})

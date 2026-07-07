@@ -39,6 +39,7 @@ const state = {
     cancelRequested: false,
   },
   settingsRenderPausedUntil: 0,
+  refreshRenderDeferredForSelection: false,
   settingsAutosaveTimer: null,
   settingsAutosaveBusy: false,
   settingsAutosaveQueued: false,
@@ -226,6 +227,59 @@ function syncLiveImportProgressFlags() {
 
 function delay(ms) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function nodeInsideAppShell(node) {
+  const root = document.querySelector(".app-shell") || document.body;
+  if (!root || !node) return false;
+  const element = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+  return Boolean(element && root.contains(element));
+}
+
+function activeInputTextSelection() {
+  const active = document.activeElement;
+  if (!(active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement)) return false;
+  if (!nodeInsideAppShell(active)) return false;
+  const start = Number(active.selectionStart);
+  const end = Number(active.selectionEnd);
+  return Number.isFinite(start) && Number.isFinite(end) && start !== end;
+}
+
+function activeDocumentTextSelection() {
+  const selection = typeof window.getSelection === "function" ? window.getSelection() : null;
+  if (!selection || selection.isCollapsed || selection.rangeCount <= 0) return false;
+  if (!String(selection.toString() || "").trim()) return false;
+
+  const root = document.querySelector(".app-shell") || document.body;
+  for (let index = 0; index < selection.rangeCount; index += 1) {
+    const range = selection.getRangeAt(index);
+    try {
+      if (root && typeof range.intersectsNode === "function" && range.intersectsNode(root)) {
+        return true;
+      }
+    } catch {
+      if (nodeInsideAppShell(selection.anchorNode) || nodeInsideAppShell(selection.focusNode)) {
+        return true;
+      }
+    }
+  }
+  return nodeInsideAppShell(selection.anchorNode) || nodeInsideAppShell(selection.focusNode);
+}
+
+function shouldDeferRefreshRenderForSelection() {
+  return activeInputTextSelection() || activeDocumentTextSelection();
+}
+
+function renderDeferredRefreshAfterSelectionClears() {
+  if (!state.refreshRenderDeferredForSelection || shouldDeferRefreshRenderForSelection() || !state.status) return;
+  state.refreshRenderDeferredForSelection = false;
+  const visibleConfigs = selectableConfigNames(state.status.configs);
+  const runningSettingsTask = (state.status.tasks || []).some((task) => ["normalize", "validate", "test-stream"].includes(task.name) && task.running);
+  renderRefreshedStatus(state.status, visibleConfigs, runningSettingsTask);
+  state.hadRunningSettingsTask = runningSettingsTask;
+  renderUpdateBanner();
+  writeDashboardCache(state.status);
+  markBootReady();
 }
 
 function cacheDesktopStartupView(reason = "ui", delayMs = 900) {
@@ -500,7 +554,7 @@ const defaultConfigData = () => ({
     width: 1920,
     height: 1080,
     fps: 30,
-    video_encoder: "libx264",
+    video_encoder: "auto",
     rate_control: "vbr",
     video_bitrate: "6000k",
     video_minrate: "4500k",
@@ -557,7 +611,7 @@ const defaultChannel = (index) => ({
     width: 1920,
     height: 1080,
     fps: 30,
-    video_encoder: "libx264",
+    video_encoder: "auto",
     rate_control: "vbr",
     video_bitrate: "6000k",
     video_minrate: "4500k",
@@ -1063,6 +1117,32 @@ function alertDetailRows(item) {
   return rows;
 }
 
+function workspaceAlertCopyText(item) {
+  const title = compactAlertTitle(item);
+  const detail = String(item?.detail || item?.message || "").trim();
+  const created = formatDateTime(item?.created_at || "");
+  const rows = alertDetailRows(item);
+  const lines = [title || "Notification"];
+  if (created) lines.push(`Time: ${created}`);
+  if (detail && detail !== title) lines.push(`Detail: ${detail}`);
+  rows.forEach((row) => lines.push(`${row.label}: ${row.value}`));
+  return lines.join("\n");
+}
+
+function workspaceAlertIcon(name) {
+  const paths = {
+    copy: `
+      <rect x="9" y="9" width="10" height="10" rx="2"></rect>
+      <path d="M5 15V7a2 2 0 0 1 2-2h8"></path>
+    `,
+  };
+  return `
+    <svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      ${paths[name] || ""}
+    </svg>
+  `;
+}
+
 function renderWorkspaceAlertItem(item, index) {
   const id = workspaceAlertId(item, index);
   const detailId = `workspace-alert-detail-${index}`;
@@ -1073,22 +1153,31 @@ function renderWorkspaceAlertItem(item, index) {
   const rows = alertDetailRows(item);
   return `
     <article class="workspace-alert-item ${escapeAttr(severity)} ${expanded ? "is-expanded" : ""}" data-alert-id="${escapeAttr(id)}">
-      <button
-        class="workspace-alert-summary"
-        type="button"
-        data-alert-id="${escapeAttr(id)}"
-        aria-expanded="${expanded ? "true" : "false"}"
-        aria-controls="${escapeAttr(detailId)}"
-        onclick="toggleWorkspaceAlertItem('${escapeJs(id)}', event)"
-      >
-        <span class="workspace-alert-summary-main">
-          <strong>${escapeHtml(title)}</strong>
-        </span>
-        <span class="workspace-alert-summary-meta">
-          <time>${escapeHtml(formatDateTime(item?.created_at || ""))}</time>
+      <div class="workspace-alert-row">
+        <button
+          class="workspace-alert-summary"
+          type="button"
+          data-alert-id="${escapeAttr(id)}"
+          aria-expanded="${expanded ? "true" : "false"}"
+          aria-controls="${escapeAttr(detailId)}"
+          onclick="toggleWorkspaceAlertItem('${escapeJs(id)}', event)"
+        >
+          <span class="workspace-alert-summary-main">
+            <strong>${escapeHtml(title)}</strong>
+          </span>
+          <span class="workspace-alert-summary-meta">
+            <time>${escapeHtml(formatDateTime(item?.created_at || ""))}</time>
+          </span>
           <span class="workspace-alert-chevron" aria-hidden="true">${expanded ? "-" : "+"}</span>
-        </span>
-      </button>
+        </button>
+        <button
+          class="pill ghost small icon-only workspace-alert-copy"
+          type="button"
+          title="Copy notification"
+          aria-label="Copy notification"
+          onclick="copyWorkspaceAlert('${escapeJs(id)}', event).catch((error) => toast(error.message))"
+        >${workspaceAlertIcon("copy")}</button>
+      </div>
       ${expanded ? `
         <div class="workspace-alert-detail" id="${escapeAttr(detailId)}">
           <p>${escapeHtml(detail || "No additional details were provided for this notification.")}</p>
@@ -1419,10 +1508,26 @@ async function refresh() {
     hydrateYoutubeStatusFromCache();
   }
 
-  renderConfigSelect(visibleConfigs);
   state.appVersion = visiblePayload.app_version || state.appVersion;
-  renderAppVersion();
   ensureWorkspaceChannelSelection(visiblePayload);
+  const runningSettingsTask = visiblePayload.tasks.some((task) => ["normalize", "validate", "test-stream"].includes(task.name) && task.running);
+
+  if (shouldDeferRefreshRenderForSelection()) {
+    state.refreshRenderDeferredForSelection = true;
+    state.hadRunningSettingsTask = runningSettingsTask;
+    return;
+  }
+
+  renderRefreshedStatus(visiblePayload, visibleConfigs, runningSettingsTask);
+  state.hadRunningSettingsTask = runningSettingsTask;
+  renderUpdateBanner();
+  writeDashboardCache(payload);
+  markBootReady();
+}
+
+function renderRefreshedStatus(visiblePayload, visibleConfigs, runningSettingsTask) {
+  renderConfigSelect(visibleConfigs);
+  renderAppVersion();
   renderStatus(visiblePayload);
   renderChannels(visiblePayload);
   renderChannelWorkspace(visiblePayload);
@@ -1434,7 +1539,6 @@ async function refresh() {
   renderLiveHistory(visiblePayload.stream_history || []);
   renderTasks(visiblePayload.tasks, visiblePayload.activity_events || []);
   renderLogs(visiblePayload.streams);
-  const runningSettingsTask = visiblePayload.tasks.some((task) => ["normalize", "validate", "test-stream"].includes(task.name) && task.running);
   if (state.activeTab === "settings" && (runningSettingsTask || state.hadRunningSettingsTask)) {
     renderSettingsFormsUnlessPaused();
   }
@@ -1443,10 +1547,6 @@ async function refresh() {
       .then(() => renderYoutubeSettingsPanel(state.configData || defaultConfigData()))
       .catch((error) => toast(error.message));
   }
-  state.hadRunningSettingsTask = runningSettingsTask;
-  renderUpdateBanner();
-  writeDashboardCache(payload);
-  markBootReady();
 }
 
 function applyPendingChannelRemovalToStatus(payload) {
@@ -4617,6 +4717,17 @@ async function copyLog(logId) {
   toast("Log copied.");
 }
 
+async function copyWorkspaceAlert(id, event) {
+  if (event && typeof event.stopPropagation === "function") {
+    event.stopPropagation();
+  }
+  const key = String(id || "").trim();
+  const alerts = workspaceRecentAlerts(state.status);
+  const item = alerts.find((alert, index) => workspaceAlertId(alert, index) === key);
+  if (!item) return;
+  await copyText(workspaceAlertCopyText(item));
+}
+
 async function copyStreamLogs() {
   await copyText($("streamLogs").textContent || "");
   toast("Stream logs copied.");
@@ -7239,7 +7350,7 @@ function normalizationCard(channel, index, { variant = "normalize" } = {}) {
           ${normalizeInput(index, "width", "Width", normalizeProfile.width ?? 1920, "number")}
           ${normalizeInput(index, "height", "Height", normalizeProfile.height ?? 1080, "number")}
           ${normalizeInput(index, "fps", "FPS", normalizeProfile.fps ?? 30, "number")}
-          ${normalizeSelect(index, "video_encoder", "Video encoder", encoder, ["libx264", "h264_nvenc", "h264_amf", "h264_qsv"], `syncEncoderPreset(${index}, this.value, this)`)}
+          ${normalizeSelect(index, "video_encoder", "Video encoder", encoder, ["auto", "auto_hardware", "h264_nvenc", "h264_qsv", "h264_amf", "libx264"], `syncEncoderPreset(${index}, this.value, this)`)}
           ${normalizeSelect(index, "x264_preset", "Encoding preset", preset, presetOptions, "", encoder)}
           ${normalizeSelect(index, "rate_control", "Rate control", rateControl, ["vbr", "cbr"], `syncNormalizeRateControl(${index}, this.value, this)`)}
           ${normalizeInput(index, "video_bitrate", "Video bitrate", normalizeProfile.video_bitrate || "6000k")}
@@ -7425,6 +7536,9 @@ function normalizeInput(index, name, label, value, type = "text") {
 }
 
 function presetOptionsForEncoder(encoder) {
+  if (encoder === "auto" || encoder === "auto_hardware") {
+    return ["medium"];
+  }
   if (encoder === "h264_nvenc") {
     return ["p1", "p2", "p3", "p4", "p5", "p6", "p7"];
   }
@@ -7455,6 +7569,8 @@ function presetLabelForEncoder(encoder, preset) {
 
 function videoEncoderLabel(encoder) {
   const labels = {
+    auto: "Auto: Best Available (GPU First, CPU If Needed)",
+    auto_hardware: "Auto GPU Only: NVIDIA, Intel, or AMD",
     libx264: "libx264: CPU Software (Most Compatible, Higher CPU Use)",
     h264_nvenc: "h264_nvenc: NVIDIA GPU (Low CPU, Fast Hardware Encode)",
     h264_amf: "h264_amf: AMD GPU (Low CPU, Fast Hardware Encode)",
@@ -10479,6 +10595,9 @@ document.addEventListener("click", (event) => {
     state.settingsLiveHistory.calendarOpen = false;
     renderSettingsLiveHistory();
   }
+});
+document.addEventListener("selectionchange", () => {
+  window.setTimeout(renderDeferredRefreshAfterSelectionClears, 0);
 });
 document.addEventListener("focusin", (event) => {
   const target = event.target;

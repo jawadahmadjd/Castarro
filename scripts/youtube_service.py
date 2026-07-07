@@ -78,6 +78,15 @@ YOUTUBE_EMOJI_SHORTCODE_FALLBACKS = {
 }
 
 
+def missing_client_secret_message() -> str:
+    return (
+        "Google rejected this OAuth client because its client secret is missing. "
+        "If this is a Web OAuth client, set YouTube OAuth client type to web and keep the client secret configured, "
+        "then reconnect this YouTube account. If you want desktop OAuth, create a Desktop OAuth client ID in Google Cloud, "
+        "set the client type to desktop, and reconnect."
+    )
+
+
 def default_settings(redirect_uri: str | None = None) -> dict[str, Any]:
     return {
         "client_id": "",
@@ -153,6 +162,13 @@ def merge_settings(config: dict[str, Any], redirect_uri: str | None = None) -> d
     merged["default_auto_start"] = bool(merged.get("default_auto_start", True))
     merged["default_auto_stop"] = bool(merged.get("default_auto_stop", True))
     return merged
+
+
+def token_request_client_secret(oauth_settings: dict[str, Any]) -> str:
+    """Return the client secret only for confidential OAuth clients."""
+    if oauth_settings.get("oauth_client_type") != "web":
+        return ""
+    return str(oauth_settings.get("client_secret") or "").strip()
 
 
 def replace_youtube_emoji_shortcodes(value: str) -> str:
@@ -426,7 +442,7 @@ def exchange_code_for_tokens(
 ) -> dict[str, Any]:
     settings = merge_settings(config, redirect_uri)
     client_id = str(settings.get("client_id") or "").strip()
-    client_secret = str(settings.get("client_secret") or "").strip()
+    client_secret = token_request_client_secret(settings)
     if not client_id:
         raise ValueError("Missing YouTube OAuth client ID.")
     if settings.get("oauth_client_type") == "web" and not client_secret:
@@ -451,10 +467,7 @@ def exchange_code_for_tokens(
         )
     except ValueError as exc:
         if "client_secret is missing" in str(exc).lower() and not client_secret:
-            raise ValueError(
-                "Google rejected this OAuth client because its client secret is missing. "
-                "Add the Google OAuth client secret to the YouTube owner settings, rebuild the installer, then reconnect."
-            ) from exc
+            raise ValueError(missing_client_secret_message()) from exc
         raise
     if "access_token" not in payload:
         raise ValueError("Google token response did not include an access token.")
@@ -478,17 +491,26 @@ def refresh_access_token(
     if not refresh_token:
         raise ValueError("No refresh token available. Reconnect your YouTube account.")
 
-    payload = request_json(
-        "https://oauth2.googleapis.com/token",
-        method="POST",
-        form=True,
-        body={
-            "refresh_token": refresh_token,
-            "client_id": settings.get("client_id"),
-            "grant_type": "refresh_token",
-            "client_secret": settings.get("client_secret") or None,
-        },
-    )
+    form_body: dict[str, Any] = {
+        "refresh_token": refresh_token,
+        "client_id": settings.get("client_id"),
+        "grant_type": "refresh_token",
+    }
+    client_secret = token_request_client_secret(settings)
+    if client_secret:
+        form_body["client_secret"] = client_secret
+
+    try:
+        payload = request_json(
+            "https://oauth2.googleapis.com/token",
+            method="POST",
+            form=True,
+            body=form_body,
+        )
+    except ValueError as exc:
+        if "client_secret is missing" in str(exc).lower() and not client_secret:
+            raise ValueError(missing_client_secret_message()) from exc
+        raise
     if "access_token" not in payload:
         raise ValueError("Token refresh did not return an access token.")
 
