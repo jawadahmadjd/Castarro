@@ -1,8 +1,9 @@
 param(
     [string]$PythonVersion = "3.13.7",
     [string]$PythonUrl = "",
-    [string]$FFmpegUrl = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
-    [string]$ExpectedFFmpegVersion = "8.1.1",
+    [string]$FFmpegUrl = "https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-8.1.2-essentials_build.zip",
+    [string]$ExpectedFFmpegVersion = "8.1.2",
+    [string]$ExpectedFFmpegSha256 = "db580001caa24ac104c8cb856cd113a87b0a443f7bdf47d8c12b1d740584a2ec",
     [switch]$SkipDownload
 )
 
@@ -57,6 +58,21 @@ function Assert-FFmpegVersion {
     }
 }
 
+function Assert-FileSha256 {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [string]$ExpectedSha256
+    )
+
+    if (-not $ExpectedSha256) {
+        return
+    }
+    $Actual = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($Actual -ne $ExpectedSha256.ToLowerInvariant()) {
+        throw "Unexpected SHA-256 for $Path. Expected $ExpectedSha256, got: $Actual"
+    }
+}
+
 function Update-PythonPathFile {
     $Pth = Get-ChildItem -LiteralPath $PythonDir -Filter "python*._pth" | Select-Object -First 1
     if (-not $Pth) {
@@ -100,11 +116,19 @@ function Install-PythonRuntime {
 }
 
 function Install-FFmpegRuntime {
-    if ((Test-Path -LiteralPath (Join-Path $FFmpegDir "ffmpeg.exe")) -and
-        (Test-Path -LiteralPath (Join-Path $FFmpegDir "ffprobe.exe"))) {
-        Assert-FFmpegVersion -ExePath (Join-Path $FFmpegDir "ffmpeg.exe")
-        Write-Host "FFmpeg tools already exist at $FFmpegDir"
-        return
+    $ExistingFfmpeg = Join-Path $FFmpegDir "ffmpeg.exe"
+    $ExistingFfprobe = Join-Path $FFmpegDir "ffprobe.exe"
+    if ((Test-Path -LiteralPath $ExistingFfmpeg) -and (Test-Path -LiteralPath $ExistingFfprobe)) {
+        try {
+            Assert-FFmpegVersion -ExePath $ExistingFfmpeg
+            Write-Host "FFmpeg tools already exist at $FFmpegDir"
+            return
+        } catch {
+            if ($SkipDownload) {
+                throw
+            }
+            Write-Warning "$($_.Exception.Message) Reinstalling FFmpeg from $FFmpegUrl."
+        }
     }
 
     $Archive = Join-Path $CacheDir ("ffmpeg-" + ($ExpectedFFmpegVersion -replace '[^A-Za-z0-9._-]', '_') + "-essentials.zip")
@@ -114,6 +138,7 @@ function Install-FFmpegRuntime {
     if (-not (Test-Path -LiteralPath $Archive)) {
         throw "FFmpeg archive not found: $Archive"
     }
+    Assert-FileSha256 -Path $Archive -ExpectedSha256 $ExpectedFFmpegSha256
 
     $ExtractDir = Join-Path $CacheDir "ffmpeg-extract"
     Clear-Directory -Path $ExtractDir

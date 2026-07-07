@@ -1,10 +1,10 @@
 FFmpeg 64-bit static Windows build from www.gyan.dev
 
-Version: 8.1.1-essentials_build-www.gyan.dev
+Version: 8.1.2-essentials_build-www.gyan.dev
 
 License: GPL v3
 
-Source Code: https://github.com/FFmpeg/FFmpeg/commit/239f2c733d
+Source Code: https://github.com/FFmpeg/FFmpeg/commit/38b88335f9
 
 release-essentials build configuration: 
 
@@ -788,11 +788,11 @@ Enabled outdevs:
 
 release-essentials external libraries' versions: 
 
-AMF v1.5.0-1-gd0b3e6d
-aom v3.13.3-431-ge86de95f79
-AviSynthPlus v3.7.5-281-g23f0e3fa
+AMF v1.5.2-1-g6ec0295
+aom v3.14.1-100-gb973895c4c
+AviSynthPlus v3.7.5-337-gfcb9c8a2
 cairo 1.18.5
-ffnvcodec n13.0.19.0-3-g33a9ede
+ffnvcodec n13.0.19.0-5-g1b5a81a
 gsm 1.0.24
 lame 3.100
 libgme 0.6.6
@@ -800,24 +800,24 @@ libopencore-amrnb 0.1.6
 libopencore-amrwb 0.1.6
 libssh 0.12.0
 libtheora v1.2.0
-libwebp v1.6.0-175-g24f7331
+libwebp v1.6.0-192-g3757b8a
 openal-soft latest
-openmpt libopenmpt-0.6.28-14-gd0e05aa3
-opus v1.6.1-19-gf8f99516
+openmpt libopenmpt-0.6.28-25-g1d77fab8
+opus v1.6.1-50-g3da9f7a6
 rubberband v1.8.1
-SDL release-2.32.0-198-g039a60c52
+SDL release-2.32.0-218-gb8b3f5ef2
 speex Speex-1.2.1-51-g0589522
-srt v1.5.5
+srt v1.5.5-9-gc39196c
 VAAPI 2.24.0.
 vidstab v1.1.1-24-g92bc0b0
-vmaf v3.1.0-33-g151a9822
+vmaf v3.2.0-2-g60016fbd
 vo-amrwbenc 0.1.3
-vorbis v1.3.7-24-g68a7fc22
+vorbis v1.3.7-36-ge3c9861f
 VPL 2.16
-vpx v1.16.0-108-g640d4ce27
+vpx v1.16.0-152-g91bba32d5
 x264 v0.165.3223
-x265 4.2-4-g3f4120d
+x265 4.2-59-gb81f650
 xvid v1.3.7
 zeromq 4.3.5
-zimg release-3.0.6-218-gfa52dee
+zimg release-3.0.6-222-gb364757
 
