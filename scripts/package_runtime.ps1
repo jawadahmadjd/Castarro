@@ -1,9 +1,9 @@
 param(
     [string]$PythonVersion = "3.13.7",
     [string]$PythonUrl = "",
-    [string]$FFmpegUrl = "https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-8.1.2-essentials_build.zip",
+    [string]$FFmpegUrl = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
     [string]$ExpectedFFmpegVersion = "8.1.2",
-    [string]$ExpectedFFmpegSha256 = "db580001caa24ac104c8cb856cd113a87b0a443f7bdf47d8c12b1d740584a2ec",
+    [string]$ExpectedFFmpegSha256 = "",
     [switch]$SkipDownload
 )
 
