@@ -1,7 +1,7 @@
 param(
     [string]$PythonVersion = "3.13.7",
     [string]$PythonUrl = "",
-    [string]$FFmpegUrl = "",
+    [string]$FFmpegUrl = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
     [string]$ExpectedFFmpegVersion = "8.1.1",
     [switch]$SkipDownload
 )
@@ -105,10 +105,6 @@ function Install-FFmpegRuntime {
         Assert-FFmpegVersion -ExePath (Join-Path $FFmpegDir "ffmpeg.exe")
         Write-Host "FFmpeg tools already exist at $FFmpegDir"
         return
-    }
-
-    if (-not $SkipDownload -and -not $FFmpegUrl) {
-        throw "No vetted FFmpeg runtime is bundled. Provide -FFmpegUrl explicitly after validating GPU encoder compatibility."
     }
 
     $Archive = Join-Path $CacheDir ("ffmpeg-" + ($ExpectedFFmpegVersion -replace '[^A-Za-z0-9._-]', '_') + "-essentials.zip")
