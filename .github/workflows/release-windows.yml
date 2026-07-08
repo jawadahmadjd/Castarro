@@ -247,8 +247,7 @@ jobs:
           CASTARRO_YOUTUBE_REDIRECT_URI: ${{ secrets.CASTARRO_YOUTUBE_REDIRECT_URI }}
         run: |
           if ([string]::IsNullOrWhiteSpace($env:CASTARRO_YOUTUBE_CLIENT_ID)) {
-            Write-Host "::warning::CASTARRO_YOUTUBE_CLIENT_ID is not configured. Packaged users will see owner OAuth credentials as missing."
-            exit 0
+            throw "CASTARRO_YOUTUBE_CLIENT_ID is not configured. Refusing to publish an installer with missing YouTube owner OAuth credentials."
           }
 
           $SeedDir = "desktop/resources/seed-data"
@@ -350,7 +349,7 @@ jobs:
       - name: Smoke-test packaged app
         if: steps.version.outputs.exists != 'true'
         shell: pwsh
-        run: npm run smoke:packaged
+        run: powershell -ExecutionPolicy Bypass -File scripts/smoke_packaged.ps1 -RequireYoutubeCredentials
 
       - name: Smoke-test Windows installer
         if: steps.version.outputs.exists != 'true'
