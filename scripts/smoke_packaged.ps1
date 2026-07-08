@@ -1,5 +1,6 @@
 param(
-    [string]$ExePath = ""
+    [string]$ExePath = "",
+    [switch]$RequireYoutubeCredentials
 )
 
 $ErrorActionPreference = "Stop"
@@ -19,6 +20,7 @@ $Script = Join-Path $AppRoot "scripts\web_ui.py"
 $WebRoot = Join-Path $AppRoot "web"
 $FFmpeg = Join-Path $Resources "ffmpeg\ffmpeg.exe"
 $FFprobe = Join-Path $Resources "ffmpeg\ffprobe.exe"
+$YoutubeSeed = Join-Path $Resources "seed-data\youtube.oauth.seed.json"
 $UserData = Join-Path $Root ".packaged-smoke-user-data"
 $DataRoot = Join-Path $UserData "data"
 $LogRoot = Join-Path $UserData "logs"
@@ -119,12 +121,16 @@ try {
             $ConfigName = if (($Status.configs -contains "config.ready.json")) { "config.ready.json" } elseif (($Status.configs -contains "config.json")) { "config.json" } else { [string]$Status.config }
             $YoutubeStatus = Invoke-RestMethod -Uri "$Url/api/youtube/status?config=$([uri]::EscapeDataString($ConfigName))" -TimeoutSec 5
             if (-not $YoutubeStatus.has_client_credentials) {
-                throw "Packaged backend reports missing YouTube owner OAuth credentials for $ConfigName. Verify resources\seed-data\youtube.oauth.seed.json is bundled and readable."
+                if ($RequireYoutubeCredentials -or (Test-Path -LiteralPath $YoutubeSeed)) {
+                    throw "Packaged backend reports missing YouTube owner OAuth credentials for $ConfigName. Verify resources\seed-data\youtube.oauth.seed.json is bundled and readable."
+                }
+                Write-Warning "Packaged backend reports missing YouTube owner OAuth credentials for $ConfigName. No bundled youtube.oauth.seed.json was found, so this smoke check is informational."
             }
             [pscustomobject]@{
                 youtubeConfig = $ConfigName
                 youtubeHasClientCredentials = [bool]$YoutubeStatus.has_client_credentials
                 youtubeOauthClientType = [string]$YoutubeStatus.oauth_client_type
+                youtubeSeedBundled = Test-Path -LiteralPath $YoutubeSeed
             } | ConvertTo-Json -Depth 3
 
             $Success = $true
