@@ -1611,7 +1611,11 @@ function readYoutubeStatusCache() {
     const cached = JSON.parse(text);
     const payload = cached?.payload;
     if (!payload || typeof payload !== "object" || !Array.isArray(payload.accounts)) return null;
-    return payload;
+    return {
+      ...payload,
+      _cached: true,
+      _cached_at: String(cached?.saved_at || ""),
+    };
   } catch {
     return null;
   }
@@ -3044,11 +3048,8 @@ function openOnboardingConnectionDialog() {
       ? `${linked.label || linked.id} needs reconnect`
       : "No YouTube account connected";
   const connectHasToken = Boolean(linked?.connected || linked?.wrong_account || linked?.has_token);
-  const credentialsReady = Boolean(
-    state.youtubeStatus?.has_client_credentials
-    || hasYoutubeCredentialsConfigured((config.youtube || {}))
-  );
-  const connectDisabled = !connectHasToken && !credentialsReady;
+  const credentialsMissing = youtubeCredentialsMissingConfirmed(config.youtube || {});
+  const connectDisabled = !connectHasToken && credentialsMissing;
   body.innerHTML = `
     <div class="onboarding-connection-stack">
       <section class="nested-card onboarding-choice-card">
@@ -5437,6 +5438,23 @@ function hasYoutubeCredentialsConfigured(youtube) {
   return true;
 }
 
+function hasFreshYoutubeCredentialStatus() {
+  return Boolean(
+    state.youtubeStatus
+    && typeof state.youtubeStatus === "object"
+    && !state.youtubeStatus._cached
+    && Object.prototype.hasOwnProperty.call(state.youtubeStatus, "has_client_credentials")
+  );
+}
+
+function youtubeCredentialsMissingConfirmed(youtube) {
+  return Boolean(
+    !hasYoutubeCredentialsConfigured(youtube)
+    && hasFreshYoutubeCredentialStatus()
+    && !state.youtubeStatus?.has_client_credentials
+  );
+}
+
 function showYoutubeOwnerSetupInUi() {
   try {
     const params = new URLSearchParams(window.location.search || "");
@@ -6312,10 +6330,7 @@ function renderYoutubeSettingsPanel(config) {
   }
   const ownerSetupVisible = showYoutubeOwnerSetupInUi();
   const actionBusy = String(state.youtubeActionBusy || "").trim();
-  const credentialsReady = Boolean(
-    status.has_client_credentials
-    || hasYoutubeCredentialsConfigured(youtube)
-  );
+  const credentialsMissing = youtubeCredentialsMissingConfirmed(youtube);
   const selectedYoutubeName = String(selectedAccount?.channel_title || selectedAccount?.channel_handle || "").trim();
   const expectedYoutubeName = String(selectedAccount?.expected_channel_name || selectedChannelName || selectedChannel?.name || "").trim();
   const connectionName = selectedAccount?.wrong_account
@@ -6337,7 +6352,7 @@ function renderYoutubeSettingsPanel(config) {
   const connectButtonAction = connectHasToken
     ? "disconnectYoutube().catch((error) => toast(error.message))"
     : "connectYoutube().catch((error) => toast(error.message))";
-  const connectButtonDisabled = actionBusy || (!connectHasToken && !credentialsReady) ? "disabled" : "";
+  const connectButtonDisabled = actionBusy || (!connectHasToken && credentialsMissing) ? "disabled" : "";
   const connectionMessage = selectedAccount?.wrong_account
     ? String(selectedAccount.message || "Connected YouTube account does not match this Castarro channel.")
     : selectedAccount?.connected
@@ -6499,7 +6514,7 @@ function renderYoutubeSettingsPanel(config) {
             <span class="${connectionStatusClass}">${escapeHtml(connectionStatusText)}</span>
             <button class="${connectButtonClass}" type="button" onclick="${connectButtonAction}" ${connectButtonDisabled}>${escapeHtml(connectButtonText)}</button>
           </div>
-          ${credentialsReady ? "" : `<div class="notice warn">YouTube owner credentials are not configured yet.</div>`}
+          ${credentialsMissing ? `<div class="notice warn">YouTube owner credentials are not configured yet.</div>` : ""}
         `,
       }) : ""}
 

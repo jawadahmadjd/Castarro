@@ -35,6 +35,14 @@ if (Test-Path -LiteralPath $UserData) {
     Remove-Item -LiteralPath $UserData -Recurse -Force
 }
 New-Item -ItemType Directory -Force -Path $DataRoot, $LogRoot | Out-Null
+@{
+    youtube = @{
+        client_id = ""
+        client_secret = ""
+        oauth_client_type = "desktop"
+    }
+    channels = @()
+} | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $DataRoot "config.ready.json") -Encoding UTF8
 
 $PreviousElectronRunAsNode = $env:ELECTRON_RUN_AS_NODE
 Remove-Item Env:ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue
@@ -107,6 +115,17 @@ try {
                 }
                 throw "Packaged backend did not expose a healthy API within timeout.$ExitSummary"
             }
+
+            $ConfigName = if (($Status.configs -contains "config.ready.json")) { "config.ready.json" } elseif (($Status.configs -contains "config.json")) { "config.json" } else { [string]$Status.config }
+            $YoutubeStatus = Invoke-RestMethod -Uri "$Url/api/youtube/status?config=$([uri]::EscapeDataString($ConfigName))" -TimeoutSec 5
+            if (-not $YoutubeStatus.has_client_credentials) {
+                throw "Packaged backend reports missing YouTube owner OAuth credentials for $ConfigName. Verify resources\seed-data\youtube.oauth.seed.json is bundled and readable."
+            }
+            [pscustomobject]@{
+                youtubeConfig = $ConfigName
+                youtubeHasClientCredentials = [bool]$YoutubeStatus.has_client_credentials
+                youtubeOauthClientType = [string]$YoutubeStatus.oauth_client_type
+            } | ConvertTo-Json -Depth 3
 
             $Success = $true
             break
