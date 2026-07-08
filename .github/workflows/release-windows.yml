@@ -249,6 +249,9 @@ jobs:
           if ([string]::IsNullOrWhiteSpace($env:CASTARRO_YOUTUBE_CLIENT_ID)) {
             throw "CASTARRO_YOUTUBE_CLIENT_ID is not configured. Refusing to publish an installer with missing YouTube owner OAuth credentials."
           }
+          if ([string]::IsNullOrWhiteSpace($env:CASTARRO_YOUTUBE_CLIENT_SECRET)) {
+            throw "CASTARRO_YOUTUBE_CLIENT_SECRET is not configured. This OAuth client requires a secret during token exchange."
+          }
 
           $SeedDir = "desktop/resources/seed-data"
           New-Item -ItemType Directory -Force -Path $SeedDir | Out-Null

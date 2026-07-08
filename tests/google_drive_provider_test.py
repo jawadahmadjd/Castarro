@@ -58,14 +58,14 @@ def main() -> int:
                 "http://127.0.0.1:8765/oauth2redirect",
                 code_verifier="verifier",
             )
-            assert "client_secret" not in captured[-1], captured[-1]
+            assert captured[-1]["client_secret"] == "stale-secret-that-google-would-reject", captured[-1]
 
             google_drive_provider.refresh_access_token(
                 root,
                 desktop_provider,
                 {"refresh_token": "refresh-token"},
             )
-            assert "client_secret" not in captured[-1], captured[-1]
+            assert captured[-1]["client_secret"] == "stale-secret-that-google-would-reject", captured[-1]
     finally:
         youtube_service.request_json = original_request_json
 

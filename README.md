@@ -344,7 +344,7 @@ Release build:
 npm run dist
 ```
 
-`npm run dist` also creates `desktop/resources/seed-data/youtube.oauth.seed.json` from YouTube OAuth environment variables or the local `config.json`. That generated seed is ignored by Git, but it is bundled into the installer so a fresh PC can show the YouTube Connect flow. For the default desktop OAuth flow, use a Desktop client ID with PKCE; any configured client secret is ignored during token requests so a stale secret cannot break reconnects. Only set `CASTARRO_YOUTUBE_CLIENT_SECRET` or `youtube.client_secret` when `youtube.oauth_client_type` is `web`.
+`npm run dist` also creates `desktop/resources/seed-data/youtube.oauth.seed.json` from YouTube OAuth environment variables or the local `config.json`. That generated seed is ignored by Git, but it is bundled into the installer so a fresh PC can show the YouTube Connect flow. For the default desktop OAuth flow, use a Desktop client ID with PKCE and keep its generated client secret configured; Google may require that secret during token exchange even for Desktop OAuth clients.
 
 Before creating the installer, place these runtime files in the resource slots:
 

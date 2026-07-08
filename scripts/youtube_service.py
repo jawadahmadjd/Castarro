@@ -81,9 +81,7 @@ YOUTUBE_EMOJI_SHORTCODE_FALLBACKS = {
 def missing_client_secret_message() -> str:
     return (
         "Google rejected this OAuth client because its client secret is missing. "
-        "If this is a Web OAuth client, set YouTube OAuth client type to web and keep the client secret configured, "
-        "then reconnect this YouTube account. If you want desktop OAuth, create a Desktop OAuth client ID in Google Cloud, "
-        "set the client type to desktop, and reconnect."
+        "Set the YouTube OAuth client secret in the owner credentials, then reconnect this YouTube account."
     )
 
 
@@ -165,9 +163,7 @@ def merge_settings(config: dict[str, Any], redirect_uri: str | None = None) -> d
 
 
 def token_request_client_secret(oauth_settings: dict[str, Any]) -> str:
-    """Return the client secret only for confidential OAuth clients."""
-    if oauth_settings.get("oauth_client_type") != "web":
-        return ""
+    """Return the configured OAuth client secret for token requests."""
     return str(oauth_settings.get("client_secret") or "").strip()
 
 

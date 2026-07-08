@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""OAuth token request contracts for public desktop and web clients."""
+"""OAuth token request contracts for desktop and web clients."""
 
 from __future__ import annotations
 
@@ -48,7 +48,7 @@ def main() -> int:
                 "auth-code",
                 code_verifier="verifier",
             )
-            assert "client_secret" not in captured[-1], captured[-1]
+            assert captured[-1]["client_secret"] == "stale-secret-that-google-would-reject", captured[-1]
             assert captured[-1]["code_verifier"] == "verifier", captured[-1]
 
             youtube_service.refresh_access_token(
@@ -56,7 +56,7 @@ def main() -> int:
                 desktop_config,
                 {"refresh_token": "refresh-token"},
             )
-            assert "client_secret" not in captured[-1], captured[-1]
+            assert captured[-1]["client_secret"] == "stale-secret-that-google-would-reject", captured[-1]
 
             web_config = {
                 "youtube": {
@@ -98,13 +98,19 @@ def main() -> int:
             try:
                 youtube_service.refresh_access_token(
                     root,
-                    desktop_config,
+                    {
+                        "youtube": {
+                            "client_id": "desktop-client.apps.googleusercontent.com",
+                            "oauth_client_type": "desktop",
+                            "tokens_file": "desktop_no_secret_tokens.json",
+                        }
+                    },
                     {"refresh_token": "refresh-token"},
                 )
             except ValueError as exc:
                 message = str(exc).lower()
-                assert "web oauth client" in message, exc
-                assert "desktop oauth client id" in message, exc
+                assert "client secret" in message, exc
+                assert "owner credentials" in message, exc
             else:
                 raise AssertionError("Refresh should explain Google's missing client secret error.")
     finally:
