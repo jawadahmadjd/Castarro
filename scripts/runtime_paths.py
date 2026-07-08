@@ -209,7 +209,8 @@ def apply_youtube_owner_seed(config: dict[str, Any]) -> bool:
         missing = current is None or (isinstance(current, str) and not current.strip())
         if field == "scopes":
             missing = not current
-        if missing:
+        stale = field in YOUTUBE_OWNER_FIELDS and current != value
+        if missing or stale:
             youtube[field] = value
             changed = True
     return changed
