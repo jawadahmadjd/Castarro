@@ -531,6 +531,12 @@ def task_progress(
             progress["message"] = line
             continue
 
+        output_dir_match = re.search(r"^OUTPUT_DIR path=(.+)$", line)
+        if output_dir_match:
+            progress["output_dir"] = output_dir_match.group(1)
+            progress["message"] = f"Saving to {output_dir_match.group(1)}"
+            continue
+
         task_match = re.search(r"^TASK channel=(.+) total=(\d+)", line)
         if task_match:
             progress["channel"] = task_match.group(1)
@@ -559,11 +565,27 @@ def task_progress(
             progress["percent"] = file_percent
             continue
 
+        output_match = re.search(r"^OUTPUT file=(\d+) total=(\d+) path=(.+)$", line)
+        if output_match:
+            current = int(output_match.group(1))
+            total = int(output_match.group(2))
+            output_path = output_match.group(3)
+            progress["current"] = current
+            progress["total"] = total
+            progress["last_output"] = output_path
+            progress["message"] = f"Saved {current} of {total}: {output_path}"
+            continue
+
     if not running:
         progress["percent"] = 100 if returncode == 0 else progress["percent"]
         progress["file_percent"] = progress["percent"]
         if returncode == 0:
-            progress["message"] = "Finished"
+            if progress.get("last_output"):
+                progress["message"] = f"Finished. Last saved: {progress['last_output']}"
+            elif progress.get("output_dir"):
+                progress["message"] = f"Finished. Saved to {progress['output_dir']}"
+            else:
+                progress["message"] = "Finished"
         elif lines:
             progress["message"] = lines[-1]
 

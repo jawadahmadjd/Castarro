@@ -144,6 +144,12 @@ def _youtube_owner_settings_from_env() -> dict[str, Any]:
     return settings
 
 
+def _append_youtube_owner_seed_candidates(candidates: list[Path], value: Path) -> None:
+    candidates.append(value)
+    for name in YOUTUBE_OWNER_SEED_FILES:
+        candidates.append(value / name)
+
+
 def youtube_owner_seed_settings() -> dict[str, Any]:
     env_settings = _youtube_owner_settings_from_env()
     if env_settings:
@@ -152,7 +158,7 @@ def youtube_owner_seed_settings() -> dict[str, Any]:
     candidates: list[Path] = []
     explicit = os.environ.get("STREAM_YOUTUBE_OAUTH_SEED")
     if explicit:
-        candidates.append(Path(explicit).expanduser())
+        _append_youtube_owner_seed_candidates(candidates, Path(explicit).expanduser())
 
     roots: list[Path] = [DATA_ROOT]
     legacy_env = os.environ.get("STREAM_LEGACY_ROOT")
@@ -166,6 +172,9 @@ def youtube_owner_seed_settings() -> dict[str, Any]:
         ]
     )
     for root in roots:
+        seed_data = root / "seed-data"
+        if seed_data not in roots:
+            _append_youtube_owner_seed_candidates(candidates, seed_data)
         for name in YOUTUBE_OWNER_SEED_FILES:
             candidates.append(root / name)
 

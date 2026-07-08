@@ -94,7 +94,50 @@ def assert_owner_oauth_seed_does_not_overwrite_existing_credentials() -> None:
                 os.environ["STREAM_LEGACY_ROOT"] = original_legacy_root
 
 
+def assert_explicit_owner_oauth_seed_wins_over_legacy_root() -> None:
+    original_data_root = runtime_paths.DATA_ROOT
+    original_code_root = runtime_paths.CODE_ROOT
+    original_legacy_root = os.environ.get("STREAM_LEGACY_ROOT")
+    original_explicit_seed = os.environ.get("STREAM_YOUTUBE_OAUTH_SEED")
+
+    with tempfile.TemporaryDirectory() as temp:
+        temp_root = Path(temp)
+        data_root = temp_root / "data"
+        legacy_root = temp_root / "legacy-data"
+        bundled_seed_root = temp_root / "runtime" / "seed-data"
+        legacy_root.mkdir(parents=True)
+        bundled_seed_root.mkdir(parents=True)
+        (bundled_seed_root / "youtube.oauth.seed.json").write_text(
+            json.dumps({"youtube": {"client_id": "bundled-client", "client_secret": "bundled-secret"}}),
+            encoding="utf-8",
+        )
+
+        try:
+            runtime_paths.DATA_ROOT = data_root
+            runtime_paths.CODE_ROOT = temp_root / "runtime" / "app"
+            os.environ["STREAM_LEGACY_ROOT"] = str(legacy_root)
+            os.environ["STREAM_YOUTUBE_OAUTH_SEED"] = str(bundled_seed_root / "youtube.oauth.seed.json")
+
+            config = {"youtube": {"client_id": "", "client_secret": ""}}
+
+            assert runtime_paths.apply_youtube_owner_seed(config)
+            assert config["youtube"]["client_id"] == "bundled-client"
+            assert config["youtube"]["client_secret"] == "bundled-secret"
+        finally:
+            runtime_paths.DATA_ROOT = original_data_root
+            runtime_paths.CODE_ROOT = original_code_root
+            if original_legacy_root is None:
+                os.environ.pop("STREAM_LEGACY_ROOT", None)
+            else:
+                os.environ["STREAM_LEGACY_ROOT"] = original_legacy_root
+            if original_explicit_seed is None:
+                os.environ.pop("STREAM_YOUTUBE_OAUTH_SEED", None)
+            else:
+                os.environ["STREAM_YOUTUBE_OAUTH_SEED"] = original_explicit_seed
+
+
 if __name__ == "__main__":
     assert_owner_oauth_seed_fills_missing_credentials()
     assert_owner_oauth_seed_does_not_overwrite_existing_credentials()
+    assert_explicit_owner_oauth_seed_wins_over_legacy_root()
     print("youtube owner seed tests passed")

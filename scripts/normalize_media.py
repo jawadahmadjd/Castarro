@@ -529,6 +529,19 @@ def remove_stale_encoding_outputs(channel_dir: Path) -> None:
             path.unlink(missing_ok=True)
 
 
+def print_output_dir(path: Path) -> None:
+    print(f"OUTPUT_DIR path={path.resolve()}", flush=True)
+
+
+def confirm_encoded_output(path: Path, file_index: int, total_files: int) -> None:
+    if not path.exists() or not path.is_file():
+        raise SystemExit(f"Encoded file was not created: {path}")
+    if path.stat().st_size <= 0:
+        path.unlink(missing_ok=True)
+        raise SystemExit(f"Encoded file was empty and was removed: {path}")
+    print(f"OUTPUT file={file_index} total={total_files} path={path.resolve()}", flush=True)
+
+
 def relative_or_absolute(config_dir: Path, path: Path) -> str:
     try:
         return path.resolve().relative_to(config_dir).as_posix()
@@ -551,6 +564,7 @@ def normalize_channel(
     channel_dir = normalized_root / str(channel["name"])
     channel_dir.mkdir(parents=True, exist_ok=True)
     remove_stale_encoding_outputs(channel_dir)
+    print_output_dir(channel_dir)
     selected_profile = resolve_encoder_profile(ffmpeg_path, profile(config, channel))
 
     normalized_files: list[Path] = []
@@ -572,6 +586,7 @@ def normalize_channel(
             normalized_files.append(existing_output)
             print(f"FILE {index}/{len(sources)} skip {source.name} -> {existing_output.name}", flush=True)
             print(f"PROGRESS file={index} total={len(sources)} percent=100", flush=True)
+            print(f"OUTPUT file={index} total={len(sources)} path={existing_output.resolve()}", flush=True)
             continue
 
         output = default_output
@@ -623,6 +638,7 @@ def normalize_channel(
                 )
             raise SystemExit(f"FFmpeg failed for {source} with exit code {signed_return_code(returncode)}")
         temp_output.replace(output)
+        confirm_encoded_output(output, index, len(sources))
 
     ready_channel = dict(channel)
     ready_channel["playlist"] = [
@@ -657,6 +673,7 @@ def normalize_channel_renditions(
     channel_dir = normalized_root / str(channel["name"])
     channel_dir.mkdir(parents=True, exist_ok=True)
     remove_stale_encoding_outputs(channel_dir)
+    print_output_dir(channel_dir)
 
     sources = channel_normalized_sources(config, config_dir, channel)
     if not sources:
@@ -730,6 +747,7 @@ def normalize_channel_renditions(
                 )
             raise SystemExit(f"FFmpeg failed for {source} with exit code {signed_return_code(returncode)}")
         temp_output.replace(output)
+        confirm_encoded_output(output, job_index, total)
 
     ready_channel = dict(channel)
     ready_channel["rendition_playlist"] = [

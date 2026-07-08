@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import tempfile
 from pathlib import Path
 import sys
@@ -234,6 +236,54 @@ def assert_renditions_only_encodes_single_selected_lower_rung() -> None:
     assert len(ready_channel["rendition_playlist"]) == 1
 
 
+def assert_normalize_reports_verified_output_path() -> None:
+    with tempfile.TemporaryDirectory(prefix="castarro-normalize-output-test-", dir=str(ROOT)) as temp_dir:
+        temp_root = Path(temp_dir)
+        source = temp_root / "Raw Videos" / "channel_1" / "source.mp4"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_bytes(b"source")
+        config = make_config()
+        config["defaults"]["ffprobe_path"] = "ffprobe"
+        config["normalize_profile"] = {"video_encoder": "libx264"}
+        channel = dict(config["channels"][0])
+        channel["raw_playlist"] = ["Raw Videos/channel_1/source.mp4"]
+
+        original_build = normalize_media.build_ffmpeg_command
+        original_probe_duration = normalize_media.probe_duration
+        original_resolve_encoder = normalize_media.resolve_encoder_profile
+        original_run = normalize_media.run_ffmpeg_with_progress
+
+        def fake_build(_ffmpeg_path: str, _source: Path, output: Path, _selected_profile: dict) -> list[str]:
+            return ["fake-ffmpeg", str(output)]
+
+        def fake_run(command: list[str], _duration: float | None, file_index: int, total_files: int) -> tuple[int, list[str]]:
+            Path(command[-1]).write_bytes(b"encoded")
+            print(f"PROGRESS file={file_index} total={total_files} percent=100", flush=True)
+            return 0, []
+
+        normalize_media.build_ffmpeg_command = fake_build
+        normalize_media.probe_duration = lambda _ffprobe_path, _source: 1.0
+        normalize_media.resolve_encoder_profile = lambda _ffmpeg_path, selected_profile: selected_profile
+        normalize_media.run_ffmpeg_with_progress = fake_run
+        try:
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                ready_channel, outputs = normalize_media.normalize_channel(config, temp_root, channel, False, False)
+            output = temp_root / "Go Live" / "channel_1" / "0001-source.mp4"
+            log_text = buffer.getvalue()
+            assert outputs == [output]
+            assert output.exists() and output.read_bytes() == b"encoded"
+            assert not list(output.parent.glob("*.encoding.*"))
+            assert ready_channel["playlist"] == ["Go Live/channel_1/0001-source.mp4"]
+            assert f"OUTPUT_DIR path={output.parent.resolve()}" in log_text
+            assert f"OUTPUT file=1 total=1 path={output.resolve()}" in log_text
+        finally:
+            normalize_media.build_ffmpeg_command = original_build
+            normalize_media.probe_duration = original_probe_duration
+            normalize_media.resolve_encoder_profile = original_resolve_encoder
+            normalize_media.run_ffmpeg_with_progress = original_run
+
+
 def assert_nvenc_driver_failure_falls_back_to_libx264_profile() -> None:
     reason = normalize_media.hardware_encoder_fallback_reason(
         "h264_nvenc",
@@ -323,6 +373,7 @@ def main() -> int:
     assert_adaptive_stream_builds_bounded_ladder_buffer()
     assert_renditions_only_prints_lower_resolution_commands()
     assert_renditions_only_encodes_single_selected_lower_rung()
+    assert_normalize_reports_verified_output_path()
     assert_nvenc_driver_failure_falls_back_to_libx264_profile()
     assert_auto_encoder_selects_first_working_machine_encoder()
     assert_auto_encoder_can_fall_back_to_cpu_when_no_gpu_works()

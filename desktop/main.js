@@ -1409,6 +1409,11 @@ function startBackend(port, { persistent = true } = {}) {
   const scriptsDir = path.join(backendCodeRoot, "scripts");
   const legacyRoot = process.env.STREAM_LEGACY_ROOT
     || runtime.seedRoot;
+  const youtubeOauthSeed = process.env.STREAM_YOUTUBE_OAUTH_SEED || firstExisting([
+    path.join(backendResourcesRoot, "seed-data", "youtube.oauth.seed.json"),
+    legacyRoot ? path.join(legacyRoot, "youtube.oauth.seed.json") : "",
+    path.join(backendCodeRoot, "desktop", "resources", "seed-data", "youtube.oauth.seed.json"),
+  ]);
 
   const env = {
     ...process.env,
@@ -1422,11 +1427,13 @@ function startBackend(port, { persistent = true } = {}) {
   };
   if (ffmpegPath) env.STREAM_FFMPEG_PATH = ffmpegPath;
   if (ffprobePath) env.STREAM_FFPROBE_PATH = ffprobePath;
+  if (youtubeOauthSeed) env.STREAM_YOUTUBE_OAUTH_SEED = youtubeOauthSeed;
 
   diagnosticLog(`backend python ${python}`);
   diagnosticLog(`backend script ${scriptPath}`);
   diagnosticLog(`backend cwd ${dataRoot()}`);
   diagnosticLog(`backend code root ${backendCodeRoot}`);
+  if (youtubeOauthSeed) diagnosticLog(`backend youtube oauth seed ${youtubeOauthSeed}`);
   const child = spawn(python, [scriptPath], {
     cwd: dataRoot(),
     env,

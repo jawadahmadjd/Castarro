@@ -9569,18 +9569,23 @@ async function startSettingsTask(action, index, { startIndex = 1, chooseOutputFo
   }
 
   state.activeSettingsChannelIndex = index;
+  let selectedOutputFolder = "";
   if (action === "normalize" && chooseOutputFolder) {
     const outputFolder = await chooseEncodeOutputFolder(data);
     if (!outputFolder) {
       toast("Encoding canceled.");
       return;
     }
+    selectedOutputFolder = outputFolder;
     data.defaults = data.defaults || {};
     data.defaults.normalized_dir = outputFolder;
     state.configData = data;
     syncConfigEditor();
   }
   await saveConfigData(data);
+  if (selectedOutputFolder) {
+    toast(`Encoding will save inside ${selectedOutputFolder}\\${channel.name}.`);
+  }
   await startTask(action, channel.name, false, startIndex);
 }
 
