@@ -806,6 +806,17 @@ SYNC_THREAD: threading.Thread | None = None
 SYNC_LOCK = threading.Lock()
 
 
+def request_stop_running_stream(
+    running: stream_manager.RunningStream,
+    *,
+    source: str,
+    reason: str = "",
+) -> None:
+    running.stop_request_source = str(source or "").strip()
+    running.stop_request_reason = str(reason or "").strip()
+    stream_manager.stop_stream(running)
+
+
 def stream_cycle_runtime_items_locked() -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     for (config_name, channel_name), runtime in STATE.stream_cycle_channels.items():
@@ -2997,6 +3008,113 @@ def clear_youtube_broadcast_link(config_name: str, config: dict[str, Any], chann
     )
 
 
+YOUTUBE_TERMINAL_LIFECYCLE_STATUSES = {"complete", "revoked"}
+YOUTUBE_STALE_LIFECYCLE_STATUSES = YOUTUBE_TERMINAL_LIFECYCLE_STATUSES | {"missing"}
+
+
+def youtube_start_replacement_times() -> tuple[str, str]:
+    start = datetime.now().astimezone() + timedelta(minutes=1)
+    end = start + timedelta(hours=12)
+    return start.isoformat(timespec="seconds"), end.isoformat(timespec="seconds")
+
+
+def replace_stale_youtube_broadcast_for_start(
+    config_name: str,
+    config: dict[str, Any],
+    channel: dict[str, Any],
+) -> bool:
+    channel_name = str(channel.get("name") or "").strip()
+    broadcast_id = str(channel.get("youtube_broadcast_id") or "").strip()
+    if not channel_name or not broadcast_id:
+        return False
+
+    account_id = channel_account_id(config, channel)
+    account = find_youtube_account(config, account_id)
+    if not account:
+        return False
+
+    try:
+        scoped_config = account_config_view(config, account)
+        access_token, _tokens = youtube_service.valid_access_token(ROOT, scoped_config)
+        profile = cached_connected_account_profile(config_name, account, access_token)
+        mismatch_message = youtube_profile_mismatch_message(channel_name or youtube_account_expected_channel_name(config, account), profile)
+        if mismatch_message:
+            raise ValueError(mismatch_message)
+        broadcast = youtube_service.broadcast_by_id(access_token, broadcast_id)
+    except Exception as exc:
+        app_db.record_event(
+            "youtube_prestart_broadcast_check_failed",
+            config_name,
+            channel_name,
+            {"broadcast_id": broadcast_id, "message": str(exc)},
+        )
+        return False
+
+    lifecycle = "missing" if not broadcast else str(broadcast.get("life_cycle_status") or "").strip().lower()
+    if lifecycle not in YOUTUBE_STALE_LIFECYCLE_STATUSES:
+        return False
+
+    settings = youtube_service.merge_settings(config)
+    privacy_status = str(settings.get("default_privacy_status") or "unlisted").strip().lower()
+    if privacy_status not in {"private", "unlisted", "public"}:
+        privacy_status = "unlisted"
+    auto_start = bool(channel.get("youtube_auto_start", settings.get("default_auto_start", True)))
+    auto_stop = bool(channel.get("youtube_auto_stop", settings.get("default_auto_stop", True)))
+    scheduled_start_time, scheduled_end_time = youtube_start_replacement_times()
+    title = stream_live_title({**channel, "youtube_broadcast_title": str((broadcast or {}).get("title") or channel.get("youtube_broadcast_title") or "")})
+
+    created = youtube_service.schedule_broadcast(
+        access_token,
+        title=title,
+        description="Auto-created by Castarro after the previous YouTube broadcast ended.",
+        scheduled_start_time=scheduled_start_time,
+        scheduled_end_time=scheduled_end_time,
+        privacy_status=privacy_status,
+        auto_start=auto_start,
+        auto_stop=auto_stop,
+    )
+    stream_name = str(created.get("stream", {}).get("stream_name") or "").strip()
+    if stream_name:
+        channel["stream_key_env"] = stream_name
+    channel["youtube_account_id"] = account_id
+    channel["youtube_auto_start"] = auto_start
+    channel["youtube_auto_stop"] = auto_stop
+    if "youtube_dual_stream" not in channel:
+        channel["youtube_dual_stream"] = True
+    channel["youtube_studio_url"] = str(created.get("broadcast", {}).get("studio_url") or "")
+    channel["youtube_broadcast_id"] = str(created.get("broadcast", {}).get("id") or "")
+    channel["youtube_stream_id"] = str(created.get("stream", {}).get("id") or "")
+    channel["youtube_broadcast_title"] = title
+    save_config(config_name, config)
+    clear_youtube_account_caches(config_name, account_id)
+    app_db.record_event(
+        "youtube_broadcast_replaced_on_start",
+        config_name,
+        channel_name,
+        {
+            "old_broadcast_id": broadcast_id,
+            "old_life_cycle_status": lifecycle,
+            "new_broadcast_id": channel["youtube_broadcast_id"],
+            "new_stream_id": channel["youtube_stream_id"],
+            "auto_start": auto_start,
+            "auto_stop": auto_stop,
+        },
+    )
+    return True
+
+
+def ensure_youtube_broadcasts_ready_for_start(
+    config_name: str,
+    config: dict[str, Any],
+    channel_name: str | None,
+) -> list[str]:
+    replaced: list[str] = []
+    for channel in stream_manager.enabled_channels(config, channel_name):
+        if replace_stale_youtube_broadcast_for_start(config_name, config, channel):
+            replaced.append(str(channel.get("name") or ""))
+    return replaced
+
+
 def is_youtube_quota_error(exc: BaseException) -> bool:
     text = str(exc or "").lower()
     return "quotaexceeded" in text or "exceeded your quota" in text or "quota exceeded" in text
@@ -5003,6 +5121,7 @@ def emit_alert(
 def start_stream(config_name: str, channel_name: str | None) -> list[str]:
     config, config_dir = stream_manager.load_config((ROOT / config_name).resolve())
     normalize_scheduler_settings(config)
+    ensure_youtube_broadcasts_ready_for_start(config_name, config, channel_name)
     channels = stream_manager.enabled_channels(config, channel_name)
     started: list[str] = []
     for channel in channels:
@@ -5083,7 +5202,11 @@ def switch_adaptive_stream(
     old_assets = list(state.cloud_asset_ids)
     try:
         old_running.stop_requested = True
-        stream_manager.stop_stream(old_running)
+        request_stop_running_stream(
+            old_running,
+            source="adaptive_variant_switch",
+            reason=f"switching to {target_variant_id}: {reason}",
+        )
         unregister_cloud_assets(old_assets)
         running = stream_manager.start_stream(config_dir, config, prepared_channel)
     except Exception as exc:
@@ -5118,7 +5241,7 @@ def stop_preview(channel_name: str | None = None) -> str | None:
             return None
         if channel_name and preview.channel_name != channel_name:
             return None
-        stream_manager.stop_stream(preview.running)
+        request_stop_running_stream(preview.running, source="preview_stop", reason="preview stop requested")
         if preview.running.preview_manifest:
             stream_manager.clear_directory(preview.running.preview_manifest.parent)
         app_db.record_event(
@@ -5161,7 +5284,11 @@ def start_preview(config_name: str, channel_name: str | None) -> dict[str, Any]:
             return preview.as_dict()
 
         if preview:
-            stream_manager.stop_stream(preview.running)
+            request_stop_running_stream(
+                preview.running,
+                source="preview_replace",
+                reason=f"starting preview for {channel_name}",
+            )
             if preview.running.preview_manifest:
                 stream_manager.clear_directory(preview.running.preview_manifest.parent)
             app_db.record_event(
@@ -5179,7 +5306,13 @@ def start_preview(config_name: str, channel_name: str | None) -> dict[str, Any]:
         return STATE.preview.as_dict()
 
 
-def stop_stream(channel_name: str | None, *, clear_cycle_runtime: bool = True) -> list[str]:
+def stop_stream(
+    channel_name: str | None,
+    *,
+    clear_cycle_runtime: bool = True,
+    request_source: str = "manual",
+    request_reason: str = "",
+) -> list[str]:
     stopped: list[str] = []
     cycle_runtime_changed = False
     with STATE.lock:
@@ -5192,7 +5325,11 @@ def stop_stream(channel_name: str | None, *, clear_cycle_runtime: bool = True) -
                 continue
             if STATE.preview and STATE.preview.channel_name == name:
                 preview = STATE.preview
-                stream_manager.stop_stream(preview.running)
+                request_stop_running_stream(
+                    preview.running,
+                    source=f"{request_source}:preview",
+                    reason=request_reason or f"stopping live stream for {name}",
+                )
                 if preview.running.preview_manifest:
                     stream_manager.clear_directory(preview.running.preview_manifest.parent)
                 app_db.record_event(
@@ -5207,7 +5344,7 @@ def stop_stream(channel_name: str | None, *, clear_cycle_runtime: bool = True) -
             if clear_cycle_runtime and STATE.stream_cycle_channels.pop((state.config_name, name), None) is not None:
                 cycle_runtime_changed = True
             state.running.stop_requested = True
-            stream_manager.stop_stream(state.running)
+            request_stop_running_stream(state.running, source=request_source, reason=request_reason)
             if state.running.preview_manifest:
                 stream_manager.clear_directory(state.running.preview_manifest.parent)
             unregister_cloud_assets(state.cloud_asset_ids)
@@ -5218,7 +5355,12 @@ def stop_stream(channel_name: str | None, *, clear_cycle_runtime: bool = True) -
                 "stream_stopped",
                 state.config_name,
                 name,
-                {"returncode": state.running.process.returncode, "transferred_bytes": transferred_bytes},
+                {
+                    "returncode": state.running.process.returncode,
+                    "transferred_bytes": transferred_bytes,
+                    "stop_source": request_source,
+                    "stop_reason": request_reason,
+                },
             )
             stopped.append(name)
     if cycle_runtime_changed:
@@ -5412,6 +5554,19 @@ def reconnect_delay_seconds(config: dict[str, Any] | None, channel: dict[str, An
         return 10.0
 
 
+def stream_stall_restart_seconds(config: dict[str, Any] | None, channel: dict[str, Any] | None = None) -> float:
+    defaults = config.get("defaults", {}) if isinstance(config, dict) else {}
+    channel = channel if isinstance(channel, dict) else {}
+    raw = channel.get(
+        "stream_stall_restart_seconds",
+        defaults.get("stream_stall_restart_seconds", defaults.get("stall_restart_seconds", 30)),
+    )
+    try:
+        return max(0.0, min(float(raw), 300.0))
+    except (TypeError, ValueError):
+        return 30.0
+
+
 def is_youtube_api_network_error(exc: BaseException) -> bool:
     text = str(exc).lower()
     return "network error" in text or "timed out" in text or "temporary failure" in text or "name resolution" in text
@@ -5501,8 +5656,6 @@ def maybe_reconnect_youtube_stream(
     log_tail = tail_file(state.log_path, max_chars=20000)
     if not stream_manager.is_recoverable_network_exit(state.running.process.returncode, log_tail):
         return False
-    if not str(channel.get("youtube_broadcast_id") or "").strip():
-        return False
 
     delay_seconds = reconnect_delay_seconds(config, channel)
     with STATE.lock:
@@ -5515,8 +5668,7 @@ def maybe_reconnect_youtube_stream(
             return True
 
     decision, message = youtube_reconnect_decision(config, channel, state.config_name)
-    if decision in {"terminal", "unsupported"}:
-        reconnect_status = "youtube_terminal" if decision == "terminal" else "reconnect_unsupported"
+    if decision == "terminal":
         app_db.record_event(
             "stream_reconnect_abandoned",
             state.config_name,
@@ -5525,9 +5677,19 @@ def maybe_reconnect_youtube_stream(
         )
         with STATE.lock:
             state.recovering = False
-            state.last_reconnect_status = reconnect_status
+            state.last_reconnect_status = "youtube_terminal"
             state.last_reconnect_error = message
         return False
+
+    if decision == "unsupported":
+        app_db.record_event(
+            "stream_reconnect_unverified",
+            state.config_name,
+            channel_name,
+            {"reason": reason, "youtube_status": message},
+        )
+        message = f"{message} Restarting because FFmpeg exited with a recoverable network error."
+        decision = "recoverable"
 
     if decision != "recoverable":
         with STATE.lock:
@@ -5579,7 +5741,11 @@ def maybe_reconnect_youtube_stream(
             state.replace_running(running, cloud_asset_ids=cloud_asset_ids)
             STATE.stream_exit_recorded.discard((state.config_name, channel_name))
         else:
-            stream_manager.stop_stream(running)
+            request_stop_running_stream(
+                running,
+                source="reconnect_superseded",
+                reason=f"new process no longer owns {channel_name}",
+            )
             unregister_cloud_assets(cloud_asset_ids)
             return True
     app_db.record_event(
@@ -5592,6 +5758,107 @@ def maybe_reconnect_youtube_stream(
             "youtube_status": message,
             "attempts": state.reconnect_attempts,
         },
+    )
+    return True
+
+
+def restart_stalled_stream(
+    channel_name: str,
+    state: StreamState,
+    config: dict[str, Any] | None,
+    channel: dict[str, Any],
+    reason: str,
+) -> bool:
+    if not config or state.running.stop_requested or state.recovering:
+        return False
+    if not bool(channel.get("restart_on_exit", True)):
+        return False
+
+    config_dir = (ROOT / state.config_name).resolve().parent
+    old_running = state.running
+    old_assets = list(state.cloud_asset_ids)
+    cloud_asset_ids: list[str] = []
+    try:
+        prepared_channel, cloud_asset_ids = prepare_channel_cloud_playlist(config, channel)
+    except Exception as exc:
+        unregister_cloud_assets(cloud_asset_ids)
+        with STATE.lock:
+            state.reconnect_attempts += 1
+            mark_stream_reconnect_wait(
+                state,
+                state.config_name,
+                channel_name,
+                status="stall_restart_failed",
+                message=str(exc),
+                delay_seconds=reconnect_delay_seconds(config, channel),
+            )
+        app_db.record_event(
+            "stream_stall_restart_failed",
+            state.config_name,
+            channel_name,
+            {"reason": reason, "message": str(exc), "attempts": state.reconnect_attempts},
+        )
+        return False
+
+    write_timestamp = getattr(stream_manager, "write_timestamped_log_line", None)
+    if callable(write_timestamp):
+        try:
+            write_timestamp(old_running.log_handle, f"STALL_RESTART kind={old_running.kind} pid={old_running.process.pid} reason={json.dumps(reason)}")
+        except Exception:
+            pass
+    request_stop_running_stream(old_running, source="stall_restart", reason=reason)
+    unregister_cloud_assets(old_assets)
+    try:
+        running = stream_manager.start_stream(config_dir, config, prepared_channel)
+    except Exception as exc:
+        unregister_cloud_assets(cloud_asset_ids)
+        with STATE.lock:
+            state.recovering = True
+            state.reconnect_attempts += 1
+            mark_stream_reconnect_wait(
+                state,
+                state.config_name,
+                channel_name,
+                status="stall_restart_failed",
+                message=str(exc),
+                delay_seconds=reconnect_delay_seconds(config, channel),
+            )
+        app_db.record_event(
+            "stream_stall_restart_failed",
+            state.config_name,
+            channel_name,
+            {"reason": reason, "message": str(exc), "attempts": state.reconnect_attempts},
+        )
+        return False
+    with STATE.lock:
+        current = STATE.streams.get(channel_name)
+        if current is state:
+            state.reconnect_attempts += 1
+            state.replace_running(running, cloud_asset_ids=cloud_asset_ids)
+            STATE.stream_exit_recorded.discard((state.config_name, channel_name))
+            STATE.connection_watch.pop((state.config_name, channel_name), None)
+        else:
+            request_stop_running_stream(
+                running,
+                source="stall_restart_superseded",
+                reason=f"new process no longer owns {channel_name}",
+            )
+            unregister_cloud_assets(cloud_asset_ids)
+            return False
+    app_db.record_stream_start(
+        state.config_name,
+        channel_name,
+        running.process.pid,
+        subprocess.list2cmdline(running.command),
+        str(Path(running.log_handle.name)),
+        stream_live_title(prepared_channel),
+        str(prepared_channel.get("youtube_broadcast_id") or ""),
+    )
+    app_db.record_event(
+        "stream_stall_restarted",
+        state.config_name,
+        channel_name,
+        {"pid": running.process.pid, "reason": reason, "attempts": state.reconnect_attempts},
     )
     return True
 
@@ -5672,6 +5939,34 @@ def evaluate_stream_connection_health() -> None:
         watch_key = (state.config_name, channel_name)
         with STATE.lock:
             watch = dict(STATE.connection_watch.get(watch_key) or {})
+        stall_limit = stream_stall_restart_seconds(config, channel)
+        frame = stats.get("frame")
+        output_time = stats.get("output_time_seconds")
+        total_size = stats.get("total_size_bytes")
+        if stall_limit and stats.get("available") and output_time is not None and total_size is not None:
+            now = time.time()
+            previous_marker = (
+                watch.get("last_frame"),
+                watch.get("last_output_time_seconds"),
+                watch.get("last_total_size_bytes"),
+            )
+            current_marker = (frame, output_time, total_size)
+            if previous_marker == current_marker:
+                progress_seen_at = float(watch.get("progress_seen_at") or now)
+                stalled_seconds = max(0.0, now - progress_seen_at)
+                watch["stalled_seconds"] = stalled_seconds
+                if stalled_seconds >= stall_limit:
+                    reason = f"FFmpeg progress has not advanced for {stalled_seconds:.0f}s."
+                    with STATE.lock:
+                        STATE.connection_watch[watch_key] = watch
+                    if restart_stalled_stream(channel_name, state, config, channel, reason):
+                        continue
+            else:
+                watch["last_frame"] = frame
+                watch["last_output_time_seconds"] = output_time
+                watch["last_total_size_bytes"] = total_size
+                watch["progress_seen_at"] = now
+                watch["stalled_seconds"] = 0.0
         if severity:
             bad_count = int(watch.get("bad_count") or 0) + 1
             watch["bad_count"] = bad_count
@@ -5768,7 +6063,11 @@ def evaluate_scheduler_for_config(config_name: str, config: dict[str, Any]) -> N
                     {"message": str(exc)},
                 )
         elif not should_run and is_running and bool(runtime.get("controlled_run")):
-            stopped = stop_stream(channel_name)
+            stopped = stop_stream(
+                channel_name,
+                request_source="scheduler",
+                request_reason=f"daily schedule ended at {entry.get('stop_time')}",
+            )
             if stopped:
                 runtime["controlled_run"] = False
                 runtime["last_action"] = "stopped"
@@ -5873,7 +6172,15 @@ def evaluate_stream_cycles_for_config(config_name: str, config: dict[str, Any]) 
                 }
             )
             set_stream_cycle_runtime(runtime_key, runtime)
-            stopped = stop_stream(channel_name, clear_cycle_runtime=False)
+            stopped = stop_stream(
+                channel_name,
+                clear_cycle_runtime=False,
+                request_source="stream_cycle",
+                request_reason=(
+                    f"duration reached: elapsed={round(elapsed_seconds, 3)}s "
+                    f"limit={duration_seconds}s cooldown={actual_restart_delay}s"
+                ),
+            )
             if not stopped:
                 continue
             app_db.record_event(
@@ -6247,9 +6554,17 @@ def handle_sync_remote_control(token: str, body: dict[str, Any]) -> dict[str, An
     if action == "start":
         changed = start_stream(config_name, channel_name)
     elif action == "stop":
-        changed = stop_stream(channel_name)
+        changed = stop_stream(
+            channel_name,
+            request_source="mobile_remote",
+            request_reason=f"remote stop from {(record.get('device') or {}).get('deviceName') or 'Mobile device'}",
+        )
     else:
-        stop_stream(channel_name)
+        stop_stream(
+            channel_name,
+            request_source="mobile_remote",
+            request_reason=f"remote restart from {(record.get('device') or {}).get('deviceName') or 'Mobile device'}",
+        )
         changed = start_stream(config_name, channel_name)
     app_db.record_event(
         "remote_control_action",
@@ -6791,7 +7106,16 @@ class Handler(BaseHTTPRequestHandler):
 
             if parsed.path == "/api/stream/stop":
                 update_request_trace(self, channel_name=body.get("channel") or None)
-                stopped = stop_stream(body.get("channel") or None)
+                channel = body.get("channel") or None
+                stopped = stop_stream(
+                    channel,
+                    request_source="api_stream_stop",
+                    request_reason=(
+                        f"HTTP /api/stream/stop for {channel}"
+                        if channel
+                        else "HTTP /api/stream/stop with no channel; stop all streams"
+                    ),
+                )
                 json_response(self, {"ok": True, "stopped": stopped})
                 return
 
@@ -6828,7 +7152,15 @@ class Handler(BaseHTTPRequestHandler):
                 stop_streams = bool(body.get("stop_streams", True))
                 stop_tasks_requested = bool(body.get("stop_tasks", True))
                 STATE.stop_event.set()
-                stopped_streams = stop_stream(None) if stop_streams else []
+                stopped_streams = (
+                    stop_stream(
+                        None,
+                        request_source="system_shutdown",
+                        request_reason="HTTP /api/system/shutdown requested stop_streams",
+                    )
+                    if stop_streams
+                    else []
+                )
                 if stop_tasks_requested:
                     shutdown_tasks()
                 threading.Thread(target=self.server.shutdown, daemon=True).start()
@@ -6865,11 +7197,11 @@ def shutdown_streams() -> None:
         STATE.cloud_proxy = None
         STATE.cloud_proxy_settings = {}
     if preview:
-        stream_manager.stop_stream(preview.running)
+        request_stop_running_stream(preview.running, source="backend_shutdown", reason="backend shutdown")
         if preview.running.preview_manifest:
             stream_manager.clear_directory(preview.running.preview_manifest.parent)
     for state in streams:
-        stream_manager.stop_stream(state.running)
+        request_stop_running_stream(state.running, source="backend_shutdown", reason="backend shutdown")
         unregister_cloud_assets(state.cloud_asset_ids)
     if proxy:
         proxy.stop()

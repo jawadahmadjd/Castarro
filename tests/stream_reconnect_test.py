@@ -25,10 +25,17 @@ class FakeProcess:
         return self.returncode
 
 
-def fake_running_stream(channel_name: str, *, log_dir: Path, pid: int, returncode: int | None) -> stream_manager.RunningStream:
+def fake_running_stream(
+    channel_name: str,
+    *,
+    log_dir: Path,
+    pid: int,
+    returncode: int | None,
+    log_text: str | None = None,
+) -> stream_manager.RunningStream:
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f"{channel_name}-{pid}.log"
-    log_path.write_text("frame=10 fps=30.0 speed=1.0x\n", encoding="utf-8")
+    log_path.write_text(log_text or "frame=10 fps=30.0 speed=1.0x\n", encoding="utf-8")
     return stream_manager.RunningStream(
         channel={"name": channel_name},
         process=FakeProcess(pid, returncode),
@@ -133,20 +140,104 @@ def assert_network_exit_stops_when_youtube_is_complete() -> None:
     assert any(event == "stream_reconnect_abandoned" for event, _payload in events), "Terminal YouTube state should be logged."
 
 
-def assert_network_exit_stops_when_youtube_check_is_unsupported() -> None:
+def assert_network_exit_reconnects_when_youtube_check_is_unsupported() -> None:
     events, stops, state = run_with_reconnect_fakes(RuntimeError("quotaExceeded: quota exhausted"))
-    assert stops == [("Inside Us", 4294957242)], "Unsupported YouTube checks should not keep a dead FFmpeg process live."
-    assert state.running.process.pid == 1001, "FFmpeg should not restart when YouTube status cannot be verified."
-    assert not state.recovering, "Unsupported YouTube checks should clear recovering state."
-    assert state.last_reconnect_status == "reconnect_unsupported"
-    assert any(event == "stream_reconnect_abandoned" for event, _payload in events), "Unsupported checks should be logged."
+    assert not stops, "Recoverable network exits should not be recorded as stopped just because YouTube cannot be checked."
+    assert state.running.process.pid == 2002, "FFmpeg should restart optimistically when YouTube verification is unavailable."
+    assert state.running.process.poll() is None, "Replacement FFmpeg process should be active."
+    assert any(event == "stream_reconnect_unverified" for event, _payload in events), "Unverified reconnect should be logged."
+    assert any(event == "stream_reconnected" for event, _payload in events), "Reconnect event should be recorded."
+
+
+def assert_running_stream_restarts_when_progress_stalls() -> None:
+    original_state = web_ui.STATE
+    original_load_config_or_none = web_ui.load_config_or_none
+    original_start_stream = stream_manager.start_stream
+    original_stop_stream = stream_manager.stop_stream
+    original_record_event = app_db.record_event
+    original_record_stream_start = app_db.record_stream_start
+    original_youtube_stream_health = web_ui.youtube_stream_health_for_channel
+    original_unregister_cloud_assets = web_ui.unregister_cloud_assets
+
+    progress_log = "\n".join(
+        [
+            "frame=100",
+            "fps=30.0",
+            "total_size=123456",
+            "out_time_us=10000000",
+            "speed=1.0x",
+            "progress=continue",
+        ]
+    )
+    events: list[tuple[str, dict]] = []
+    starts: list[int] = []
+    stopped: list[int] = []
+
+    with tempfile.TemporaryDirectory(prefix="castarro-stream-stall-", dir=str(ROOT)) as temp_dir:
+        temp_root = Path(temp_dir)
+        config = base_config()
+        config["defaults"]["stream_stall_restart_seconds"] = 30
+        old_running = fake_running_stream(
+            "Inside Us",
+            log_dir=temp_root / "logs",
+            pid=1001,
+            returncode=None,
+            log_text=progress_log,
+        )
+        state = web_ui.StreamState("config.ready.json", old_running)
+
+        def fake_start_stream(_config_dir: Path, _config: dict, channel: dict):
+            starts.append(2002)
+            return fake_running_stream(str(channel.get("name") or ""), log_dir=temp_root / "logs", pid=2002, returncode=None)
+
+        def fake_stop_stream(running: stream_manager.RunningStream):
+            stopped.append(running.process.pid)
+            running.process.returncode = 1
+            running.stop_requested = True
+            running.log_handle.close()
+
+        try:
+            web_ui.STATE = web_ui.AppState()
+            web_ui.STATE.streams["Inside Us"] = state
+            web_ui.STATE.connection_watch[("config.ready.json", "Inside Us")] = {
+                "last_frame": 100,
+                "last_output_time_seconds": 10.0,
+                "last_total_size_bytes": 123456,
+                "progress_seen_at": __import__("time").time() - 60,
+            }
+            web_ui.load_config_or_none = lambda _config_name: (config, None)
+            stream_manager.start_stream = fake_start_stream
+            stream_manager.stop_stream = fake_stop_stream
+            app_db.record_event = lambda event, _config, _channel, payload=None: events.append((event, dict(payload or {})))
+            app_db.record_stream_start = lambda *_args, **_kwargs: None
+            web_ui.youtube_stream_health_for_channel = lambda *_args, **_kwargs: None
+            web_ui.unregister_cloud_assets = lambda _asset_ids: None
+
+            web_ui.evaluate_stream_connection_health()
+
+            assert stopped == [1001], "Stalled FFmpeg process should be stopped."
+            assert starts == [2002], "Replacement FFmpeg process should be started."
+            assert state.running.process.pid == 2002, "Stream state should point at the replacement process."
+            assert any(event == "stream_stall_restarted" for event, _payload in events), "Stall restart should be logged."
+        finally:
+            if state.running.log_handle and not state.running.log_handle.closed:
+                state.running.log_handle.close()
+            web_ui.STATE = original_state
+            web_ui.load_config_or_none = original_load_config_or_none
+            stream_manager.start_stream = original_start_stream
+            stream_manager.stop_stream = original_stop_stream
+            app_db.record_event = original_record_event
+            app_db.record_stream_start = original_record_stream_start
+            web_ui.youtube_stream_health_for_channel = original_youtube_stream_health
+            web_ui.unregister_cloud_assets = original_unregister_cloud_assets
 
 
 def main() -> int:
     assert stream_manager.is_recoverable_network_exit(4294957242)
     assert_network_exit_reconnects_when_youtube_is_live()
     assert_network_exit_stops_when_youtube_is_complete()
-    assert_network_exit_stops_when_youtube_check_is_unsupported()
+    assert_network_exit_reconnects_when_youtube_check_is_unsupported()
+    assert_running_stream_restarts_when_progress_stalls()
     print("stream_reconnect_test: PASS")
     return 0
 

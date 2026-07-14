@@ -83,6 +83,8 @@ class RunningStream:
     log_redactions: tuple[tuple[str, str], ...] = ()
     playlist_path: Path | None = None
     stop_requested: bool = False
+    stop_request_source: str = ""
+    stop_request_reason: str = ""
 
 
 def load_config(config_path: Path) -> tuple[dict[str, Any], Path]:
@@ -827,6 +829,8 @@ def build_command(
         "pipe:1",
         "-stats_period",
         "1",
+        "-thread_queue_size",
+        "10240",
         "-re",
     ]
 
@@ -947,6 +951,8 @@ def build_preview_command(
         "pipe:1",
         "-stats_period",
         "1",
+        "-thread_queue_size",
+        "10240",
         "-re",
     ]
 
@@ -1108,7 +1114,14 @@ def stop_stream(stream: RunningStream) -> None:
     if stream.process.poll() is None:
         stream.stop_requested = True
         print(f"[{name}] stopping pid {stream.process.pid}")
-        write_timestamped_log_line(stream.log_handle, f"STOP_REQUEST kind={stream.kind} pid={stream.process.pid}")
+        stop_parts = [f"STOP_REQUEST kind={stream.kind}", f"pid={stream.process.pid}"]
+        source = str(getattr(stream, "stop_request_source", "") or "").strip()
+        reason = str(getattr(stream, "stop_request_reason", "") or "").strip()
+        if source:
+            stop_parts.append(f"source={json.dumps(source)}")
+        if reason:
+            stop_parts.append(f"reason={json.dumps(reason)}")
+        write_timestamped_log_line(stream.log_handle, " ".join(stop_parts))
         try:
             if os.name == "nt":
                 stream.process.send_signal(signal.CTRL_BREAK_EVENT)

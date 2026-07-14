@@ -80,7 +80,7 @@ def assert_remote_control_dispatches_expected_action() -> None:
             "device": {"deviceName": "Pixel 9"},
         }
         web_ui.start_stream = lambda config_name, channel_name: calls.append(("start", str(channel_name))) or [str(channel_name)]  # type: ignore[assignment]
-        web_ui.stop_stream = lambda channel_name: calls.append(("stop", str(channel_name))) or [str(channel_name)]  # type: ignore[assignment]
+        web_ui.stop_stream = lambda channel_name, **_kwargs: calls.append(("stop", str(channel_name))) or [str(channel_name)]  # type: ignore[assignment]
         web_ui.assert_youtube_channel_keys_match = lambda config_name, channel_name: calls.append(("verify", str(channel_name)))  # type: ignore[assignment]
         web_ui.remote_status_for_record = lambda record: {"ok": True, "channels": []}  # type: ignore[assignment]
 

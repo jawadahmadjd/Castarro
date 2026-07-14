@@ -1110,6 +1110,117 @@ def assert_live_chat_messages_are_saved_with_stream_history() -> None:
             app_db.DB_PATH = original_db_path
 
 
+def assert_prestart_checks_replace_stale_broadcast() -> None:
+    config = {
+        "defaults": {},
+        "youtube": {
+            "accounts": [
+                {"id": "acct-a", "label": "Account A", "tokens_file": ".runtime/a.json"},
+            ],
+            "default_privacy_status": "unlisted",
+            "default_auto_start": True,
+            "default_auto_stop": True,
+        },
+        "channels": [
+            {
+                "name": "Inside Us",
+                "enabled": True,
+                "youtube_account_id": "acct-a",
+                "youtube_broadcast_id": "old-broadcast-id",
+                "youtube_stream_id": "old-stream-id",
+                "stream_key_env": "old-key",
+            }
+        ],
+    }
+
+    captured: dict = {"saves": [], "events": []}
+
+    original_save = web_ui.save_config
+    original_valid_token = web_ui.youtube_service.valid_access_token
+    original_cached_profile = web_ui.cached_connected_account_profile
+    original_broadcast_by_id = web_ui.youtube_service.broadcast_by_id
+    original_schedule = web_ui.youtube_service.schedule_broadcast
+    original_clear_caches = web_ui.clear_youtube_account_caches
+    original_record_event = app_db.record_event
+
+    web_ui.save_config = lambda _name, updated: captured["saves"].append(copy.deepcopy(updated))
+    web_ui.youtube_service.valid_access_token = lambda *_args, **_kwargs: ("token-a", {})
+    web_ui.cached_connected_account_profile = lambda *_args, **_kwargs: {
+        "channel_id": "yt-a",
+        "channel_title": "Inside Us",
+        "channel_handle": "@insideus",
+    }
+    web_ui.clear_youtube_account_caches = lambda *_args, **_kwargs: None
+    app_db.record_event = lambda event_type, *args, **kwargs: captured["events"].append(event_type)
+
+    def reset_captured():
+        captured["saves"].clear()
+        captured["events"].clear()
+
+    try:
+        # Test Case 1: Active broadcast should NOT be replaced
+        reset_captured()
+        web_ui.youtube_service.broadcast_by_id = lambda token, b_id: {
+            "id": b_id,
+            "title": "Inside Us Live",
+            "life_cycle_status": "live",
+        }
+        
+        test_config = copy.deepcopy(config)
+        replaced = web_ui.ensure_youtube_broadcasts_ready_for_start("config.ready.json", test_config, "Inside Us")
+        
+        assert replaced == [], "Active broadcast should not trigger replacement"
+        assert not captured["saves"], "Config should not be saved when broadcast is active"
+        assert not captured["events"], "No events should be recorded for active broadcast"
+
+        # Test Case 2: Stale broadcast (complete) SHOULD be replaced
+        reset_captured()
+        web_ui.youtube_service.broadcast_by_id = lambda token, b_id: {
+            "id": b_id,
+            "title": "Inside Us Live",
+            "life_cycle_status": "complete",
+        }
+        web_ui.youtube_service.schedule_broadcast = lambda token, **kwargs: {
+            "broadcast": {"id": "new-broadcast-id", "studio_url": "https://studio.youtube.com/video/new/livestreaming"},
+            "stream": {"id": "new-stream-id", "stream_name": "new-stream-key"}
+        }
+
+        test_config = copy.deepcopy(config)
+        replaced = web_ui.ensure_youtube_broadcasts_ready_for_start("config.ready.json", test_config, "Inside Us")
+
+        assert replaced == ["Inside Us"], "Completed broadcast should trigger replacement"
+        assert len(captured["saves"]) == 1, "Config should be saved once"
+        saved_channel = captured["saves"][0]["channels"][0]
+        assert saved_channel["youtube_broadcast_id"] == "new-broadcast-id"
+        assert saved_channel["youtube_stream_id"] == "new-stream-id"
+        assert saved_channel["stream_key_env"] == "new-stream-key"
+        assert "youtube_broadcast_replaced_on_start" in captured["events"]
+
+        # Test Case 3: Missing broadcast SHOULD be replaced
+        reset_captured()
+        web_ui.youtube_service.broadcast_by_id = lambda token, b_id: None
+        
+        test_config = copy.deepcopy(config)
+        replaced = web_ui.ensure_youtube_broadcasts_ready_for_start("config.ready.json", test_config, "Inside Us")
+
+        assert replaced == ["Inside Us"], "Missing broadcast should trigger replacement"
+        assert len(captured["saves"]) == 1, "Config should be saved once"
+        saved_channel = captured["saves"][0]["channels"][0]
+        assert saved_channel["youtube_broadcast_id"] == "new-broadcast-id"
+        assert saved_channel["youtube_stream_id"] == "new-stream-id"
+        assert saved_channel["stream_key_env"] == "new-stream-key"
+        assert "youtube_broadcast_replaced_on_start" in captured["events"]
+
+    finally:
+        web_ui.save_config = original_save
+        web_ui.youtube_service.valid_access_token = original_valid_token
+        web_ui.cached_connected_account_profile = original_cached_profile
+        web_ui.youtube_service.broadcast_by_id = original_broadcast_by_id
+        web_ui.youtube_service.schedule_broadcast = original_schedule
+        web_ui.clear_youtube_account_caches = original_clear_caches
+        app_db.record_event = original_record_event
+
+
 def main() -> int:
     assert_channel_scoped_schedule_routes_to_linked_accounts()
     assert_schedule_preserves_dual_stream_preference()
@@ -1133,6 +1244,7 @@ def main() -> int:
     assert_live_chat_reply_posts_to_linked_channel_account()
     assert_live_chat_parser_keeps_event_comments_and_emoji()
     assert_live_chat_messages_are_saved_with_stream_history()
+    assert_prestart_checks_replace_stale_broadcast()
     print("channel_workspace_contract_test: PASS")
     return 0
 

