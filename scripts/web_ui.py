@@ -3060,18 +3060,39 @@ def replace_stale_youtube_broadcast_for_start(
 
     if not is_stale:
         return False
-    privacy_status = str(settings.get("default_privacy_status") or "unlisted").strip().lower()
+    # Prioritize searching for an upcoming broadcast currently bound to our stream key on YouTube
+    # (This represents the live settings the user configured in the YouTube Studio Live Control Room)
+    upcoming_broadcast = None
+    stream_id = str(channel.get("youtube_stream_id") or "").strip()
+    if stream_id:
+        upcoming_broadcast = youtube_service.find_upcoming_broadcast_for_stream(access_token, stream_id)
+
+    source_broadcast = upcoming_broadcast if upcoming_broadcast else broadcast
+
+    privacy_status = str((source_broadcast or {}).get("privacy_status") or settings.get("default_privacy_status") or "public").strip().lower()
     if privacy_status not in {"private", "unlisted", "public"}:
-        privacy_status = "unlisted"
+        privacy_status = "public"
+    if privacy_status == "unlisted":
+        privacy_status = "public"
+
+    description = str((source_broadcast or {}).get("description") or "").strip()
+    if not description:
+        description = "Auto-created by Castarro after the previous YouTube broadcast ended."
+
+    old_details = None
+    source_id = source_broadcast.get("id") if source_broadcast else None
+    if source_id:
+        old_details = youtube_service.video_details(access_token, source_id)
+
     auto_start = bool(channel.get("youtube_auto_start", settings.get("default_auto_start", True)))
     auto_stop = bool(channel.get("youtube_auto_stop", settings.get("default_auto_stop", True)))
     scheduled_start_time, scheduled_end_time = youtube_start_replacement_times()
-    title = stream_live_title({**channel, "youtube_broadcast_title": str((broadcast or {}).get("title") or channel.get("youtube_broadcast_title") or "")})
+    title = stream_live_title({**channel, "youtube_broadcast_title": str((source_broadcast or {}).get("title") or channel.get("youtube_broadcast_title") or "")})
 
     created = youtube_service.schedule_broadcast(
         access_token,
         title=title,
-        description="Auto-created by Castarro after the previous YouTube broadcast ended.",
+        description=description,
         scheduled_start_time=scheduled_start_time,
         scheduled_end_time=scheduled_end_time,
         privacy_status=privacy_status,
@@ -3090,6 +3111,37 @@ def replace_stale_youtube_broadcast_for_start(
     channel["youtube_broadcast_id"] = str(created.get("broadcast", {}).get("id") or "")
     channel["youtube_stream_id"] = str(created.get("stream", {}).get("id") or "")
     channel["youtube_broadcast_title"] = title
+
+    new_broadcast_id = channel["youtube_broadcast_id"]
+    if new_broadcast_id:
+        if old_details:
+            try:
+                youtube_service.update_video_details(
+                    access_token,
+                    video_id=new_broadcast_id,
+                    title=title,
+                    description=description,
+                    category_id=old_details.get("category_id"),
+                    tags=old_details.get("tags"),
+                    default_language=old_details.get("default_language"),
+                    default_audio_language=old_details.get("default_audio_language"),
+                )
+            except Exception as exc:
+                app_db.record_event(
+                    "youtube_video_details_update_failed",
+                    config_name,
+                    channel_name,
+                    {"message": str(exc)},
+                )
+        thumbnail_url = str((source_broadcast or {}).get("thumbnail_url") or "").strip()
+        if thumbnail_url:
+            youtube_service.copy_video_thumbnail(
+                access_token,
+                src_video_id=source_id,
+                dest_video_id=new_broadcast_id,
+                thumbnail_url=thumbnail_url,
+            )
+
     save_config(config_name, config)
     clear_youtube_account_caches(config_name, account_id)
     app_db.record_event(

@@ -94,7 +94,7 @@ def default_settings(redirect_uri: str | None = None) -> dict[str, Any]:
         "use_pkce": True,
         "tokens_file": ".runtime/youtube_tokens.json",
         "scopes": list(YOUTUBE_DEFAULT_SCOPES),
-        "default_privacy_status": "unlisted",
+        "default_privacy_status": "public",
         "default_auto_start": True,
         "default_auto_stop": True,
     }
@@ -1023,3 +1023,101 @@ def upload_thumbnail(access_token: str, *, video_id: str, image_data: bytes, con
         image_data,
         content_type,
     )
+
+
+def video_details(access_token: str, video_id: str) -> dict[str, Any] | None:
+    video_id = str(video_id or "").strip()
+    if not video_id:
+        return None
+    try:
+        payload = youtube_get(
+            access_token,
+            "https://www.googleapis.com/youtube/v3/videos"
+            f"?part=snippet&id={urllib.parse.quote(video_id)}",
+        )
+        items = payload.get("items")
+        if isinstance(items, list) and items:
+            first = items[0]
+            if isinstance(first, dict):
+                snippet = first.get("snippet", {})
+                return {
+                    "category_id": snippet.get("categoryId"),
+                    "tags": snippet.get("tags"),
+                    "default_language": snippet.get("defaultLanguage"),
+                    "default_audio_language": snippet.get("defaultAudioLanguage"),
+                }
+    except Exception:
+        pass
+    return None
+
+
+def update_video_details(
+    access_token: str,
+    *,
+    video_id: str,
+    title: str,
+    description: str,
+    category_id: str | None = None,
+    tags: list[str] | None = None,
+    default_language: str | None = None,
+    default_audio_language: str | None = None,
+) -> dict[str, Any]:
+    snippet: dict[str, Any] = {
+        "title": title,
+        "description": description,
+    }
+    if category_id:
+        snippet["categoryId"] = category_id
+    if tags:
+        snippet["tags"] = tags
+    if default_language:
+        snippet["defaultLanguage"] = default_language
+    if default_audio_language:
+        snippet["defaultAudioLanguage"] = default_audio_language
+
+    return request_json(
+        "https://www.googleapis.com/youtube/v3/videos?part=snippet",
+        method="PUT",
+        headers={"Authorization": f"Bearer {access_token}"},
+        body={
+            "id": video_id,
+            "snippet": snippet,
+        },
+    )
+
+
+def copy_video_thumbnail(access_token: str, src_video_id: str, dest_video_id: str, thumbnail_url: str) -> bool:
+    if not thumbnail_url or not dest_video_id:
+        return False
+    try:
+        import urllib.request
+        req = urllib.request.Request(
+            thumbnail_url,
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        )
+        with urllib.request.urlopen(req, timeout=15) as response:
+            image_data = response.read()
+            content_type = response.headers.get("Content-Type") or "image/jpeg"
+            upload_thumbnail(
+                access_token,
+                video_id=dest_video_id,
+                image_data=image_data,
+                content_type=content_type,
+            )
+            return True
+    except Exception:
+        return False
+
+
+def find_upcoming_broadcast_for_stream(access_token: str, stream_id: str) -> dict[str, Any] | None:
+    stream_id = str(stream_id or "").strip()
+    if not stream_id:
+        return None
+    try:
+        upcoming = list_upcoming_broadcasts(access_token, include_stream_details=False)
+        for b in upcoming:
+            if str(b.get("bound_stream_id") or "").strip() == stream_id:
+                return b
+    except Exception:
+        pass
+    return None
