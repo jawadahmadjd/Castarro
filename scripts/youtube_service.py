@@ -929,6 +929,7 @@ def schedule_broadcast(
     privacy_status: str,
     auto_start: bool,
     auto_stop: bool,
+    stream_key: str | None = None,
 ) -> dict[str, Any]:
     broadcast = youtube_post(
         access_token,
@@ -952,24 +953,47 @@ def schedule_broadcast(
             },
         },
     )
-    stream = youtube_post(
-        access_token,
-        "https://www.googleapis.com/youtube/v3/liveStreams?part=id,snippet,cdn,contentDetails",
-        body={
-            "snippet": {
-                "title": f"{title} Stream",
-                "description": f"Auto-created stream for {title}",
+    
+    stream = None
+    if stream_key:
+        try:
+            # Query the user's active live streams to see if we can reuse one
+            mine_streams = list_mine_live_streams(access_token)
+            # 1. Search for a stream that matches the configured stream key
+            for s in mine_streams:
+                s_name = stream_name_from_resource(s)
+                if s_name == stream_key:
+                    stream = s
+                    break
+            # 2. Otherwise, search for a stream with 'Default stream key' in the title
+            if not stream:
+                for s in mine_streams:
+                    s_title = s.get("snippet", {}).get("title", "")
+                    if "default stream key" in s_title.lower():
+                        stream = s
+                        break
+        except Exception as exc:
+            print(f"[youtube_service] Failed to query existing streams to reuse: {exc}")
+
+    if not stream:
+        stream = youtube_post(
+            access_token,
+            "https://www.googleapis.com/youtube/v3/liveStreams?part=id,snippet,cdn,contentDetails",
+            body={
+                "snippet": {
+                    "title": f"{title} Stream",
+                    "description": f"Auto-created stream for {title}",
+                },
+                "cdn": {
+                    "ingestionType": "rtmp",
+                    "resolution": "variable",
+                    "frameRate": "variable",
+                },
+                "contentDetails": {
+                    "isReusable": True,
+                },
             },
-            "cdn": {
-                "ingestionType": "rtmp",
-                "resolution": "variable",
-                "frameRate": "variable",
-            },
-            "contentDetails": {
-                "isReusable": True,
-            },
-        },
-    )
+        )
     broadcast_id = str(broadcast.get("id") or "")
     stream_id = str(stream.get("id") or "")
     if not broadcast_id or not stream_id:

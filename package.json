@@ -1,6 +1,6 @@
 {
   "name": "castarro-desktop",
-  "version": "1.3.8",
+  "version": "1.3.9",
   "description": "Windows desktop package for Castarro, a local multi-channel live streaming dashboard.",
   "main": "desktop/main.js",
   "author": "Jawad Ahmad",
@@ -33,8 +33,7 @@
   },
   "devDependencies": {
     "electron": "^31.7.7",
-    "electron-builder": "^24.13.3",
-    "playwright": "^1.60.0"
+    "electron-builder": "^24.13.3"
   },
   "build": {
     "appId": "com.jawadahmad.castarro",
@@ -103,6 +102,7 @@
   },
   "dependencies": {
     "electron-updater": "^6.8.3",
+    "playwright": "^1.60.0",
     "qrcode": "^1.5.4",
     "qrcode-generator": "^1.4.4"
   }

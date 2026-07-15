@@ -707,6 +707,7 @@ class StreamState:
         self.last_reconnect_status = ""
         self.adaptive_variant_id = current_adaptive_variant_id(running.channel)
         self.last_adaptive_switch_at = 0.0
+        self.playwright_dismissed = False
 
     def replace_running(self, running: stream_manager.RunningStream, cloud_asset_ids: list[str] | None = None) -> None:
         self.running = running
@@ -717,6 +718,7 @@ class StreamState:
         self.last_reconnect_error = ""
         self.last_reconnect_status = "reconnected"
         self.adaptive_variant_id = current_adaptive_variant_id(running.channel)
+        self.playwright_dismissed = False
 
     def transferred_bytes(self) -> int:
         return parse_ffmpeg_size_bytes(tail_file(self.log_path, max_chars=20000))
@@ -796,6 +798,7 @@ class AppState:
         self.youtube_stream_cache: dict[tuple[str, str, str], dict[str, Any]] = {}
         self.youtube_live_chat_context_cache: dict[tuple[str, str, str, str], dict[str, Any]] = {}
         self.youtube_live_chat_quota_cooldowns: dict[tuple[str, str], dict[str, Any]] = {}
+        self.playwright_dismiss_channels: set[str] = set()
 
 
 STATE = AppState()
@@ -2993,6 +2996,8 @@ def clear_youtube_broadcast_link(config_name: str, config: dict[str, Any], chann
     account_id = normalize_account_id(channel.get("youtube_account_id") or "")
     old_broadcast_id = str(channel.get("youtube_broadcast_id") or "").strip()
     old_stream_id = str(channel.get("youtube_stream_id") or "").strip()
+    if old_broadcast_id:
+        channel["youtube_last_broadcast_id"] = old_broadcast_id
     channel["youtube_broadcast_id"] = ""
     channel["youtube_broadcast_title"] = ""
     channel["youtube_studio_url"] = ""
@@ -3025,6 +3030,11 @@ def replace_stale_youtube_broadcast_for_start(
 ) -> bool:
     channel_name = str(channel.get("name") or "").strip()
     broadcast_id = str(channel.get("youtube_broadcast_id") or "").strip()
+    last_broadcast_id = str(channel.get("youtube_last_broadcast_id") or "").strip()
+    
+    if not broadcast_id:
+        broadcast_id = last_broadcast_id
+
     if not channel_name or not broadcast_id:
         return False
 
@@ -3089,6 +3099,7 @@ def replace_stale_youtube_broadcast_for_start(
     scheduled_start_time, scheduled_end_time = youtube_start_replacement_times()
     title = stream_live_title({**channel, "youtube_broadcast_title": str((source_broadcast or {}).get("title") or channel.get("youtube_broadcast_title") or "")})
 
+    effective_key, _key_source = channel_effective_stream_key(channel)
     created = youtube_service.schedule_broadcast(
         access_token,
         title=title,
@@ -3098,6 +3109,7 @@ def replace_stale_youtube_broadcast_for_start(
         privacy_status=privacy_status,
         auto_start=auto_start,
         auto_stop=auto_stop,
+        stream_key=effective_key,
     )
     stream_name = str(created.get("stream", {}).get("stream_name") or "").strip()
     if stream_name:
@@ -3856,6 +3868,7 @@ def schedule_youtube(config_name: str, body: dict[str, Any]) -> dict[str, Any]:
     mismatch_message = youtube_profile_mismatch_message(channel_name or youtube_account_expected_channel_name(config, account), profile)
     if mismatch_message:
         raise ValueError(mismatch_message)
+    effective_key, _key_source = channel_effective_stream_key(selected_channel or {})
     created = youtube_service.schedule_broadcast(
         access_token,
         title=title,
@@ -3865,6 +3878,7 @@ def schedule_youtube(config_name: str, body: dict[str, Any]) -> dict[str, Any]:
         privacy_status=privacy_status,
         auto_start=auto_start,
         auto_stop=auto_stop,
+        stream_key=effective_key,
     )
     clear_youtube_account_caches(config_name, account_id)
 
@@ -5616,6 +5630,66 @@ YOUTUBE_RECOVERABLE_LIFECYCLE_STATUSES = {
 }
 
 
+def is_testing() -> bool:
+    return any("test" in arg for arg in sys.argv) or "unittest" in sys.modules
+
+
+def run_playwright_dismiss_dialog(
+    config_name: str,
+    channel_name: str,
+    studio_url: str,
+    account_id: str,
+    on_complete: Any = None,
+) -> None:
+    with STATE.lock:
+        if channel_name in STATE.playwright_dismiss_channels:
+            return
+        STATE.playwright_dismiss_channels.add(channel_name)
+
+    def worker() -> None:
+        try:
+            profile_dir = str((ROOT / ".runtime" / f"playwright_profile_{account_id or 'default'}").resolve())
+            script_path = str((ROOT / "scripts" / "dismiss_youtube_dialog.js").resolve())
+            cmd = [
+                "node",
+                script_path,
+                "--studio-url",
+                studio_url or "https://studio.youtube.com/video/live/livestreaming",
+                "--profile-dir",
+                profile_dir,
+                "--dismiss-delay",
+                "12000"
+            ]
+            print(f"[playwright-dismiss] Starting background dismiss command for channel {channel_name}: {' '.join(cmd)}")
+            
+            # Start process and wait for completion
+            completed = subprocess.run(
+                cmd,
+                cwd=str(ROOT),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                creationflags=windows_creation_flags(),
+                check=False
+            )
+            print(f"[playwright-dismiss] Command finished with return code {completed.returncode} for channel {channel_name}")
+            if completed.returncode != 0:
+                print(f"[playwright-dismiss] Error output:\n{completed.stderr}")
+        except Exception as exc:
+            print(f"[playwright-dismiss] Failed to run dismiss dialog script: {exc}")
+        finally:
+            with STATE.lock:
+                STATE.playwright_dismiss_channels.discard(channel_name)
+            if on_complete:
+                try:
+                    on_complete()
+                except Exception as exc:
+                    print(f"[playwright-dismiss] Callback error: {exc}")
+
+    thread = threading.Thread(target=worker, name=f"playwright-dismiss-{channel_name}", daemon=True)
+    thread.start()
+
+
 def reconnect_delay_seconds(config: dict[str, Any] | None, channel: dict[str, Any] | None = None) -> float:
     defaults = config.get("defaults", {}) if isinstance(config, dict) else {}
     channel = channel if isinstance(channel, dict) else {}
@@ -5734,6 +5808,14 @@ def maybe_reconnect_youtube_stream(
         current = STATE.streams.get(channel_name)
         if current is not state:
             return True
+        
+        if channel_name in STATE.playwright_dismiss_channels:
+            state.recovering = True
+            state.last_reconnect_status = "playwright_dismissing"
+            state.last_reconnect_error = "Dismissing YouTube Studio dialogue box..."
+            state.next_reconnect_at = time.time() + 5.0
+            return True
+
         state.recovering = True
         state.last_reconnect_status = state.last_reconnect_status or "checking_youtube"
         if state.next_reconnect_at and time.time() < state.next_reconnect_at:
@@ -5950,6 +6032,22 @@ def finalize_stream_lifecycle() -> None:
         with STATE.lock:
             if key in STATE.stream_exit_recorded:
                 continue
+
+        if not state.playwright_dismissed and not is_testing():
+            config, _error = load_config_or_none(state.config_name)
+            channel = find_channel_by_name(config or {}, channel_name) if config else None
+            if channel:
+                account_id = normalize_account_id(channel.get("youtube_account_id") or "")
+                if account_id:
+                    last_id = channel.get("youtube_last_broadcast_id") or channel.get("youtube_broadcast_id")
+                    studio_url = f"https://studio.youtube.com/video/{last_id}/livestreaming" if last_id else "https://studio.youtube.com/video/live/livestreaming"
+                    state.playwright_dismissed = True
+                    run_playwright_dismiss_dialog(
+                        state.config_name,
+                        channel_name,
+                        studio_url,
+                        account_id
+                    )
         reason = stream_manager.describe_returncode(process.returncode, stop_requested=state.running.stop_requested)
         config, _error = load_config_or_none(state.config_name)
         if maybe_reconnect_youtube_stream(channel_name, state, config, reason):
@@ -6270,6 +6368,12 @@ def evaluate_stream_cycles_for_config(config_name: str, config: dict[str, Any]) 
 
         if runtime.get("phase") != "waiting_restart":
             continue
+        
+        # Delay cycle restart while Playwright is active
+        with STATE.lock:
+            if channel_name in STATE.playwright_dismiss_channels:
+                continue
+
         restart_at = float(runtime.get("restart_at") or 0.0)
         if restart_at and now < restart_at:
             continue

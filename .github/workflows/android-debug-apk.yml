@@ -2,11 +2,12 @@ name: Android Debug APK
 
 on:
   workflow_dispatch:
-  pull_request:
-    paths:
-      - "mobile/android/**"
-      - "shared/castarro-core/**"
-      - ".github/workflows/android-debug-apk.yml"
+  # Temporarily disabled automatic pull request triggers
+  # pull_request:
+  #   paths:
+  #     - "mobile/android/**"
+  #     - "shared/castarro-core/**"
+  #     - ".github/workflows/android-debug-apk.yml"
 
 jobs:
   build:

@@ -82,7 +82,7 @@ jobs:
   android-release-apk:
     name: Build signed Android release APK
     needs: prepare
-    if: needs.prepare.outputs.exists != 'true' && needs.prepare.outputs.android_signing_enabled == 'true'
+    if: false # Temporarily disabled mobile app
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -360,7 +360,7 @@ jobs:
         run: npm run smoke:installer
 
       - name: Download Android release APK
-        if: steps.version.outputs.exists != 'true' && steps.version.outputs.android_signing_enabled == 'true'
+        if: false # Temporarily disabled mobile app
         uses: actions/download-artifact@v4
         with:
           name: castarro-android-release-apk
@@ -376,7 +376,7 @@ jobs:
           git push origin "${{ steps.version.outputs.tag }}"
 
       - name: Publish GitHub release with Android APK
-        if: steps.version.outputs.exists != 'true' && steps.version.outputs.android_signing_enabled == 'true'
+        if: false # Temporarily disabled mobile app
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.tag }}
@@ -401,7 +401,7 @@ jobs:
             dist/Castarro-Android-${{ steps.version.outputs.version }}.apk.sha256
 
       - name: Publish GitHub release without Android APK
-        if: steps.version.outputs.exists != 'true' && steps.version.outputs.android_signing_enabled != 'true'
+        if: steps.version.outputs.exists != 'true' # Temporarily disabled mobile app, always release without APK
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.tag }}
