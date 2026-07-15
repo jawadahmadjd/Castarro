@@ -5589,28 +5589,13 @@ function scheduleYoutubeLiveChatPoll() {
 }
 
 function queueYoutubeLiveChatRefresh(channel = null) {
-  const key = youtubeLiveChatKey(channel);
-  if (!key) {
-    resetYoutubeLiveChat();
-    return;
-  }
-  if (state.youtubeLiveChat.loadedKey !== key) {
-    resetYoutubeLiveChat(key);
-  }
-  if (
-    state.youtubeLiveChat.loading
-    || state.youtubeLiveChat.failedKey === key
-    || state.youtubeLiveChat.nextPageToken
-    || state.youtubeLiveChat.liveChatId
-    || state.youtubeLiveChat.error
-    || (Array.isArray(state.youtubeLiveChat.messages) && state.youtubeLiveChat.messages.length)
-  ) return;
-  window.setTimeout(() => {
-    refreshYoutubeLiveChat({ silent: true }).catch(() => {});
-  }, 0);
+  // Temporarily disabled
+  return;
 }
 
 async function refreshYoutubeLiveChat(options = {}) {
+  // Temporarily disabled
+  return null;
   const silent = Boolean(options.silent);
   const reset = Boolean(options.reset);
   const config = state.configData || defaultConfigData();
@@ -6483,9 +6468,7 @@ function renderYoutubeSettingsPanel(config) {
       resetYoutubeLiveChat();
     }
   }
-  const liveChatMarkup = !setupGuideStep
-    ? youtubeLiveChatCard(selectedChannel, linkedAccount, actionBusy)
-    : "";
+  const liveChatMarkup = ""; // Temporarily disabled
   const liveChatPanelClass = state.youtubeLiveChatPanelOpen ? " youtube-chat-embedded-open" : "";
 
   container.innerHTML = `
@@ -9725,10 +9708,10 @@ async function refreshSyncStatus() {
 }
 
 function renderSyncPanel() {
-  const status = state.syncStatus || {};
   const panel = $("workspaceSyncPanel");
-  const devices = Array.isArray(status.devices) ? status.devices : [];
   if (!panel) return;
+  panel.style.display = "none";
+  return;
   if (devices.length) {
     state.syncPairing = null;
   }
@@ -10210,8 +10193,8 @@ function renderAutomationSettingsPanel(config = state.configData || defaultConfi
             <label><input type="checkbox" ${alerts.desktop_notifications_enabled ? "checked" : ""} onchange="updateAlertToggle('desktop_notifications_enabled', this.checked)"> Desktop system notifications</label>
             <span class="helper">Uses the desktop shell to surface critical stream alerts outside the app window.</span>
           </div>
-          <div class="automation-toggle">
-            <label><input type="checkbox" ${alerts.mobile_notifications_enabled ? "checked" : ""} onchange="updateAlertToggle('mobile_notifications_enabled', this.checked)"> Mobile remote notifications</label>
+          <div class="automation-toggle hidden">
+            <label><input type="checkbox" disabled> Mobile remote notifications</label>
             <span class="helper">Paired phones can surface new desktop alerts while remote monitoring is active.</span>
           </div>
           <div class="automation-toggle">

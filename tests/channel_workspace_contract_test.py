@@ -1158,7 +1158,7 @@ def assert_prestart_checks_replace_stale_broadcast() -> None:
         captured["events"].clear()
 
     try:
-        # Test Case 1: Active broadcast should NOT be replaced
+        # Test Case 1: Active broadcast should NOT be replaced if auto_stop is False
         reset_captured()
         web_ui.youtube_service.broadcast_by_id = lambda token, b_id: {
             "id": b_id,
@@ -1167,11 +1167,36 @@ def assert_prestart_checks_replace_stale_broadcast() -> None:
         }
         
         test_config = copy.deepcopy(config)
+        test_config["channels"][0]["youtube_auto_stop"] = False
         replaced = web_ui.ensure_youtube_broadcasts_ready_for_start("config.ready.json", test_config, "Inside Us")
         
-        assert replaced == [], "Active broadcast should not trigger replacement"
+        assert replaced == [], "Active broadcast with auto_stop=False should not trigger replacement"
         assert not captured["saves"], "Config should not be saved when broadcast is active"
         assert not captured["events"], "No events should be recorded for active broadcast"
+
+        # Test Case 1B: Active broadcast SHOULD be replaced if auto_stop is True
+        reset_captured()
+        web_ui.youtube_service.broadcast_by_id = lambda token, b_id: {
+            "id": b_id,
+            "title": "Inside Us Live",
+            "life_cycle_status": "live",
+        }
+        web_ui.youtube_service.schedule_broadcast = lambda token, **kwargs: {
+            "broadcast": {"id": "new-broadcast-id", "studio_url": "https://studio.youtube.com/video/new/livestreaming"},
+            "stream": {"id": "new-stream-id", "stream_name": "new-stream-key"}
+        }
+
+        test_config = copy.deepcopy(config)
+        test_config["channels"][0]["youtube_auto_stop"] = True
+        replaced = web_ui.ensure_youtube_broadcasts_ready_for_start("config.ready.json", test_config, "Inside Us")
+
+        assert replaced == ["Inside Us"], "Active broadcast with auto_stop=True should trigger replacement"
+        assert len(captured["saves"]) == 1, "Config should be saved once when broadcast is replaced"
+        saved_channel = captured["saves"][0]["channels"][0]
+        assert saved_channel["youtube_broadcast_id"] == "new-broadcast-id"
+        assert saved_channel["youtube_stream_id"] == "new-stream-id"
+        assert saved_channel["stream_key_env"] == "new-stream-key"
+        assert "youtube_broadcast_replaced_on_start" in captured["events"]
 
         # Test Case 2: Stale broadcast (complete) SHOULD be replaced
         reset_captured()

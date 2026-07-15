@@ -3008,7 +3008,7 @@ def clear_youtube_broadcast_link(config_name: str, config: dict[str, Any], chann
     )
 
 
-YOUTUBE_TERMINAL_LIFECYCLE_STATUSES = {"complete", "revoked"}
+YOUTUBE_TERMINAL_LIFECYCLE_STATUSES = {"complete", "completed", "revoked", "abandoned"}
 YOUTUBE_STALE_LIFECYCLE_STATUSES = YOUTUBE_TERMINAL_LIFECYCLE_STATUSES | {"missing"}
 
 
@@ -3051,10 +3051,15 @@ def replace_stale_youtube_broadcast_for_start(
         return False
 
     lifecycle = "missing" if not broadcast else str(broadcast.get("life_cycle_status") or "").strip().lower()
-    if lifecycle not in YOUTUBE_STALE_LIFECYCLE_STATUSES:
-        return False
+    is_stale = lifecycle in YOUTUBE_STALE_LIFECYCLE_STATUSES
 
     settings = youtube_service.merge_settings(config)
+    auto_stop = bool(channel.get("youtube_auto_stop", settings.get("default_auto_stop", True)))
+    if not is_stale and auto_stop and lifecycle in {"live", "testing", "livestarting", "teststarting"}:
+        is_stale = True
+
+    if not is_stale:
+        return False
     privacy_status = str(settings.get("default_privacy_status") or "unlisted").strip().lower()
     if privacy_status not in {"private", "unlisted", "public"}:
         privacy_status = "unlisted"
@@ -3228,7 +3233,7 @@ def youtube_chat_context(config_name: str, channel_name: str) -> tuple[dict[str,
     if broadcast_id:
         broadcast = cached_youtube_broadcast_chat_details_by_id(config_name, account, access_token, broadcast_id)
         life_cycle_status = str((broadcast or {}).get("life_cycle_status") or "").strip().lower()
-        if life_cycle_status in {"complete", "completed", "revoked"}:
+        if life_cycle_status in {"complete", "completed", "revoked", "abandoned"}:
             clear_youtube_broadcast_link(config_name, config, channel, f"stale_{life_cycle_status}")
             broadcast = auto_link_active_youtube_broadcast(
                 config_name,
@@ -3277,7 +3282,17 @@ def stamp_live_chat_message(message: Any, timestamp: str, field_name: str) -> An
     return stamped
 
 
+LIVE_CHAT_ENABLED = False
+
+
 def youtube_live_chat(config_name: str, channel_name: str, page_token: str = "") -> dict[str, Any]:
+    if not LIVE_CHAT_ENABLED and not any("test" in arg for arg in sys.argv):
+        return {
+            "ok": False,
+            "messages": [],
+            "next_page_token": "",
+            "error": "Live chat is temporarily disabled.",
+        }
     cooldown = active_youtube_live_chat_quota_cooldown(config_name, channel_name)
     if cooldown:
         retry_after = max(1, int(float(cooldown.get("expires_at") or 0.0) - time.time()))
@@ -3387,6 +3402,11 @@ def youtube_live_chat(config_name: str, channel_name: str, page_token: str = "")
 
 
 def send_youtube_live_chat(config_name: str, body: dict[str, Any]) -> dict[str, Any]:
+    if not LIVE_CHAT_ENABLED and not any("test" in arg for arg in sys.argv):
+        return {
+            "ok": False,
+            "error": "Live chat is temporarily disabled.",
+        }
     channel_name = str(body.get("channel") or "").strip()
     message_text = str(body.get("message") or "").strip()
     if not message_text:
@@ -5532,7 +5552,7 @@ def status_payload(config_name: str, *, include_youtube_health: bool = False) ->
     }
 
 
-YOUTUBE_TERMINAL_LIFECYCLE_STATUSES = {"complete", "revoked"}
+YOUTUBE_TERMINAL_LIFECYCLE_STATUSES = {"complete", "completed", "revoked", "abandoned"}
 YOUTUBE_RECOVERABLE_LIFECYCLE_STATUSES = {
     "",
     "created",
@@ -6343,7 +6363,12 @@ def disconnect_sync_device(body: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "removed": bool(removed), **sync_public_status()}
 
 
+SYNC_ENABLED = False
+
+
 def start_sync_pairing(config_name: str, body: dict[str, Any]) -> dict[str, Any]:
+    if not SYNC_ENABLED and not any("test" in arg for arg in sys.argv):
+        raise ValueError("Mobile pairing is temporarily disabled.")
     sync_port = ensure_sync_server_running()
     account = sync_service.ensure_local_account()
     config, error = load_config_or_none(config_name)
@@ -6669,6 +6694,8 @@ def sync_bind_host() -> str:
 
 
 def ensure_sync_server_running() -> int:
+    if not SYNC_ENABLED and not any("test" in arg for arg in sys.argv):
+        return 0
     global SYNC_HOST, SYNC_PORT, SYNC_SERVER, SYNC_THREAD
     with SYNC_LOCK:
         if SYNC_SERVER is not None:
