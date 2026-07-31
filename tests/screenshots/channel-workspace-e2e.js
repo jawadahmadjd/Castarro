@@ -343,17 +343,15 @@ async function runUiChecks(page, tempRoot) {
   await page.getByRole("heading", { name: "Live Settings" }).waitFor();
   await page.getByRole("heading", { name: "YouTube Account" }).waitFor();
   await page.getByRole("heading", { name: "Stream Settings" }).waitFor();
-  await page.getByRole("heading", { name: "Schedule Stream" }).waitFor();
   await page.getByRole("heading", { name: "Videos", exact: true }).waitFor();
-  await page.getByRole("heading", { name: "Upcoming Streams" }).waitFor();
   const youtubeHeadings = await page.locator("#youtubeSettingsPanel h3").evaluateAll((nodes) => (
     nodes.map((node) => node.textContent.trim()).filter(Boolean)
   ));
-  const liveFlowOrder = ["Live Settings", "Stream Settings", "Videos", "Schedule Stream", "Upcoming Streams"];
+  const liveFlowOrder = ["Live Settings", "Stream Settings", "Videos"];
   const liveFlowIndexes = liveFlowOrder.map((label) => youtubeHeadings.indexOf(label));
   assert.deepEqual(liveFlowIndexes, [...liveFlowIndexes].sort((a, b) => a - b));
   assert.equal(liveFlowIndexes.every((index) => index >= 0), true);
-  assert.equal(await page.locator("#youtubeScheduleEnd").count(), 1);
+  assert.equal(await page.locator("#youtubeScheduleEnd").count(), 0);
   assert.equal(await page.locator("#youtubeScheduleDuration").count(), 0);
   assert.equal(await page.locator(".youtube-connection-summary").count(), 1);
   assert.equal(await page.locator(".youtube-account-row").count(), 0);

@@ -2717,10 +2717,8 @@ function renderChannelTools() {
 
 function renderOverviewPanels(payload, channel) {
   const readinessNode = $("workspaceReadinessPanel");
-  const metricsNode = $("workspaceLiveMetricsPanel");
   if (!channel) {
     if (readinessNode) readinessNode.innerHTML = `<div class="notice warn">Select a channel to see readiness.</div>`;
-    if (metricsNode) metricsNode.innerHTML = `<div class="notice warn">Select a channel to inspect live stream frame delivery.</div>`;
     return;
   }
   if (readinessNode) {
@@ -2742,58 +2740,6 @@ function renderOverviewPanels(payload, channel) {
             <span class="badge ${escapeAttr(row.tone)}">${escapeHtml(row.status)}</span>
           </button>
         `).join("")}
-      </div>
-    `;
-  }
-  if (metricsNode) {
-    const stream = payload?.streams?.[channel.name] || null;
-    const stats = stream?.stream_stats || {};
-    const targetFps = Number(stats.target_fps);
-    const outputFps = Number(stats.output_fps);
-    const actualBitrate = Number(stats.average_bitrate_bps);
-    const targetBitrate = Number(stats.target_bitrate_bps);
-    const badgeTone = ["success", "warn", "danger"].includes(String(stats.health_tone || "")) ? stats.health_tone : "";
-    const streamRunning = isStreamCurrentlyRunning(stream);
-    const badgeLabel = String(stats.health_label || (streamRunning ? "Good" : "Offline"));
-    const healthDetail = String(stats.detail || (
-      badgeLabel === "Excellent" ? "No issues." :
-        badgeLabel === "Poor" ? "Serious issues that need attention." :
-          badgeLabel === "Offline" ? "Offline." :
-            "Minor issues."
-    ));
-    const outputLabel = Number.isFinite(outputFps)
-      ? `${formatFpsValue(outputFps)}${Number.isFinite(targetFps) ? ` / ${formatFpsValue(targetFps)}` : ""} fps`
-      : streamRunning
-        ? "Collecting"
-        : "Offline";
-    const outputBitrateLabel = Number.isFinite(actualBitrate)
-      ? formatBitrate(actualBitrate)
-      : streamRunning
-        ? "Collecting"
-        : "Offline";
-    const outputTargetLabel = Number.isFinite(targetBitrate)
-      ? `Target ${formatBitrate(targetBitrate)}`
-      : "Target unavailable";
-    const dropFrames = Number.isFinite(Number(stats.drop_frames)) ? Number(stats.drop_frames) : 0;
-    const healthClass = badgeTone === "danger" ? "text-danger" : badgeTone === "warn" ? "text-warn" : badgeTone === "success" ? "text-success" : "";
-    metricsNode.innerHTML = `
-      <div class="workspace-inline-stats ${streamRunning ? "" : "idle"}">
-        <span class="workspace-inline-stat">
-          <span class="field-hint">Health</span>
-          <strong class="${healthClass}">${escapeHtml(badgeLabel)}<small>${escapeHtml(healthDetail.replace(/\.$/, ""))}</small></strong>
-        </span>
-        <span class="workspace-inline-stat">
-          <span class="field-hint">Output</span>
-          <strong>${escapeHtml(outputBitrateLabel)}<small>${escapeHtml(outputTargetLabel)}</small></strong>
-        </span>
-        <span class="workspace-inline-stat">
-          <span class="field-hint">FPS</span>
-          <strong>${escapeHtml(outputLabel)}</strong>
-        </span>
-        <span class="workspace-inline-stat">
-          <span class="field-hint">Drop frames</span>
-          <strong>${escapeHtml(streamRunning ? String(dropFrames) : "Offline")}</strong>
-        </span>
       </div>
     `;
   }
@@ -6517,7 +6463,7 @@ function renderYoutubeSettingsPanel(config) {
       ${showSetupCard("live") ? youtubeCollapsibleCard({
         key: "youtube-go-live",
         title: "Live Settings",
-        helper: "Broadcast details shared by live starts and scheduled YouTube broadcasts.",
+        helper: "Broadcast details for live starts.",
         extraClass: "youtube-go-live-card",
         summaryMetaHtml: `<span class="meta">${escapeHtml(scheduleTitleValue || selectedChannelName || "No live title yet")}</span>`,
         summaryBadgeHtml: `<span class="badge ${selectedStreamRunning ? "live" : ""}">${escapeHtml(selectedStreamRunning ? "Live" : "Details")}</span>`,
@@ -6553,49 +6499,6 @@ function renderYoutubeSettingsPanel(config) {
         ${showSetupCard("encoder") ? encoderMarkup : ""}
         ${videosMarkup && showSetupCard("videos") ? videosMarkup : ""}
       </div>
-
-      ${showSetupCard("schedule") ? youtubeCollapsibleCard({
-        key: "youtube-schedule",
-        title: "Schedule Stream",
-        helper: "Choose a start/end time or use a future YouTube broadcast that already exists.",
-        extraClass: "youtube-schedule-card",
-        summaryMetaHtml: `<span class="meta">${escapeHtml(importedBroadcast?.title || scheduleStartValue || "No schedule selected")}</span>`,
-        summaryBadgeHtml: scheduleGuardReason
-          ? `<span class="badge warn">Blocked</span>`
-          : `<span class="badge live">${escapeHtml(scheduleButtonText)}</span>`,
-        body: `
-          ${broadcasts.length ? `
-            <div class="youtube-import-box">
-              <label>
-                Choose existing broadcast
-                <select id="youtubeBroadcastImport" onchange="importYoutubeBroadcastSettings(this.value)" ${actionBusy ? "disabled" : ""}>
-                  <option value="">Choose an existing broadcast</option>
-                  ${broadcasts.map((item) => `<option value="${escapeAttr(item.id || "")}" ${String(item.id || "") === importedBroadcastId ? "selected" : ""}>${escapeHtml(item.title || "Untitled")} (${escapeHtml(item.privacy_status || "unknown")})</option>`).join("")}
-                </select>
-              </label>
-              ${importedBroadcast ? youtubeBroadcastSettingsMarkup(importedBroadcast) : `<div class="meta">Pick a broadcast to preview and copy its available YouTube settings into the Live Settings and Schedule Stream fields.</div>`}
-            </div>
-          ` : state.youtubeBroadcastsLoading
-            ? `<div class="notice">Checking YouTube for active or upcoming broadcasts...</div>`
-            : state.youtubeBroadcastsLoadError
-              ? `<div class="notice warn">${escapeHtml(state.youtubeBroadcastsLoadError)}</div>`
-              : `<div class="notice">No active or upcoming YouTube broadcasts were found for this linked account.</div>`}
-          <div class="form-grid youtube-schedule-form">
-            <label>
-              Start time
-              <input id="youtubeScheduleStart" type="datetime-local" value="${escapeAttr(scheduleStartValue)}" onchange="syncYoutubeScheduleDraftFromForm()" ${disabledSchedule}>
-            </label>
-            <label>
-              End time
-              <input id="youtubeScheduleEnd" type="datetime-local" value="${escapeAttr(scheduleEndValue)}" onchange="syncYoutubeScheduleDraftFromForm()" ${disabledSchedule}>
-            </label>
-          </div>
-          ${scheduleGuardReason ? `<div class="notice warn">Guard: ${escapeHtml(scheduleGuardReason)} | Channel: ${escapeHtml(selectedChannelName || "none")} | Account: ${escapeHtml(linkedAccount?.label || linkedAccountId || "none")}</div>` : ""}
-          <div class="row wrap">
-            <button class="pill success" type="button" onclick="scheduleOrUseYoutubeBroadcast().catch((error) => toast(error.message))" ${disabledSchedule}>${escapeHtml(scheduleButtonText)}</button>
-          </div>
-        `,
-      }) : ""}
 
       ${!setupGuideStep && ownerSetupVisible ? youtubeCollapsibleCard({
         key: "youtube-owner-setup",
@@ -6635,51 +6538,6 @@ function renderYoutubeSettingsPanel(config) {
                 <span>Use PKCE (Recommended)</span>
               </label>
             </div>
-          </div>
-        `,
-      }) : ""}
-
-      ${!setupGuideStep ? youtubeCollapsibleCard({
-        key: "youtube-upcoming-streams",
-        title: "Upcoming Streams",
-        helper: "Future broadcasts from the selected YouTube account.",
-        extraClass: "youtube-scheduled-streams-card",
-        summaryMetaHtml: `<span class="meta">${escapeHtml(futureBroadcasts.length ? `${futureBroadcasts.length} stream${futureBroadcasts.length === 1 ? "" : "s"} queued` : "No upcoming streams found")}</span>`,
-        summaryBadgeHtml: `<span class="badge">${escapeHtml(String(futureBroadcasts.length))}</span>`,
-        body: `
-          <div class="youtube-broadcast-list">
-            ${futureBroadcasts.length
-              ? futureBroadcasts.map((item) => {
-                const thumbnailUrl = youtubeThumbnailUrl(item);
-                const details = [
-                  item.auto_start !== "" ? `Auto start: ${youtubeBooleanText(item.auto_start)}` : "",
-                  item.auto_stop !== "" ? `Auto stop: ${youtubeBooleanText(item.auto_stop)}` : "",
-                  item.enable_dvr !== "" ? `DVR: ${youtubeBooleanText(item.enable_dvr)}` : "",
-                  item.latency_preference ? `Latency: ${item.latency_preference}` : "",
-                  item.has_backup_ingestion ? "Backup ingest available" : "",
-                ].filter(Boolean);
-                return `
-                  <article class="youtube-broadcast-item">
-                    <div class="youtube-broadcast-card-body">
-                      ${thumbnailUrl ? `<img class="youtube-broadcast-thumb" src="${escapeAttr(thumbnailUrl)}" alt="">` : ""}
-                      <div class="youtube-broadcast-card-copy">
-                        <div class="youtube-broadcast-title">${escapeHtml(item.title || "Untitled")}</div>
-                        <div class="meta">${escapeHtml(item.scheduled_start_time || "No start time")} - ${escapeHtml(item.privacy_status || "unknown")} - ${escapeHtml(item.life_cycle_status || "unknown")}</div>
-                        <div class="row wrap">
-                          ${details.map((detail) => `<span class="badge">${escapeHtml(detail)}</span>`).join("")}
-                          ${item.stream_name ? `<span class="badge">Key: ${escapeHtml(maskSecret(item.stream_name))}</span>` : ""}
-                        </div>
-                      </div>
-                    </div>
-                    <div class="row wrap">
-                      <button class="pill small" type="button" onclick="importYoutubeBroadcastSettings('${escapeJs(item.id || "")}')" ${actionBusy ? "disabled" : ""}>Use Settings</button>
-                      ${item.studio_url ? `<a class="studio-link" href="${escapeAttr(item.studio_url)}" target="_blank">Open Studio</a>` : ""}
-                    </div>
-                  </article>
-                `;
-              }).join("")
-              : `<div class="meta">No upcoming streams found.</div>`
-            }
           </div>
         `,
       }) : ""}
@@ -11073,7 +10931,7 @@ async function renderWorkspaceStreamsTab(channelName, cachedStreamsData = null) 
             <div class="field-group stream-video-field-group">
               <div class="field-label-row">
                 <label class="field-label" for="streamVideoInput_${escapeHtml(s.id)}">Specific Video / Playlist for this Stream (Optional)</label>
-                <button class="pill secondary small" type="button" onclick="openStreamVideoPickerModal('${escapeJs(channelName)}', '${escapeJs(s.id)}')">📁 Import / Select Videos</button>
+                <button class="pill ghost small" type="button" onclick="openStreamVideoPickerModal('${escapeJs(channelName)}', '${escapeJs(s.id)}')">📁 Import / Select Videos</button>
               </div>
               <input
                 id="streamVideoInput_${escapeHtml(s.id)}"
