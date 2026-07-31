@@ -1145,3 +1145,61 @@ def find_upcoming_broadcast_for_stream(access_token: str, stream_id: str) -> dic
     except Exception:
         pass
     return None
+
+
+def get_video_stats_batch(access_token: str, video_ids: list[str]) -> dict[str, dict[str, Any]]:
+    """Fetch live concurrent viewers, total view count, and avg view duration for up to 50 video IDs in 1 API call."""
+    clean_ids = [str(vid).strip() for vid in video_ids if str(vid).strip()]
+    if not clean_ids:
+        return {}
+    batch = clean_ids[:50]
+    id_param = ",".join(batch)
+    try:
+        payload = youtube_get(
+            access_token,
+            f"https://www.googleapis.com/youtube/v3/videos?part=liveStreamingDetails,statistics&id={urllib.parse.quote(id_param)}",
+        )
+        items = payload.get("items")
+        results: dict[str, dict[str, Any]] = {}
+        if isinstance(items, list):
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                vid = str(item.get("id") or "").strip()
+                details = item.get("liveStreamingDetails", {}) if isinstance(item.get("liveStreamingDetails"), dict) else {}
+                stats = item.get("statistics", {}) if isinstance(item.get("statistics"), dict) else {}
+                
+                concurrent_str = str(details.get("concurrentViewers") or "").strip()
+                concurrent = int(concurrent_str) if concurrent_str.isdigit() else 0
+                
+                views_str = str(stats.get("viewCount") or "").strip()
+                total_views = int(views_str) if views_str.isdigit() else 0
+                
+                avg_duration = "--"
+                start_iso = str(details.get("actualStartTime") or "").strip()
+                if start_iso:
+                    try:
+                        from datetime import datetime, timezone
+                        dt = datetime.fromisoformat(start_iso.replace("Z", "+00:00"))
+                        elapsed = (datetime.now(timezone.utc) - dt).total_seconds()
+                        if elapsed > 0:
+                            mins = int(elapsed) // 60
+                            secs = int(elapsed) % 60
+                            avg_duration = f"{mins:02d}m {secs:02d}s"
+                    except Exception:
+                        pass
+                
+                results[vid] = {
+                    "concurrent_viewers": concurrent,
+                    "total_views": total_views,
+                    "avg_view_duration": avg_duration,
+                }
+        return results
+    except Exception as exc:
+        print(f"[youtube_service] Failed to fetch video stats: {exc}")
+        return {}
+
+
+def get_concurrent_viewers_batch(access_token: str, video_ids: list[str]) -> dict[str, int]:
+    stats = get_video_stats_batch(access_token, video_ids)
+    return {vid: data.get("concurrent_viewers", 0) for vid, data in stats.items()}

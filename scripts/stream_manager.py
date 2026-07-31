@@ -181,8 +181,10 @@ def write_concat_playlist(
     config_dir: Path,
     runtime_dir: Path,
     channel: dict[str, Any],
+    stream_item: dict[str, Any] | None = None,
 ) -> tuple[Path, bool]:
-    playlist = channel.get("playlist")
+    stream_id = str(stream_item.get("id") or "") if isinstance(stream_item, dict) else ""
+    playlist = stream_item.get("playlist") if isinstance(stream_item, dict) and stream_item.get("playlist") else channel.get("playlist")
     network_inputs = False
     if not playlist:
         cloud_sources = cloud_playlist_sources(channel)
@@ -209,7 +211,8 @@ def write_concat_playlist(
         raise SystemExit(f"Channel '{channel.get('name')}' playlist must be a list or file path.")
 
     runtime_dir.mkdir(parents=True, exist_ok=True)
-    playlist_path = runtime_dir / f"{channel['name']}.ffconcat.txt"
+    suffix = f"_{stream_id}" if stream_id else ""
+    playlist_path = runtime_dir / f"{channel['name']}{suffix}.ffconcat.txt"
 
     lines: list[str] = []
     missing: list[Path] = []
@@ -232,11 +235,12 @@ def write_concat_playlist(
     return playlist_path, network_inputs
 
 
-def output_url(channel: dict[str, Any], defaults: dict[str, Any]) -> str:
+def output_url(channel: dict[str, Any], defaults: dict[str, Any], stream_item: dict[str, Any] | None = None) -> str:
     # Primary flow: user fills "stream_key_env" with either an env var name
     # or a direct stream key; app builds final RTMP URL automatically.
-    stream_key = str(channel.get("stream_key") or "").strip()
-    key_env = str(channel.get("stream_key_env") or "").strip()
+    target_obj = stream_item if isinstance(stream_item, dict) and (stream_item.get("stream_key") or stream_item.get("stream_key_env")) else channel
+    stream_key = str(target_obj.get("stream_key") or "").strip()
+    key_env = str(target_obj.get("stream_key_env") or "").strip()
     if key_env:
         env_stream_key = str(os.environ.get(key_env) or "").strip()
         if env_stream_key:
@@ -807,12 +811,13 @@ def build_command(
     config: dict[str, Any],
     channel: dict[str, Any],
     preview_manifest: Path | None = None,
+    stream_item: dict[str, Any] | None = None,
 ) -> tuple[list[str], Path, str, str | None]:
     defaults = config.get("defaults", {})
     runtime_dir = resolve_path(config_dir, defaults.get("runtime_dir", ".runtime"))
-    playlist_path, has_network_inputs = write_concat_playlist(defaults, config_dir, runtime_dir, channel)
+    playlist_path, has_network_inputs = write_concat_playlist(defaults, config_dir, runtime_dir, channel, stream_item=stream_item)
     ffmpeg = str(channel.get("ffmpeg_path") or defaults.get("ffmpeg_path", "ffmpeg"))
-    url = output_url(channel, defaults)
+    url = output_url(channel, defaults, stream_item=stream_item)
     profile = live_profile(config, channel)
     if has_network_inputs and transcode_enabled(config, channel):
         raise SystemExit(
@@ -1010,12 +1015,14 @@ def start_stream(
     config: dict[str, Any],
     channel: dict[str, Any],
     preview_manifest: Path | None = None,
+    stream_item: dict[str, Any] | None = None,
 ) -> RunningStream:
     if preview_manifest is not None:
         preview_manifest.parent.mkdir(parents=True, exist_ok=True)
         clear_directory(preview_manifest.parent)
-    command, playlist_path, url, preview_warning = build_command(config_dir, config, channel, preview_manifest)
-    path = log_path(config_dir, config, channel)
+    command, playlist_path, url, preview_warning = build_command(config_dir, config, channel, preview_manifest, stream_item=stream_item)
+    suffix = str(stream_item.get("id") or "") if isinstance(stream_item, dict) else ""
+    path = log_path(config_dir, config, channel, suffix=suffix)
     log_handle = path.open("a", encoding="utf-8", buffering=1)
     channel_name = str(channel["name"])
     key_ref = stream_key_reference(channel_name)

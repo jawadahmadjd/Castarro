@@ -138,6 +138,11 @@ const state = {
 };
 
 const $ = (id) => document.getElementById(id);
+async function fetchApi(path, options = {}) {
+  const url = `${state.backendBaseUrl || ""}${path}`;
+  const response = await fetch(url, options);
+  return await response.json();
+}
 let youtubeLiveChatPopoutWindow = null;
 const desktopBridge = () => (window.desktopShell && typeof window.desktopShell === "object" ? window.desktopShell : null);
 const INTERNAL_CONFIG_FILES = new Set([
@@ -324,11 +329,12 @@ const YOUTUBE_STATUS_CACHE_KEY = "castarro.youtube.status.v1";
 const PREVIEW_ENABLED_KEY = "castarro.preview.enabled.v1";
 const THEME_STORAGE_KEY = "castarro.theme.v1";
 const STREAM_KEY_PLACEHOLDER = "1234-5678-9012-3456";
-const WORKSPACE_ROUTES = ["overview", "youtube", "history", "troubleshoot", "transfer"];
+const WORKSPACE_ROUTES = ["overview", "youtube", "streams", "history", "troubleshoot", "transfer"];
 const SCHEDULE_DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
 let desktopStartupViewRequestLastAt = 0;
 const routeToSettingsTab = {
   youtube: "youtube",
+  streams: "streams",
   history: "liveHistory",
   troubleshoot: "troubleshooting",
   transfer: "transfer",
@@ -2058,6 +2064,7 @@ function workspaceRouteLabel(routeName) {
   return {
     overview: "Dashboard",
     youtube: "YouTube",
+    streams: "Streams",
     history: "History",
     troubleshoot: "Troubleshoot",
     transfer: "Transfer",
@@ -2590,6 +2597,7 @@ function renderWorkspaceHeader(payload, channel) {
   const subtitles = {
     overview: "Controls and status for this channel only.",
     youtube: "Go live, schedule broadcasts, manage stream keys, and choose videos for this channel.",
+    streams: "Manage multiple reusable stream keys, view uptime duration, and control live streams for this channel.",
     history: "Recorded live sessions for this channel.",
     troubleshoot: "Activity and stream logs for this channel.",
     transfer: "Create or import a complete Castarro package for moving this PC setup.",
@@ -2803,6 +2811,7 @@ function applySettingsSection(tab) {
   $("settingsNormalizeTab")?.classList.toggle("active", tab === "normalize");
   $("settingsStorageTab")?.classList.toggle("active", tab === "storage");
   $("settingsYoutubeTab")?.classList.toggle("active", tab === "youtube");
+  $("settingsStreamsTab")?.classList.toggle("active", tab === "streams");
   $("settingsAutomationTab")?.classList.toggle("active", tab === "automation");
   $("settingsTransferTab")?.classList.toggle("active", tab === "transfer");
   $("settingsLiveHistoryTab")?.classList.toggle("active", tab === "liveHistory");
@@ -2810,6 +2819,7 @@ function applySettingsSection(tab) {
   $("settingsNormalizeView")?.classList.toggle("active", tab === "normalize");
   $("settingsStorageView")?.classList.toggle("active", tab === "storage");
   $("settingsYoutubeView")?.classList.toggle("active", tab === "youtube");
+  $("settingsStreamsView")?.classList.toggle("active", tab === "streams");
   $("settingsAutomationView")?.classList.toggle("active", tab === "automation");
   $("settingsTransferView")?.classList.toggle("active", tab === "transfer");
   $("settingsLiveHistoryView")?.classList.toggle("active", tab === "liveHistory");
@@ -2836,7 +2846,10 @@ function renderWorkspaceRoute(payload, routeName) {
   state.settingsTab = settingsTab;
   applySettingsSection(settingsTab);
   syncActiveSettingsChannelFromWorkspace(false);
-  if (settingsTab !== "troubleshooting") {
+  if (settingsTab === "streams") {
+    renderWorkspaceStreamsTab(selected?.name || state.workspace.selectedChannelName);
+  }
+  if (settingsTab !== "troubleshooting" && settingsTab !== "streams") {
     renderSettingsFormsUnlessPaused();
   }
   if (settingsTab === "liveHistory") {
@@ -10897,6 +10910,415 @@ window.addEventListener("message", (event) => {
     toast(payload.message || "YouTube connection failed.");
   }
 });
+
+let streamKeyMaskedState = {};
+let streamCardExpandedState = {};
+
+function toggleStreamKeyMask(streamId) {
+  streamKeyMaskedState[streamId] = !streamKeyMaskedState[streamId];
+  const input = document.getElementById(`streamKeyInput_${streamId}`);
+  const btn = document.getElementById(`streamKeyToggleBtn_${streamId}`);
+  if (input) {
+    input.type = streamKeyMaskedState[streamId] ? "text" : "password";
+  }
+  if (btn) {
+    btn.textContent = streamKeyMaskedState[streamId] ? "Hide" : "Show";
+  }
+}
+
+function toggleStreamCardExpand(streamId) {
+  streamCardExpandedState[streamId] = !streamCardExpandedState[streamId];
+  const body = document.getElementById(`streamCardBody_${streamId}`);
+  const toggleBtn = document.getElementById(`streamExpandToggleBtn_${streamId}`);
+  if (body) {
+    body.classList.toggle("hidden", !streamCardExpandedState[streamId]);
+  }
+  if (toggleBtn) {
+    toggleBtn.classList.toggle("expanded", Boolean(streamCardExpandedState[streamId]));
+  }
+}
+
+async function refreshChannelStreamStats(channelName) {
+  const targetChannel = channelName || state.workspace.selectedChannelName;
+  if (!targetChannel) return;
+  try {
+    toast("Refreshing stream stats from YouTube...", "info");
+    const response = await fetchApi("/api/channel/streams/refresh-stats", {
+      method: "POST",
+      body: JSON.stringify({
+        config: state.config || "config.ready.json",
+        channel: targetChannel,
+      }),
+    });
+    if (response?.ok) {
+      toast("Stream stats updated!", "success");
+      renderWorkspaceStreamsTab(targetChannel, response.streams);
+    } else {
+      toast("Failed to refresh stats: " + (response?.error || "Unknown error"), "danger");
+    }
+  } catch (err) {
+    toast("Error refreshing stats: " + err.message, "danger");
+  }
+}
+
+async function renderWorkspaceStreamsTab(channelName, cachedStreamsData = null) {
+  const container = $("streamsGrid");
+  if (!container) return;
+  if (!channelName) {
+    container.innerHTML = `<div class="panel-empty">Please select a channel to manage its streams.</div>`;
+    return;
+  }
+
+  try {
+    let streams = cachedStreamsData;
+    if (!streams) {
+      const cfg = state.config || "config.ready.json";
+      const data = await fetchApi(`/api/channel/streams?config=${encodeURIComponent(cfg)}&channel=${encodeURIComponent(channelName)}`);
+      if (!data || !data.ok) {
+        container.innerHTML = `<div class="notice danger">Failed to load streams for ${escapeHtml(channelName)}</div>`;
+        return;
+      }
+      streams = Array.isArray(data.streams) ? data.streams : [];
+    }
+
+    if (!streams.length) {
+      container.innerHTML = `
+        <div class="streams-empty-state">
+          <p class="helper">No stream keys configured for this channel yet.</p>
+          <button class="pill primary" type="button" onclick="openAddStreamModal('${escapeJs(channelName)}')">+ Add First Stream Key</button>
+        </div>
+      `;
+      return;
+    }
+
+    container.innerHTML = streams.map((s) => {
+      const isRunning = Boolean(s.is_running || s.status === "running");
+      const isExpanded = Boolean(streamCardExpandedState[s.id]);
+      const statusBadge = isRunning
+        ? `<span class="badge live pulse">● RUNNING</span>`
+        : `<span class="badge">STOPPED</span>`;
+      
+      const durationBadge = isRunning
+        ? `<span class="badge duration-badge" title="Stream Uptime">⏱ ${escapeHtml(s.duration_formatted || "00:00:00")}</span>`
+        : `<span class="badge duration-badge text-muted">⏱ --:--:--</span>`;
+
+      const viewerBadge = (s.concurrent_viewers !== null && s.concurrent_viewers !== undefined)
+        ? `<span class="badge viewers-badge" title="Live Concurrent Viewers">👥 ${s.concurrent_viewers.toLocaleString()} viewers</span>`
+        : `<span class="badge viewers-badge text-muted" title="Click 'Refresh Stats' to query YouTube API">👥 Viewers: --</span>`;
+
+      const totalViewsBadge = (s.total_views !== null && s.total_views !== undefined)
+        ? `<span class="badge views-badge" title="Total Broadcast Views">👁 ${s.total_views.toLocaleString()} views</span>`
+        : `<span class="badge views-badge text-muted" title="Click 'Refresh Stats' to query YouTube API">👁 Views: --</span>`;
+
+      const avgDurationBadge = s.avg_view_duration
+        ? `<span class="badge duration-badge" title="Average View Duration">⏱ Avg: ${escapeHtml(s.avg_view_duration)}</span>`
+        : `<span class="badge duration-badge text-muted" title="Click 'Refresh Stats' to query YouTube API">⏱ Avg: --</span>`;
+
+      const masked = !streamKeyMaskedState[s.id];
+      const keyVal = s.stream_key || s.stream_key_env || "";
+      const streamPlaylist = Array.isArray(s.playlist) ? s.playlist.join(", ") : "";
+
+      const actionBtn = isRunning
+        ? `<button class="pill danger" type="button" onclick="stopSingleStream('${escapeJs(channelName)}', '${escapeJs(s.id)}')">Stop Stream</button>`
+        : `<button class="pill success" type="button" onclick="startSingleStream('${escapeJs(channelName)}', '${escapeJs(s.id)}')">Start Stream</button>`;
+
+      return `
+        <div class="stream-card ${isRunning ? "active-stream" : ""}" id="streamCard_${escapeHtml(s.id)}">
+          <div class="stream-card-header" onclick="toggleStreamCardExpand('${escapeJs(s.id)}')">
+            <div class="stream-card-left">
+              <button
+                id="streamExpandToggleBtn_${escapeHtml(s.id)}"
+                class="stream-expand-toggle ${isExpanded ? "expanded" : ""}"
+                type="button"
+                aria-label="Toggle stream card details"
+              >
+                <svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6z"/></svg>
+              </button>
+              <div class="stream-card-info">
+                <h3 class="stream-title">${escapeHtml(s.name || "Stream")}</h3>
+                <div class="stream-badges">
+                  ${statusBadge}
+                  ${durationBadge}
+                  ${viewerBadge}
+                  ${totalViewsBadge}
+                  ${avgDurationBadge}
+                </div>
+              </div>
+            </div>
+            <div class="stream-card-actions" onclick="event.stopPropagation()">
+              ${actionBtn}
+              <button class="pill ghost icon-only danger" type="button" onclick="deleteStreamFromChannel('${escapeJs(channelName)}', '${escapeJs(s.id)}')" title="Delete Stream">🗑</button>
+            </div>
+          </div>
+          <div class="stream-card-body ${isExpanded ? "" : "hidden"}" id="streamCardBody_${escapeHtml(s.id)}">
+            <div class="field-group">
+              <label class="field-label" for="streamKeyInput_${escapeHtml(s.id)}">Stream Key</label>
+              <div class="stream-key-input-group">
+                <input
+                  id="streamKeyInput_${escapeHtml(s.id)}"
+                  type="${masked ? "password" : "text"}"
+                  class="field-input stream-key-field"
+                  value="${escapeHtml(keyVal)}"
+                  onchange="updateStreamKeyInline('${escapeJs(channelName)}', '${escapeJs(s.id)}', this.value)"
+                  placeholder="Paste YouTube Stream Key (e.g. xxxx-xxxx-xxxx-xxxx)"
+                />
+                <button
+                  id="streamKeyToggleBtn_${escapeHtml(s.id)}"
+                  class="pill ghost small"
+                  type="button"
+                  onclick="toggleStreamKeyMask('${escapeJs(s.id)}')"
+                >${masked ? "Show" : "Hide"}</button>
+              </div>
+            </div>
+            <div class="field-group stream-video-field-group">
+              <div class="field-label-row">
+                <label class="field-label" for="streamVideoInput_${escapeHtml(s.id)}">Specific Video / Playlist for this Stream (Optional)</label>
+                <button class="pill secondary small" type="button" onclick="openStreamVideoPickerModal('${escapeJs(channelName)}', '${escapeJs(s.id)}')">📁 Import / Select Videos</button>
+              </div>
+              <input
+                id="streamVideoInput_${escapeHtml(s.id)}"
+                type="text"
+                class="field-input"
+                value="${escapeHtml(streamPlaylist)}"
+                onchange="updateStreamPlaylistInline('${escapeJs(channelName)}', '${escapeJs(s.id)}', this.value)"
+                placeholder="Leave blank for channel default, or select videos via Import button"
+              />
+            </div>
+          </div>
+        </div>
+      `;
+    }).join("");
+  } catch (err) {
+    container.innerHTML = `<div class="notice danger">Error loading streams: ${escapeHtml(err.message)}</div>`;
+  }
+}
+
+async function updateStreamPlaylistInline(channelName, streamId, rawText) {
+  try {
+    const data = await fetchApi(`/api/channel/streams?config=${encodeURIComponent(state.config)}&channel=${encodeURIComponent(channelName)}`);
+    if (!data || !data.ok) return;
+    const streams = Array.isArray(data.streams) ? data.streams : [];
+    const target = streams.find((s) => String(s.id) === String(streamId));
+    if (target) {
+      const items = String(rawText || "").split(",").map((t) => t.trim()).filter(Boolean);
+      target.playlist = items;
+      await fetchApi("/api/channel/streams/save", {
+        method: "POST",
+        body: JSON.stringify({
+          config: state.config,
+          channel: channelName,
+          streams: streams
+        })
+      });
+      toast("Stream-specific playlist updated.", "success");
+    }
+  } catch (err) {
+    toast("Failed to update stream playlist: " + err.message, "danger");
+  }
+}
+
+let activePickerStreamTarget = { channelName: "", streamId: "" };
+
+async function openStreamVideoPickerModal(channelName, streamId) {
+  activePickerStreamTarget = { channelName, streamId };
+  const modal = $("streamVideoPickerModal");
+  const listContainer = $("streamVideoPickerList");
+  if (!modal || !listContainer) return;
+
+  modal.classList.remove("hidden");
+  listContainer.innerHTML = `<div class="panel-empty">Loading channel videos...</div>`;
+
+  try {
+    const cfg = state.config || "config.ready.json";
+    const data = await fetchApi(`/api/normalized-files?config=${encodeURIComponent(cfg)}&channel=${encodeURIComponent(channelName)}`);
+    const files = Array.isArray(data?.files) ? data.files : [];
+    
+    const currentInputValue = ($(`streamVideoInput_${streamId}`)?.value || "").trim();
+    const currentSelectedList = currentInputValue.split(",").map((s) => s.trim()).filter(Boolean);
+
+    if (!files.length) {
+      listContainer.innerHTML = `
+        <div class="streams-empty-state">
+          <p class="helper">No normalized video files found in Go Live/${escapeHtml(channelName)}.</p>
+          <p class="helper">Upload or normalize videos in the Dashboard tab first.</p>
+        </div>
+      `;
+      return;
+    }
+
+    listContainer.innerHTML = `
+      <div class="stream-video-picker-grid">
+        ${files.map((file, idx) => {
+          const fileName = file.split(/[/\\]/).pop();
+          const isChecked = currentSelectedList.includes(file) || currentSelectedList.includes(fileName);
+          return `
+            <label class="picker-file-item" for="pickerFile_${idx}">
+              <input
+                id="pickerFile_${idx}"
+                type="checkbox"
+                class="picker-checkbox"
+                value="${escapeHtml(file)}"
+                ${isChecked ? "checked" : ""}
+              />
+              <span class="picker-file-name" title="${escapeHtml(file)}">${escapeHtml(fileName)}</span>
+            </label>
+          `;
+        }).join("")}
+      </div>
+    `;
+  } catch (err) {
+    listContainer.innerHTML = `<div class="notice danger">Error loading videos: ${escapeHtml(err.message)}</div>`;
+  }
+}
+
+function closeStreamVideoPickerModal() {
+  const modal = $("streamVideoPickerModal");
+  if (modal) modal.classList.add("hidden");
+}
+
+async function confirmStreamVideoPickerSelection() {
+  const { channelName, streamId } = activePickerStreamTarget;
+  if (!channelName || !streamId) {
+    closeStreamVideoPickerModal();
+    return;
+  }
+
+  const checkboxes = document.querySelectorAll("#streamVideoPickerList .picker-checkbox:checked");
+  const selectedFiles = Array.from(checkboxes).map((cb) => cb.value);
+  
+  const input = $(`streamVideoInput_${streamId}`);
+  if (input) {
+    input.value = selectedFiles.join(", ");
+  }
+
+  await updateStreamPlaylistInline(channelName, streamId, selectedFiles.join(", "));
+  closeStreamVideoPickerModal();
+}
+
+async function startSingleStream(channelName, streamId) {
+  try {
+    toast(`Starting stream...`);
+    const response = await fetchApi("/api/stream/start", {
+      method: "POST",
+      body: JSON.stringify({
+        config: state.config,
+        channel: channelName,
+        stream_id: streamId
+      })
+    });
+    if (response?.error) {
+      toast("Failed to start stream: " + response.error, "danger");
+    } else {
+      toast("Stream started successfully!", "success");
+      await refresh();
+      renderWorkspaceStreamsTab(channelName);
+    }
+  } catch (err) {
+    toast("Error starting stream: " + err.message, "danger");
+  }
+}
+
+async function stopSingleStream(channelName, streamId) {
+  try {
+    toast(`Stopping stream...`);
+    const response = await fetchApi("/api/stream/stop", {
+      method: "POST",
+      body: JSON.stringify({
+        config: state.config,
+        channel: channelName,
+        stream_id: streamId
+      })
+    });
+    if (response?.error) {
+      toast("Failed to stop stream: " + response.error, "danger");
+    } else {
+      toast("Stream stopped.", "info");
+      await refresh();
+      renderWorkspaceStreamsTab(channelName);
+    }
+  } catch (err) {
+    toast("Error stopping stream: " + err.message, "danger");
+  }
+}
+
+async function openAddStreamModal(channelName) {
+  const targetChannel = channelName || state.workspace.selectedChannelName;
+  if (!targetChannel) {
+    toast("Please select a channel first.", "warn");
+    return;
+  }
+  const streamName = prompt("Enter a name for this new stream (e.g. Gaming Stream, Music Feed, Stream 2):", "Stream 2");
+  if (!streamName || !streamName.trim()) return;
+  const streamKey = prompt("Paste the YouTube Stream Key for this stream:", "");
+  if (streamKey === null) return;
+
+  try {
+    const response = await fetchApi("/api/channel/streams/add", {
+      method: "POST",
+      body: JSON.stringify({
+        config: state.config,
+        channel: targetChannel,
+        name: streamName.trim(),
+        stream_key: (streamKey || "").trim()
+      })
+    });
+    if (response?.error) {
+      toast("Failed to add stream: " + response.error, "danger");
+    } else {
+      toast(`Stream "${streamName}" added!`, "success");
+      await refresh();
+      renderWorkspaceStreamsTab(targetChannel);
+    }
+  } catch (err) {
+    toast("Error adding stream: " + err.message, "danger");
+  }
+}
+
+async function deleteStreamFromChannel(channelName, streamId) {
+  if (!confirm("Are you sure you want to delete this stream from the channel?")) return;
+  try {
+    const response = await fetchApi("/api/channel/streams/delete", {
+      method: "POST",
+      body: JSON.stringify({
+        config: state.config,
+        channel: channelName,
+        stream_id: streamId
+      })
+    });
+    if (response?.error) {
+      toast("Failed to delete stream: " + response.error, "danger");
+    } else {
+      toast("Stream deleted.", "info");
+      await refresh();
+      renderWorkspaceStreamsTab(channelName);
+    }
+  } catch (err) {
+    toast("Error deleting stream: " + err.message, "danger");
+  }
+}
+
+async function updateStreamKeyInline(channelName, streamId, newKey) {
+  try {
+    const data = await fetchApi(`/api/channel/streams?config=${encodeURIComponent(state.config)}&channel=${encodeURIComponent(channelName)}`);
+    if (!data || !data.ok) return;
+    const streams = Array.isArray(data.streams) ? data.streams : [];
+    const target = streams.find((s) => String(s.id) === String(streamId));
+    if (target) {
+      target.stream_key = (newKey || "").trim();
+      await fetchApi("/api/channel/streams/save", {
+        method: "POST",
+        body: JSON.stringify({
+          config: state.config,
+          channel: channelName,
+          streams: streams
+        })
+      });
+      toast("Stream key updated.", "success");
+    }
+  } catch (err) {
+    toast("Failed to update stream key: " + err.message, "danger");
+  }
+}
 
 readOnboardingState();
 readWorkspaceAlertIds();

@@ -74,6 +74,7 @@
   --master-color-fffaf0: #fffaf0;
   --master-color-fffdf8: #fffdf8;
   --master-color-ffffff: #ffffff;
+  --master-color-transparent: transparent;
   --master-color-rgba-111-101-84-0-45: rgba(111, 101, 84, 0.45);
   --master-color-rgba-117-111-99-0-22: rgba(117, 111, 99, 0.22);
   --master-color-rgba-117-111-99-0-34: rgba(117, 111, 99, 0.34);
@@ -5920,5 +5921,202 @@ select option {
   width: 34px;
   min-width: 34px;
 }
+
+/* Multi-Stream Management Styles */
+.streams-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.stream-card {
+  display: flex;
+  flex-direction: column;
+  background: var(--component-subtle-background);
+  border: 1px solid var(--ui-line);
+  border-radius: 10px;
+  padding: 14px 18px;
+  transition: all 0.2s ease-in-out;
+}
+
+.stream-card.active-stream {
+  border-color: var(--badge-live-border);
+  box-shadow: 0 0 16px var(--badge-live-bg);
+  background: linear-gradient(135deg, var(--component-subtle-background), var(--badge-live-bg));
+}
+
+.stream-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.stream-card-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  flex: 1;
+}
+
+.stream-expand-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  border: 1px solid var(--ui-line);
+  background: var(--master-color-transparent);
+  color: var(--ui-ink);
+  cursor: pointer;
+  transition: transform 0.2s ease, background 0.2s ease;
+  flex-shrink: 0;
+}
+
+.stream-expand-toggle:hover {
+  background: var(--ui-line);
+}
+
+.stream-expand-toggle.expanded svg {
+  transform: rotate(180deg);
+}
+
+.stream-card-info {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.stream-title {
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: var(--ui-ink);
+  margin: 0;
+  white-space: nowrap;
+}
+
+.stream-badges {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.stream-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.stream-card-body {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--ui-line);
+  transition: max-height 0.2s ease, opacity 0.2s ease;
+}
+
+.stream-card-body.hidden {
+  display: none;
+}
+
+.stream-key-input-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.stream-key-field {
+  flex: 1;
+  font-family: monospace;
+  font-size: 0.9rem;
+}
+
+.stream-video-field-group {
+  margin-top: 10px;
+}
+
+.duration-badge {
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.5px;
+}
+
+.viewers-badge,
+.views-badge {
+  background: var(--component-subtle-background);
+  color: var(--master-color-d97706);
+  border: 1px solid var(--ui-line);
+}
+
+.streams-empty-state {
+  text-align: center;
+  padding: 40px 20px;
+  background: var(--component-subtle-background);
+  border: 1px dashed var(--ui-line);
+  border-radius: 12px;
+}
+
+.field-label-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 6px;
+}
+
+.stream-video-picker-modal {
+  width: min(600px, 92vw);
+}
+
+.stream-video-picker-body {
+  max-height: 340px;
+  overflow-y: auto;
+  margin: 16px 0;
+}
+
+.stream-video-picker-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.picker-file-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  background: var(--component-subtle-background);
+  border: 1px solid var(--ui-line);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.picker-file-item:hover {
+  border-color: var(--ui-accent);
+}
+
+.picker-checkbox {
+  width: 18px;
+  height: 18px;
+  cursor: pointer;
+}
+
+.picker-file-name {
+  font-size: 0.95rem;
+  color: var(--ui-ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 
 

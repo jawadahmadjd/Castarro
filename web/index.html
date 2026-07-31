@@ -47,6 +47,7 @@
           </div>
           <button class="sidebar-tool-item active" id="railOpenDashboard" data-route="overview" type="button">Dashboard</button>
           <button class="sidebar-tool-item" id="railOpenYoutube" data-route="youtube" type="button">YouTube</button>
+          <button class="sidebar-tool-item" id="railOpenStreams" data-route="streams" type="button">Streams</button>
           <button class="sidebar-tool-item hidden" id="railOpenLive" data-route="youtube" type="button">Live</button>
           <button class="sidebar-tool-item" id="railOpenHistory" data-route="history" type="button">History</button>
           <button class="sidebar-tool-item" id="railOpenTroubleshoot" data-route="troubleshoot" type="button">Troubleshoot</button>
@@ -267,6 +268,24 @@
           </section>
         </section>
 
+        <section id="settingsStreamsView" class="settings-section">
+          <section class="panel">
+            <div class="section-head">
+              <div>
+                <h2>Channel Streams</h2>
+                <p class="helper">Manage multiple reusable stream keys, view uptime duration, and control live streams for this channel.</p>
+              </div>
+              <div class="row wrap streams-header-actions">
+                <button class="pill secondary" id="refreshStreamStatsBtn" type="button" onclick="refreshChannelStreamStats()">🔄 Refresh Stats</button>
+                <button class="pill primary" id="addStreamBtn" type="button" onclick="openAddStreamModal()">+ Add Stream</button>
+              </div>
+            </div>
+            <div id="streamsManagerPanel">
+              <div class="streams-grid" id="streamsGrid"></div>
+            </div>
+          </section>
+        </section>
+
         <section id="settingsStorageView" class="settings-section">
           <section class="panel">
             <div class="section-head">
@@ -471,6 +490,23 @@
         <div class="modal-actions">
           <button class="pill ghost" id="cancelOnboardingConnection" type="button">Cancel</button>
           <button class="pill primary" id="saveOnboardingConnection" type="button">Save</button>
+        </div>
+      </section>
+    </div>
+    <div class="modal-backdrop hidden" id="streamVideoPickerModal" role="dialog" aria-modal="true" aria-labelledby="streamVideoPickerTitle">
+      <section class="modal-panel stream-video-picker-modal">
+        <div class="modal-head">
+          <div>
+            <h2 id="streamVideoPickerTitle">Select Stream Videos</h2>
+            <p class="helper">Select normalized video files from the channel folder to play on this specific stream.</p>
+          </div>
+        </div>
+        <div class="stream-video-picker-body" id="streamVideoPickerList">
+          <div class="panel-empty">Loading video files...</div>
+        </div>
+        <div class="modal-actions">
+          <button class="pill ghost" id="cancelStreamVideoPicker" type="button" onclick="closeStreamVideoPickerModal()">Cancel</button>
+          <button class="pill primary" id="applyStreamVideoPicker" type="button" onclick="confirmStreamVideoPickerSelection()">Apply Selected Videos</button>
         </div>
       </section>
     </div>

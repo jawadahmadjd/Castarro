@@ -1617,6 +1617,46 @@ def find_reusable_youtube_account_for_channel(config: dict[str, Any], channel_na
     return None
 
 
+def ensure_channel_streams(channel: dict[str, Any]) -> list[dict[str, Any]]:
+    if not isinstance(channel, dict):
+        return []
+    streams = channel.get("streams")
+    if not isinstance(streams, list) or not streams:
+        key = str(channel.get("stream_key") or "").strip()
+        key_env = str(channel.get("stream_key_env") or "").strip()
+        streams = [
+            {
+                "id": "stream_1",
+                "name": "Main Stream Feed",
+                "stream_key": key,
+                "stream_key_env": key_env,
+                "enabled": bool(channel.get("enabled", True)),
+                "playlist": [],
+            },
+            {
+                "id": "stream_2",
+                "name": "Secondary Stream (Dummy / Test)",
+                "stream_key": "sample_dummy_stream_key_secondary",
+                "stream_key_env": "",
+                "enabled": True,
+                "playlist": [],
+            }
+        ]
+        channel["streams"] = streams
+    else:
+        for idx, s in enumerate(streams):
+            if isinstance(s, dict):
+                if not s.get("id"):
+                    s["id"] = f"stream_{idx + 1}"
+                if not s.get("name"):
+                    s["name"] = f"Stream {idx + 1}"
+                if "enabled" not in s:
+                    s["enabled"] = True
+                if "playlist" not in s:
+                    s["playlist"] = []
+    return channel["streams"]
+
+
 def comparable_youtube_name(value: Any, *, letters_only: bool = True) -> str:
     text = unicodedata.normalize("NFKD", str(value or "")).casefold()
     if letters_only:
@@ -5204,7 +5244,7 @@ def emit_alert(
     )
 
 
-def start_stream(config_name: str, channel_name: str | None) -> list[str]:
+def start_stream(config_name: str, channel_name: str | None, stream_id: str | None = None) -> list[str]:
     config, config_dir = stream_manager.load_config((ROOT / config_name).resolve())
     normalize_scheduler_settings(config)
     ensure_youtube_broadcasts_ready_for_start(config_name, config, channel_name)
@@ -5212,34 +5252,46 @@ def start_stream(config_name: str, channel_name: str | None) -> list[str]:
     started: list[str] = []
     for channel in channels:
         name = str(channel["name"])
-        with STATE.lock:
-            existing = STATE.streams.get(name)
-        if existing and (existing.running.process.poll() is None or existing.recovering):
-            continue
-        prepared_channel, cloud_asset_ids = prepare_channel_cloud_playlist(config, channel)
-        try:
-            running = stream_manager.start_stream(
-                config_dir,
-                config,
-                prepared_channel,
+        streams = ensure_channel_streams(channel)
+        for s in streams:
+            sid = str(s.get("id") or "stream_1")
+            if stream_id and sid != stream_id:
+                continue
+            if not s.get("enabled", True):
+                continue
+            stream_key_id = f"{name}:{sid}"
+            with STATE.lock:
+                existing = STATE.streams.get(stream_key_id) or (STATE.streams.get(name) if sid == "stream_1" else None)
+            if existing and (existing.running.process.poll() is None or existing.recovering):
+                continue
+            prepared_channel, cloud_asset_ids = prepare_channel_cloud_playlist(config, channel)
+            try:
+                running = stream_manager.start_stream(
+                    config_dir,
+                    config,
+                    prepared_channel,
+                    stream_item=s,
+                )
+            except Exception:
+                unregister_cloud_assets(cloud_asset_ids)
+                raise
+            state_obj = StreamState(config_name, running, cloud_asset_ids=cloud_asset_ids)
+            with STATE.lock:
+                STATE.streams[stream_key_id] = state_obj
+                STATE.streams[name] = state_obj
+                STATE.stream_exit_recorded.discard((config_name, stream_key_id))
+                STATE.stream_exit_recorded.discard((config_name, name))
+            app_db.record_stream_start(
+                config_name,
+                name,
+                running.process.pid,
+                subprocess.list2cmdline(running.command),
+                str(Path(running.log_handle.name)),
+                stream_live_title(prepared_channel),
+                str(prepared_channel.get("youtube_broadcast_id") or ""),
             )
-        except Exception:
-            unregister_cloud_assets(cloud_asset_ids)
-            raise
-        with STATE.lock:
-            STATE.streams[name] = StreamState(config_name, running, cloud_asset_ids=cloud_asset_ids)
-            STATE.stream_exit_recorded.discard((config_name, name))
-        app_db.record_stream_start(
-            config_name,
-            name,
-            running.process.pid,
-            subprocess.list2cmdline(running.command),
-            str(Path(running.log_handle.name)),
-            stream_live_title(prepared_channel),
-            str(prepared_channel.get("youtube_broadcast_id") or ""),
-        )
-        app_db.record_event("stream_started", config_name, name, {"pid": running.process.pid})
-        started.append(name)
+            app_db.record_event("stream_started", config_name, name, {"pid": running.process.pid, "stream_id": sid})
+            started.append(stream_key_id)
     return started
 
 
@@ -5395,6 +5447,7 @@ def start_preview(config_name: str, channel_name: str | None) -> dict[str, Any]:
 def stop_stream(
     channel_name: str | None,
     *,
+    stream_id: str | None = None,
     clear_cycle_runtime: bool = True,
     request_source: str = "manual",
     request_reason: str = "",
@@ -5402,14 +5455,19 @@ def stop_stream(
     stopped: list[str] = []
     cycle_runtime_changed = False
     with STATE.lock:
-        targets = [channel_name] if channel_name else list(STATE.streams.keys())
+        if channel_name and stream_id:
+            targets = [f"{channel_name}:{stream_id}"]
+        elif channel_name:
+            targets = [k for k in STATE.streams.keys() if k == channel_name or k.startswith(f"{channel_name}:")]
+        else:
+            targets = list(STATE.streams.keys())
         for name in targets:
             if not name:
                 continue
             state = STATE.streams.get(name)
             if not state:
                 continue
-            if STATE.preview and STATE.preview.channel_name == name:
+            if STATE.preview and STATE.preview.channel_name in (name, name.split(":")[0]):
                 preview = STATE.preview
                 request_stop_running_stream(
                     preview.running,
@@ -5449,9 +5507,145 @@ def stop_stream(
                 },
             )
             stopped.append(name)
+            STATE.streams.pop(name, None)
     if cycle_runtime_changed:
         persist_stream_cycle_runtime()
     return stopped
+
+
+def format_duration_hhmmss(seconds: int) -> str:
+    if seconds <= 0:
+        return "00:00:00"
+    hours = seconds // 3600
+    minutes = (seconds % 3600) // 60
+    secs = seconds % 60
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
+def get_channel_streams_api(config_name: str, channel_name: str, fetch_stats: bool = False) -> dict[str, Any]:
+    config, error = load_config_or_none(config_name)
+    if not config:
+        raise ValueError(error or "Config not found.")
+    channel = find_channel_by_name(config, channel_name)
+    if not channel:
+        raise ValueError(f"Channel '{channel_name}' not found.")
+    
+    streams = ensure_channel_streams(channel)
+    results: list[dict[str, Any]] = []
+    
+    video_stats: dict[str, dict[str, Any]] = {}
+    broadcast_id = str(channel.get("youtube_broadcast_id") or "").strip()
+    if fetch_stats and broadcast_id:
+        account = find_reusable_youtube_account_for_channel(config, channel_name)
+        if account:
+            try:
+                scoped_config = account_config_view(config, account)
+                access_token, _ = youtube_service.valid_access_token(ROOT, scoped_config)
+                video_stats = youtube_service.get_video_stats_batch(access_token, [broadcast_id])
+            except Exception:
+                pass
+
+    for s in streams:
+        sid = str(s.get("id") or "stream_1")
+        sname = str(s.get("name") or sid)
+        skey = str(s.get("stream_key") or "")
+        key_env = str(s.get("stream_key_env") or "")
+        playlist = s.get("playlist") if isinstance(s.get("playlist"), list) else []
+        stream_state_key = f"{channel_name}:{sid}"
+        state = STATE.streams.get(stream_state_key) or STATE.streams.get(channel_name)
+        
+        is_running = False
+        uptime_seconds = 0
+        started_at = None
+        if state and (state.running.process.poll() is None or state.recovering):
+            is_running = True
+            started_at = state.started_at
+            uptime_seconds = int(time.time() - state.started_at)
+            
+        stats_data = video_stats.get(broadcast_id, {}) if is_running and broadcast_id and fetch_stats else {}
+        concurrent_viewers = stats_data.get("concurrent_viewers")
+        total_views = stats_data.get("total_views")
+        avg_view_duration = stats_data.get("avg_view_duration")
+        
+        results.append({
+            "id": sid,
+            "channel": channel_name,
+            "name": sname,
+            "stream_key": skey,
+            "stream_key_env": key_env,
+            "playlist": playlist,
+            "enabled": bool(s.get("enabled", True)),
+            "status": "running" if is_running else "stopped",
+            "is_running": is_running,
+            "started_at": started_at,
+            "uptime_seconds": uptime_seconds,
+            "duration_formatted": format_duration_hhmmss(uptime_seconds) if is_running else "Stopped",
+            "concurrent_viewers": concurrent_viewers,
+            "total_views": total_views,
+            "avg_view_duration": avg_view_duration,
+        })
+    return {"ok": True, "channel": channel_name, "streams": results, "stats_refreshed": fetch_stats}
+
+
+def add_channel_stream_api(config_name: str, body: dict[str, Any]) -> dict[str, Any]:
+    config, error = load_config_or_none(config_name)
+    if not config:
+        raise ValueError(error or "Config not found.")
+    channel_name = str(body.get("channel") or "").strip()
+    channel = find_channel_by_name(config, channel_name)
+    if not channel:
+        raise ValueError(f"Channel '{channel_name}' not found.")
+    
+    streams = ensure_channel_streams(channel)
+    sname = str(body.get("name") or f"Stream {len(streams) + 1}").strip()
+    skey = str(body.get("stream_key") or "").strip()
+    sid = f"stream_{int(time.time())}"
+    
+    new_stream = {
+        "id": sid,
+        "name": sname,
+        "stream_key": skey,
+        "stream_key_env": "",
+        "enabled": True,
+    }
+    streams.append(new_stream)
+    channel["streams"] = streams
+    save_config(config_name, config)
+    return get_channel_streams_api(config_name, channel_name)
+
+
+def delete_channel_stream_api(config_name: str, body: dict[str, Any]) -> dict[str, Any]:
+    config, error = load_config_or_none(config_name)
+    if not config:
+        raise ValueError(error or "Config not found.")
+    channel_name = str(body.get("channel") or "").strip()
+    stream_id = str(body.get("stream_id") or "").strip()
+    channel = find_channel_by_name(config, channel_name)
+    if not channel:
+        raise ValueError(f"Channel '{channel_name}' not found.")
+    
+    streams = ensure_channel_streams(channel)
+    stop_stream(channel_name, stream_id=stream_id, request_source="delete_stream", request_reason=f"stream {stream_id} deleted")
+    channel["streams"] = [s for s in streams if str(s.get("id")) != stream_id]
+    save_config(config_name, config)
+    return get_channel_streams_api(config_name, channel_name)
+
+
+def save_channel_streams_api(config_name: str, body: dict[str, Any]) -> dict[str, Any]:
+    config, error = load_config_or_none(config_name)
+    if not config:
+        raise ValueError(error or "Config not found.")
+    channel_name = str(body.get("channel") or "").strip()
+    raw_streams = body.get("streams")
+    if not isinstance(raw_streams, list):
+        raise ValueError("Streams list is required.")
+    channel = find_channel_by_name(config, channel_name)
+    if not channel:
+        raise ValueError(f"Channel '{channel_name}' not found.")
+    
+    channel["streams"] = raw_streams
+    save_config(config_name, config)
+    return get_channel_streams_api(config_name, channel_name)
 
 
 def tail_file(path: Path, max_chars: int = 5000) -> str:
@@ -6942,6 +7136,14 @@ class Handler(BaseHTTPRequestHandler):
                 json_response(self, status_payload(config_name, include_youtube_health=include_youtube_health))
                 return
 
+            if parsed.path == "/api/channel/streams":
+                config_name = safe_config_name(query.get("config", [DEFAULT_CONFIG])[0])
+                channel_name = str(query.get("channel", [""])[0] or "").strip()
+                fetch_stats = str(query.get("fetchStats", [""])[0] or "").strip().lower() in {"1", "true", "yes"}
+                update_request_trace(self, config_name=config_name, channel_name=channel_name)
+                json_response(self, get_channel_streams_api(config_name, channel_name, fetch_stats=fetch_stats))
+                return
+
             if parsed.path == "/api/sync/status":
                 json_response(self, sync_public_status())
                 return
@@ -7280,21 +7482,44 @@ class Handler(BaseHTTPRequestHandler):
                 json_response(self, {"ok": True, "stopped": stopped})
                 return
 
+            if parsed.path == "/api/channel/streams/add":
+                json_response(self, add_channel_stream_api(config_name, body))
+                return
+
+            if parsed.path == "/api/channel/streams/delete":
+                json_response(self, delete_channel_stream_api(config_name, body))
+                return
+
+            if parsed.path == "/api/channel/streams/save":
+                json_response(self, save_channel_streams_api(config_name, body))
+                return
+
+            if parsed.path == "/api/channel/streams/refresh-stats":
+                channel_name = str(body.get("channel") or "").strip()
+                json_response(self, get_channel_streams_api(config_name, channel_name, fetch_stats=True))
+                return
+
             if parsed.path == "/api/stream/start":
                 update_request_trace(self, channel_name=body.get("channel") or None)
                 assert_youtube_channel_keys_match(config_name, body.get("channel") or None)
-                started = start_stream(config_name, body.get("channel") or None)
+                channel_name = body.get("channel") or None
+                stream_id = body.get("stream_id") or None
+                started = start_stream(config_name, channel_name, stream_id=stream_id)
                 json_response(self, {"ok": True, "started": started})
                 return
 
             if parsed.path == "/api/stream/stop":
                 update_request_trace(self, channel_name=body.get("channel") or None)
                 channel = body.get("channel") or None
+                stream_id = body.get("stream_id") or None
                 stopped = stop_stream(
                     channel,
+                    stream_id=stream_id,
                     request_source="api_stream_stop",
                     request_reason=(
-                        f"HTTP /api/stream/stop for {channel}"
+                        f"HTTP /api/stream/stop for {channel} stream {stream_id}"
+                        if channel and stream_id
+                        else f"HTTP /api/stream/stop for {channel}"
                         if channel
                         else "HTTP /api/stream/stop with no channel; stop all streams"
                     ),
