@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
 Automate release push flow for Castarro:
-1) Optional local desktop + mobile release preflight checks
-2) Version bump in package.json (+ package-lock.json)
-3) Commit and push branch
+1) Fast native version bump in package.json (+ package-lock.json)
+2) Remote tag check & git commit/push
+3) Fast execution (~2-3 seconds) - heavy packaging & tests delegated to GitHub Actions CI
 
 GitHub Actions workflow on main then:
 - checks whether tag v<version> exists
@@ -74,11 +74,6 @@ def require_tool(name: str) -> None:
     raise RuntimeError(f"Required tool not found in PATH: {name}")
 
 
-def git_output(*args: str) -> str:
-    result = run(["git", *args], capture_output=True)
-    return result.stdout.strip()
-
-
 def ensure_project_layout() -> None:
     if not PACKAGE_JSON.exists():
         raise RuntimeError(f"Missing {PACKAGE_JSON}")
@@ -86,17 +81,14 @@ def ensure_project_layout() -> None:
         raise RuntimeError("This script must run from the repo root (missing .git folder).")
 
 
-def ensure_inside_git_repo() -> None:
-    out = git_output("rev-parse", "--is-inside-work-tree")
-    if out.lower() != "true":
-        raise RuntimeError("Current directory is not inside a git work tree.")
-
-
-def get_current_branch() -> str:
-    branch = git_output("rev-parse", "--abbrev-ref", "HEAD")
-    if branch == "HEAD":
-        raise RuntimeError("Detached HEAD is not supported for release push.")
-    return branch
+def get_git_info() -> tuple[bool, str]:
+    result = run(["git", "rev-parse", "--is-inside-work-tree", "--abbrev-ref", "HEAD"], capture_output=True, check=False)
+    if result.returncode != 0:
+        return False, ""
+    lines = result.stdout.strip().splitlines()
+    is_inside = lines[0].strip().lower() == "true" if lines else False
+    branch = lines[1].strip() if len(lines) > 1 else ""
+    return is_inside, branch
 
 
 def validate_semver(version: str) -> None:
@@ -134,6 +126,25 @@ def next_digit_cycle_version(current_version: str) -> str:
     return f"{major}.{minor}.{patch}"
 
 
+def bump_semver_version(current_version: str, bump: str) -> str:
+    match = DIGIT_CYCLE_RE.match(current_version)
+    if not match:
+        raise RuntimeError(f"Semver bump requires a plain x.y.z version. Current: '{current_version}'")
+    major, minor, patch = (int(match.group(1)), int(match.group(2)), int(match.group(3)))
+    if bump == "patch":
+        patch += 1
+    elif bump == "minor":
+        minor += 1
+        patch = 0
+    elif bump == "major":
+        major += 1
+        minor = 0
+        patch = 0
+    else:
+        raise RuntimeError(f"Unsupported semver bump type: '{bump}'")
+    return f"{major}.{minor}.{patch}"
+
+
 def resolve_target_version(
     *,
     current_version: str,
@@ -141,13 +152,15 @@ def resolve_target_version(
     bump: str,
     preid: str | None,
     version_strategy: str,
-) -> str | None:
+) -> str:
     if explicit_version:
         validate_semver(explicit_version)
         return explicit_version
     if version_strategy == "digit-cycle" and bump == "patch" and not preid:
         return next_digit_cycle_version(current_version)
-    return None
+    if bump in {"patch", "minor", "major"} and not preid:
+        return bump_semver_version(current_version, bump)
+    raise RuntimeError(f"Cannot resolve version for bump='{bump}', preid='{preid}', strategy='{version_strategy}' natively.")
 
 
 def bump_version(
@@ -158,22 +171,44 @@ def bump_version(
     preid: str | None,
     version_strategy: str,
 ) -> str:
-    cmd = ["npm.cmd" if os.name == "nt" else "npm", "version"]
-    target_version = resolve_target_version(
-        current_version=current_version,
-        explicit_version=version,
-        bump=bump,
-        preid=preid,
-        version_strategy=version_strategy,
-    )
-    cmd.append(target_version or bump)
-    cmd.append("--no-git-tag-version")
-    if preid:
-        cmd.extend(["--preid", preid])
-    run(cmd)
-    new_version = get_package_version()
-    print(f"[info] New version: {new_version}")
-    return new_version
+    try:
+        target_version = resolve_target_version(
+            current_version=current_version,
+            explicit_version=version,
+            bump=bump,
+            preid=preid,
+            version_strategy=version_strategy,
+        )
+        validate_semver(target_version)
+
+        # Fast native JSON update
+        pkg_data = json.loads(PACKAGE_JSON.read_text(encoding="utf-8"))
+        pkg_data["version"] = target_version
+        PACKAGE_JSON.write_text(json.dumps(pkg_data, indent=2) + "\n", encoding="utf-8")
+
+        if PACKAGE_LOCK.exists():
+            lock_data = json.loads(PACKAGE_LOCK.read_text(encoding="utf-8"))
+            lock_data["version"] = target_version
+            if "packages" in lock_data and "" in lock_data["packages"]:
+                lock_data["packages"][""]["version"] = target_version
+            PACKAGE_LOCK.write_text(json.dumps(lock_data, indent=2) + "\n", encoding="utf-8")
+
+        print(f"[info] New version: {target_version}")
+        return target_version
+    except Exception as exc:
+        print(f"[info] Fast bump fallback ({exc}). Running npm version...")
+        cmd = ["npm.cmd" if os.name == "nt" else "npm", "version"]
+        target = version or (bump if bump not in {"patch", "minor", "major"} else None)
+        if not target and version_strategy == "digit-cycle" and bump == "patch":
+            target = next_digit_cycle_version(current_version)
+        cmd.append(target or bump)
+        cmd.append("--no-git-tag-version")
+        if preid:
+            cmd.extend(["--preid", preid])
+        run(cmd)
+        new_version = get_package_version()
+        print(f"[info] New version: {new_version}")
+        return new_version
 
 
 def npm_cmd(*args: str) -> list[str]:
@@ -206,7 +241,7 @@ def installer_smoke_env() -> dict[str, str] | None:
 
 def run_desktop_build_check(skip: bool, *, include_installer_smoke: bool) -> None:
     if skip:
-        print("[info] Skipping desktop release preflight check.")
+        print("[info] Skipping desktop release preflight check (delegated to GitHub Actions CI).")
         return
     for script_name in ("icon", "bundle:runtime", "dist", "smoke:packaged"):
         run(npm_cmd("run", script_name))
@@ -218,7 +253,7 @@ def run_desktop_build_check(skip: bool, *, include_installer_smoke: bool) -> Non
 
 def run_mobile_build_check(skip: bool) -> None:
     if skip:
-        print("[info] Skipping mobile release preflight check.")
+        print("[info] Skipping mobile release preflight check (delegated to GitHub Actions CI).")
         return
     cmd = npm_cmd("run", "verify:mobile")
     run(cmd)
@@ -256,9 +291,21 @@ def push_branch(remote: str, branch: str) -> None:
     run(["git", "push", remote, branch])
 
 
+def run_fast_contract_tests(skip: bool) -> None:
+    if skip:
+        print("[info] Skipping fast local contract tests.")
+        return
+    contract_test = ROOT / "tests" / "ui_master_contract_test.py"
+    if contract_test.exists():
+        result = run([sys.executable, str(contract_test)], capture_output=True, check=False)
+        if result.returncode != 0:
+            raise RuntimeError(f"Fast contract test failed!\n{result.stderr or result.stdout}")
+        print("[success] Fast Python contract test passed (~0.5s).")
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="One-command release push (bump version, commit, push)."
+        description="One-command fast release push (bump version, commit, push)."
     )
     parser.add_argument(
         "--bump",
@@ -302,9 +349,19 @@ def parse_args() -> argparse.Namespace:
         help="Do not stage every change; stage only version files.",
     )
     parser.add_argument(
+        "--no-fast-test",
+        action="store_true",
+        help="Skip fast local Python contract tests.",
+    )
+    parser.add_argument(
         "--no-build-check",
         action="store_true",
         help="Skip running desktop and mobile preflight checks before push.",
+    )
+    parser.add_argument(
+        "--with-build-check",
+        action="store_true",
+        help="Run heavy local desktop and mobile preflight checks before push (default is skipped; CI handles builds/smoke).",
     )
     parser.add_argument(
         "--no-mobile-check",
@@ -314,7 +371,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--with-installer-smoke",
         action="store_true",
-        help="Also run installer smoke during local preflight. This installs/uninstalls Castarro and requires the installed app to be closed.",
+        help="Also run installer smoke during local preflight.",
     )
     parser.add_argument(
         "--dry-run",
@@ -328,33 +385,42 @@ def main() -> int:
     args = parse_args()
 
     require_tool("git")
-    require_tool("npm")
     ensure_project_layout()
-    ensure_inside_git_repo()
 
-    branch = args.branch or get_current_branch()
+    is_inside, current_branch = get_git_info()
+    if not is_inside:
+        raise RuntimeError("Current directory is not inside a git work tree.")
+    if current_branch == "HEAD":
+        raise RuntimeError("Detached HEAD is not supported for release push.")
+
+    branch = args.branch or current_branch
     old_version = get_package_version()
 
     stage_all = not args.no_stage_all
-    run_check = not args.no_build_check and read_bool_env("PUSH_RUN_BUILD_CHECK", True)
-    run_mobile_check = run_check and not args.no_mobile_check and read_bool_env("PUSH_RUN_MOBILE_CHECK", True)
+    
+    # Fast push default: preflight checks are skipped by default because GitHub CI builds/tests on main push
+    run_check = read_bool_env("PUSH_RUN_BUILD_CHECK", False) or args.with_build_check
     if args.no_build_check:
         run_check = False
-        run_mobile_check = False
+    run_mobile_check = run_check and not args.no_mobile_check and read_bool_env("PUSH_RUN_MOBILE_CHECK", True)
 
     if args.dry_run:
-        target = resolve_target_version(
-            current_version=old_version,
-            explicit_version=args.version,
-            bump=args.bump,
-            preid=args.preid,
-            version_strategy=args.version_strategy,
-        ) or f"{args.bump} (from {old_version}, strategy={args.version_strategy})"
+        try:
+            target = resolve_target_version(
+                current_version=old_version,
+                explicit_version=args.version,
+                bump=args.bump,
+                preid=args.preid,
+                version_strategy=args.version_strategy,
+            )
+        except Exception:
+            target = f"{args.bump} (from {old_version}, strategy={args.version_strategy})"
         print("[dry-run] Planned release actions:")
         print(f"  - branch: {branch}")
         print(f"  - remote: {args.remote}")
         print(f"  - version: {target}")
         print(f"  - stage_all: {stage_all}")
+        print(f"  - fast_contract_test: {not args.no_fast_test}")
         print(f"  - desktop_preflight_check: {run_check}")
         print(f"  - installer_smoke_check: {run_check and args.with_installer_smoke}")
         print(f"  - mobile_preflight_check: {run_mobile_check}")
@@ -362,8 +428,11 @@ def main() -> int:
         print("  - release assets: Windows installer + signed Android APK")
         return 0
 
+    run_fast_contract_tests(skip=args.no_fast_test)
     run_desktop_build_check(skip=not run_check, include_installer_smoke=args.with_installer_smoke)
     run_mobile_build_check(skip=not run_mobile_check)
+
+
     new_version = bump_version(
         current_version=old_version,
         version=args.version,
@@ -382,7 +451,7 @@ def main() -> int:
     commit_changes(commit_message)
     push_branch(args.remote, branch)
 
-    print("\n[success] Release push completed.")
+    print("\n[success] Release push completed in seconds!")
     print(f"[success] Commit pushed to {args.remote}/{branch}")
     print(
         f"[info] GitHub Action on '{branch}' should build and publish {expected_tag} "

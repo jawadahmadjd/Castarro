@@ -5539,6 +5539,9 @@ def format_duration_hhmmss(seconds: int) -> str:
     return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
 
+STREAM_STATS_CACHE: dict[str, dict[str, Any]] = {}
+
+
 def get_channel_streams_api(config_name: str, channel_name: str, fetch_stats: bool = False) -> dict[str, Any]:
     config, error = load_config_or_none(config_name)
     if not config:
@@ -5559,6 +5562,9 @@ def get_channel_streams_api(config_name: str, channel_name: str, fetch_stats: bo
                 scoped_config = account_config_view(config, account)
                 access_token, _ = youtube_service.valid_access_token(ROOT, scoped_config)
                 video_stats = youtube_service.get_video_stats_batch(access_token, [broadcast_id])
+                if broadcast_id in video_stats and video_stats[broadcast_id]:
+                    STREAM_STATS_CACHE[broadcast_id] = video_stats[broadcast_id]
+                    STREAM_STATS_CACHE[channel_name] = video_stats[broadcast_id]
             except Exception:
                 pass
 
@@ -5579,7 +5585,8 @@ def get_channel_streams_api(config_name: str, channel_name: str, fetch_stats: bo
             started_at = state.started_at
             uptime_seconds = int(time.time() - state.started_at)
             
-        stats_data = video_stats.get(broadcast_id, {}) if is_running and broadcast_id and fetch_stats else {}
+        cached_stats = STREAM_STATS_CACHE.get(broadcast_id) or STREAM_STATS_CACHE.get(channel_name) or {}
+        stats_data = video_stats.get(broadcast_id) if (fetch_stats and broadcast_id in video_stats) else cached_stats
         concurrent_viewers = stats_data.get("concurrent_viewers")
         total_views = stats_data.get("total_views")
         avg_view_duration = stats_data.get("avg_view_duration")

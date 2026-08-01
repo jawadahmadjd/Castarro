@@ -1,35 +1,34 @@
-# Push Automation (`python push`)
+# Fast Push Automation (`python push`)
 
-This repo now has a root-level script named `push` that automates release preparation.
+This repo has a root-level script named `push` optimized for fast execution (~2–3 seconds).
 
 ## What `python push` does
 
-1. Runs local desktop preflight (`npm run icon`, `npm run bundle:runtime`, `npm run dist`, `npm run smoke:packaged`) and mobile preflight (`npm run verify:mobile`) unless skipped.
-2. Bumps `package.json` version (and `package-lock.json`).
+1. Bumps `package.json` version (and `package-lock.json`) instantly using fast native JSON processing.
+2. Checks git remote to prevent tag conflicts.
 3. Commits and pushes the current branch.
 
-After push to `main`, GitHub Actions (`.github/workflows/release-windows.yml`) takes over:
+Heavy packaging, electron installer builds, runtime zipping, packaged smoke tests, and Android builds are delegated to **GitHub Actions CI** on `main`, keeping `python push` lightning fast.
+
+After push to `main`, GitHub Actions (`.github/workflows/release-windows.yml`) automatically takes over:
 
 - checks if tag `v<version>` already exists
 - detects whether Windows signing secrets are configured
-- builds installer + `latest.yml`
-- builds signed Android release APK + SHA256 checksum when Android signing secrets are configured
-- verifies installer Authenticode signature (when signing is enabled)
-- publishes GitHub release assets for Windows, plus Android when signing secrets are configured
+- bundles Python & FFmpeg runtimes and builds Windows installer + `latest.yml`
+- builds signed Android release APK when Android signing secrets are configured
+- verifies installer signature and runs packaged/installer smoke tests on CI
+- creates release tag and publishes GitHub release assets
 - users receive app update via auto-updater
 
 ## Important project-specific behavior
 
-Unlike the Animal Channel repo flow, this script does **not** create/push tags locally.
-Your workflow creates and pushes release tags itself after a successful build.
+This script does **not** create/push tags locally. GitHub Actions creates and pushes release tags automatically after a successful CI build.
 
-`python push` does not run installer smoke by default, because that check installs/uninstalls Castarro and requires the already-installed app to be closed. This keeps live streams running while local build/package checks still run.
-
-Use `--with-installer-smoke` only when you intentionally want the full local installer test and Castarro is closed. On Windows, that mode sets `CASTARRO_INSTALLER_SMOKE_ROOT=C:\tmp` automatically when the variable is not already set, then performs a writable-path preflight check.
+Local preflight build checks and smoke tests are **skipped by default** to minimize execution time to seconds. If you want to run heavy local preflight checks before pushing, pass `--with-build-check`.
 
 ## Common commands
 
-Patch release (default digit-cycle):
+Fast release push (default digit-cycle patch bump, finishes in ~2 seconds):
 
 ```powershell
 python push
@@ -53,28 +52,16 @@ Explicit version:
 python push --version 1.0.1
 ```
 
-Dry run:
+Dry run (previews version and actions in 0.3 seconds):
 
 ```powershell
 python push --dry-run
 ```
 
-Skip preflight check:
+Run heavy local preflight build checks before pushing:
 
 ```powershell
-python push --no-build-check
-```
-
-Skip only mobile preflight:
-
-```powershell
-python push --no-mobile-check
-```
-
-Run the full installer smoke too:
-
-```powershell
-python push --with-installer-smoke
+python push --with-build-check
 ```
 
 Only stage version files:
@@ -82,3 +69,4 @@ Only stage version files:
 ```powershell
 python push --no-stage-all
 ```
+

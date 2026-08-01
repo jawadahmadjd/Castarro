@@ -10881,6 +10881,7 @@ window.addEventListener("message", (event) => {
 
 let streamKeyMaskedState = {};
 let streamCardExpandedState = {};
+let streamStatsCache = {};
 
 function toggleStreamKeyMask(streamId) {
   streamKeyMaskedState[streamId] = !streamKeyMaskedState[streamId];
@@ -10960,6 +10961,25 @@ async function renderWorkspaceStreamsTab(channelName, cachedStreamsData = null) 
     }
 
     container.innerHTML = streams.map((s) => {
+      streamStatsCache[s.id] = streamStatsCache[s.id] || {};
+      if (s.concurrent_viewers !== null && s.concurrent_viewers !== undefined) {
+        streamStatsCache[s.id].concurrent_viewers = s.concurrent_viewers;
+      } else if (streamStatsCache[s.id].concurrent_viewers !== undefined) {
+        s.concurrent_viewers = streamStatsCache[s.id].concurrent_viewers;
+      }
+
+      if (s.total_views !== null && s.total_views !== undefined) {
+        streamStatsCache[s.id].total_views = s.total_views;
+      } else if (streamStatsCache[s.id].total_views !== undefined) {
+        s.total_views = streamStatsCache[s.id].total_views;
+      }
+
+      if (s.avg_view_duration) {
+        streamStatsCache[s.id].avg_view_duration = s.avg_view_duration;
+      } else if (streamStatsCache[s.id].avg_view_duration) {
+        s.avg_view_duration = streamStatsCache[s.id].avg_view_duration;
+      }
+
       const isRunning = Boolean(s.is_running || s.status === "running");
       const isExpanded = Boolean(streamCardExpandedState[s.id]);
       const statusBadge = isRunning

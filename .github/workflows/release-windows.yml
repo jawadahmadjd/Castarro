@@ -227,6 +227,18 @@ jobs:
           restore-keys: |
             electron-tools-${{ runner.os }}-
 
+      - name: Cache Runtime archives (FFmpeg & Python)
+        if: steps.version.outputs.exists != 'true'
+        uses: actions/cache@v4
+        with:
+          path: |
+            .runtime/package-cache
+            desktop/resources/python
+            desktop/resources/ffmpeg
+          key: runtime-cache-${{ runner.os }}-${{ hashFiles('scripts/package_runtime.ps1') }}
+          restore-keys: |
+            runtime-cache-${{ runner.os }}-
+
       - name: Generate app icon
         if: steps.version.outputs.exists != 'true'
         shell: pwsh
