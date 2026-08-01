@@ -7638,7 +7638,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def shutdown_streams() -> None:
     with STATE.lock:
-        streams = list(STATE.streams.values())
+        streams = list({id(s): s for s in STATE.streams.values()}.values())
         preview = STATE.preview
         STATE.preview = None
         proxy = STATE.cloud_proxy

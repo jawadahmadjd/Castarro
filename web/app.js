@@ -390,10 +390,31 @@ function formatBitrate(value) {
   return `${amount.toFixed(decimals)} ${units[unitIndex]}`;
 }
 
+function getUniqueActiveStreams(streams = {}) {
+  const seenPids = new Set();
+  const result = [];
+  for (const stream of Object.values(streams || {})) {
+    if (!stream || !isStreamCurrentlyRunning(stream)) continue;
+    const pid = Number(stream?.pid);
+    const identifier = Number.isFinite(pid) && pid > 0 ? pid : JSON.stringify(stream);
+    if (seenPids.has(identifier)) continue;
+    seenPids.add(identifier);
+    result.push(stream);
+  }
+  return result;
+}
+
 function usageProcessPids(payload) {
-  return Object.values(payload?.streams || {})
-    .map((stream) => Number(stream?.pid))
-    .filter((pid) => Number.isFinite(pid) && pid > 0);
+  const seen = new Set();
+  const pids = [];
+  for (const stream of Object.values(payload?.streams || {})) {
+    const pid = Number(stream?.pid);
+    if (Number.isFinite(pid) && pid > 0 && !seen.has(pid)) {
+      seen.add(pid);
+      pids.push(pid);
+    }
+  }
+  return pids;
 }
 
 function renderUsageMetrics(payload = state.status) {
@@ -921,7 +942,7 @@ function isOverviewVisible() {
 }
 
 function runningPreviewCandidates(streams = state.status?.streams || {}) {
-  return Object.values(streams || {}).filter((stream) => isStreamCurrentlyRunning(stream));
+  return getUniqueActiveStreams(streams);
 }
 
 function selectedPreviewChannelName(streams = state.status?.streams || {}) {
@@ -1945,12 +1966,13 @@ function renderConfigSelect(configs) {
 }
 
 function renderStatus(payload) {
-  const running = Object.values(payload.streams).filter((stream) => isStreamCurrentlyRunning(stream)).length;
+  const activeStreams = getUniqueActiveStreams(payload?.streams || {});
+  const running = activeStreams.length;
 
   $("serverState").textContent = payload.config_exists ? `${running} live stream${running === 1 ? "" : "s"}` : "Config needed";
   const startAllButton = $("startAll");
   if (startAllButton) {
-    const anyRunning = Object.values(payload.streams).some((stream) => isStreamActive(stream));
+    const anyRunning = running > 0;
     const importBusy = isLiveImportBusy();
     startAllButton.textContent = anyRunning ? "Stop all streams" : "Start All Streams";
     startAllButton.classList.toggle("success", !anyRunning);
@@ -10750,7 +10772,7 @@ document.addEventListener("keydown", (event) => {
 if ($("startAll")) {
   $("startAll").addEventListener("click", () => {
     const streams = state.status?.streams || {};
-    const anyRunning = Object.values(streams).some((stream) => isStreamActive(stream));
+    const anyRunning = getUniqueActiveStreams(streams).length > 0;
     const action = anyRunning ? stopStream : startStream;
     action().catch((error) => toast(error.message));
   });
