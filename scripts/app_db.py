@@ -854,6 +854,126 @@ def stream_transfer_today_bytes(config_name: str | None = None) -> int:
     return int(row["total"] or 0) if row else 0
 
 
+def stream_transfer_month_bytes(config_name: str | None = None) -> int:
+    init_db()
+    local_month_start = datetime.now().astimezone().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    utc_month_start = local_month_start.astimezone(timezone.utc).isoformat(timespec="seconds")
+    where = ["datetime(started_at) >= datetime(?)"]
+    params: list[Any] = [utc_month_start]
+    if config_name:
+        where.append("config_name = ?")
+        params.append(config_name)
+    with connect() as db:
+        row = db.execute(
+            f"""
+            SELECT COALESCE(SUM(transferred_bytes), 0) AS total
+            FROM stream_sessions
+            WHERE {' AND '.join(where)}
+            """,
+            params,
+        ).fetchone()
+    return int(row["total"] or 0) if row else 0
+
+
+def stream_transfer_range_details(
+    config_name: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> dict[str, Any]:
+    init_db()
+    where: list[str] = []
+    params: list[Any] = []
+
+    if config_name:
+        where.append("config_name = ?")
+        params.append(config_name)
+
+    if start_date:
+        try:
+            raw_start = str(start_date).strip()
+            if "T" in raw_start:
+                dt_start = datetime.fromisoformat(raw_start)
+            else:
+                parts = [int(p) for p in raw_start.split("-")]
+                dt_start = datetime(parts[0], parts[1], parts[2], 0, 0, 0).astimezone()
+            utc_start = dt_start.astimezone(timezone.utc).isoformat(timespec="seconds")
+            where.append("datetime(started_at) >= datetime(?)")
+            params.append(utc_start)
+        except Exception:
+            pass
+
+    if end_date:
+        try:
+            raw_end = str(end_date).strip()
+            if "T" in raw_end:
+                dt_end = datetime.fromisoformat(raw_end)
+            else:
+                parts = [int(p) for p in raw_end.split("-")]
+                dt_end = datetime(parts[0], parts[1], parts[2], 23, 59, 59, 999999).astimezone()
+            utc_end = dt_end.astimezone(timezone.utc).isoformat(timespec="seconds")
+            where.append("datetime(started_at) <= datetime(?)")
+            params.append(utc_end)
+        except Exception:
+            pass
+
+    where_clause = f"WHERE {' AND '.join(where)}" if where else ""
+
+    with connect() as db:
+        summary_row = db.execute(
+            f"""
+            SELECT COALESCE(SUM(transferred_bytes), 0) AS total_bytes,
+                   COUNT(*) AS session_count
+            FROM stream_sessions
+            {where_clause}
+            """,
+            params,
+        ).fetchone()
+
+        channel_rows = db.execute(
+            f"""
+            SELECT channel_name, COALESCE(SUM(transferred_bytes), 0) AS bytes, COUNT(*) as count
+            FROM stream_sessions
+            {where_clause}
+            GROUP BY channel_name
+            ORDER BY bytes DESC
+            """,
+            params,
+        ).fetchall()
+
+        day_rows = db.execute(
+            f"""
+            SELECT strftime('%Y-%m-%d', started_at) AS date_str, COALESCE(SUM(transferred_bytes), 0) AS bytes, COUNT(*) as count
+            FROM stream_sessions
+            {where_clause}
+            GROUP BY date_str
+            ORDER BY date_str DESC
+            """,
+            params,
+        ).fetchall()
+
+    return {
+        "total_bytes": int(summary_row["total_bytes"] or 0) if summary_row else 0,
+        "session_count": int(summary_row["session_count"] or 0) if summary_row else 0,
+        "by_channel": [
+            {
+                "channel_name": row["channel_name"],
+                "bytes": int(row["bytes"] or 0),
+                "session_count": int(row["count"] or 0),
+            }
+            for row in channel_rows
+        ],
+        "by_day": [
+            {
+                "date": row["date_str"] or "Unknown",
+                "bytes": int(row["bytes"] or 0),
+                "session_count": int(row["count"] or 0),
+            }
+            for row in day_rows
+        ],
+    }
+
+
+
 def live_chat_messages_for_session(db: sqlite3.Connection, session: dict[str, Any], limit: int = 4) -> dict[str, Any]:
     session_id = int(session.get("id") or 0)
     broadcast_id = str(session.get("youtube_broadcast_id") or "").strip()

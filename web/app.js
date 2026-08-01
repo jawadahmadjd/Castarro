@@ -398,26 +398,22 @@ function usageProcessPids(payload) {
 
 function renderUsageMetrics(payload = state.status) {
   const cpuNode = $("workspaceUsageCpu");
-  const gpuNode = $("workspaceUsageGpu");
   const ramNode = $("workspaceUsageRam");
-  const dataNode = $("workspaceUsageData");
+  const dataTodayNode = $("workspaceUsageData");
+  const dataMonthNode = $("workspaceUsageDataMonth");
   const metrics = state.usageMetrics || {};
   const usage = payload?.usage || {};
   if (cpuNode) {
     cpuNode.textContent = Number.isFinite(Number(metrics.cpuPercent)) ? formatCpuUsage(metrics.cpuPercent) : "Unavailable";
   }
-  if (gpuNode) {
-    gpuNode.textContent =
-      metrics.gpuStatus === "unavailable" || !Number.isFinite(Number(metrics.gpuPercent))
-        ? "Unavailable"
-        : formatCpuUsage(metrics.gpuPercent);
-    gpuNode.title = metrics.gpuDetail || "";
-  }
   if (ramNode) {
     ramNode.textContent = Number.isFinite(Number(metrics.memoryBytes)) ? formatBytes(metrics.memoryBytes) : "Unavailable";
   }
-  if (dataNode) {
-    dataNode.textContent = formatBytes(usage.stream_transfer_today_bytes || 0);
+  if (dataTodayNode) {
+    dataTodayNode.textContent = formatBytes(usage.stream_transfer_today_bytes || 0);
+  }
+  if (dataMonthNode) {
+    dataMonthNode.textContent = formatBytes(usage.stream_transfer_month_bytes || 0);
   }
 }
 
@@ -435,6 +431,120 @@ async function refreshUsageMetrics(payload) {
   }
   renderUsageMetrics(payload);
 }
+
+function formatDateForInput(date) {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+function openDataUsageModal() {
+  const modal = $("dataUsageModal");
+  if (!modal) return;
+  modal.classList.remove("hidden");
+  const startInput = $("dataUsageStartDate");
+  const endInput = $("dataUsageEndDate");
+  const now = new Date();
+  if (startInput && !startInput.value) {
+    const firstDay = new Date(now.getFullYear(), now.getMonth(), 1);
+    startInput.value = formatDateForInput(firstDay);
+  }
+  if (endInput && !endInput.value) {
+    endInput.value = formatDateForInput(now);
+  }
+  fetchCustomDataUsage();
+}
+
+function closeDataUsageModal() {
+  const modal = $("dataUsageModal");
+  if (modal) modal.classList.add("hidden");
+}
+
+function setDataUsagePreset(preset) {
+  const startInput = $("dataUsageStartDate");
+  const endInput = $("dataUsageEndDate");
+  if (!startInput || !endInput) return;
+  const now = new Date();
+  endInput.value = formatDateForInput(now);
+
+  if (preset === 'month') {
+    const firstDay = new Date(now.getFullYear(), now.getMonth(), 1);
+    startInput.value = formatDateForInput(firstDay);
+  } else if (preset === 'today') {
+    startInput.value = formatDateForInput(now);
+  } else if (preset === '7days') {
+    const start = new Date(now.getTime() - 6 * 24 * 60 * 60 * 1000);
+    startInput.value = formatDateForInput(start);
+  } else if (preset === '30days') {
+    const start = new Date(now.getTime() - 29 * 24 * 60 * 60 * 1000);
+    startInput.value = formatDateForInput(start);
+  }
+
+  fetchCustomDataUsage();
+}
+
+async function fetchCustomDataUsage() {
+  const startVal = $("dataUsageStartDate")?.value || "";
+  const endVal = $("dataUsageEndDate")?.value || "";
+  const totalNode = $("dataUsageTotalBytes");
+  const countNode = $("dataUsageSessionCount");
+  const rangeLabel = $("dataUsageRangeLabel");
+  const channelList = $("dataUsageChannelList");
+  const dailyList = $("dataUsageDailyList");
+
+  if (rangeLabel) {
+    rangeLabel.textContent = startVal && endVal ? `${startVal} to ${endVal}` : "Custom Range";
+  }
+
+  try {
+    const params = new URLSearchParams();
+    if (state.config) params.set("config", state.config);
+    if (startVal) params.set("start", startVal);
+    if (endVal) params.set("end", endVal);
+
+    const res = await fetch(`/api/data-usage?${params.toString()}`);
+    if (!res.ok) throw new Error("Failed to fetch data usage");
+    const data = await res.json();
+
+    if (totalNode) totalNode.textContent = formatBytes(data.total_bytes || 0);
+    if (countNode) countNode.textContent = String(data.session_count || 0);
+
+    if (channelList) {
+      if (!data.by_channel || data.by_channel.length === 0) {
+        channelList.innerHTML = '<div class="panel-empty">No channel usage recorded.</div>';
+      } else {
+        channelList.innerHTML = data.by_channel.map(ch => `
+          <div class="data-usage-item-row">
+            <strong>${escapeHtml(ch.channel_name)}</strong>
+            <span>${formatBytes(ch.bytes)} (${ch.session_count} stream${ch.session_count === 1 ? '' : 's'})</span>
+          </div>
+        `).join("");
+      }
+    }
+
+    if (dailyList) {
+      if (!data.by_day || data.by_day.length === 0) {
+        dailyList.innerHTML = '<div class="panel-empty">No daily usage recorded.</div>';
+      } else {
+        dailyList.innerHTML = data.by_day.map(d => `
+          <div class="data-usage-item-row">
+            <span>${escapeHtml(d.date)}</span>
+            <strong>${formatBytes(d.bytes)}</strong>
+          </div>
+        `).join("");
+      }
+    }
+  } catch (err) {
+    if (totalNode) totalNode.textContent = "Error";
+    if (channelList) channelList.innerHTML = `<div class="panel-empty">Error: ${escapeHtml(err.message)}</div>`;
+  }
+}
+
+window.openDataUsageModal = openDataUsageModal;
+window.closeDataUsageModal = closeDataUsageModal;
+window.setDataUsagePreset = setDataUsagePreset;
+window.fetchCustomDataUsage = fetchCustomDataUsage;
 
 const defaultLiveProfile = () => ({
   mode: "copy",

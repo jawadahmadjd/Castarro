@@ -1246,6 +1246,29 @@ def assert_prestart_checks_replace_stale_broadcast() -> None:
         app_db.record_event = original_record_event
 
 
+def assert_ensure_channel_streams_no_dummy_streams() -> None:
+    # 1. New channel without streams key
+    channel = {"name": "TestChannel", "stream_key": "main_key"}
+    streams = web_ui.ensure_channel_streams(channel)
+    assert len(streams) == 1, f"Expected 1 stream, got {len(streams)}"
+    assert streams[0]["name"] == "Main Stream Feed"
+    assert streams[0]["stream_key"] == "main_key"
+    assert not any("dummy" in s.get("name", "").lower() for s in streams)
+
+    # 2. Existing channel with legacy dummy stream embedded
+    channel_legacy = {
+        "name": "LegacyChannel",
+        "streams": [
+            {"id": "stream_1", "name": "Main Stream Feed", "stream_key": "main_key"},
+            {"id": "stream_2", "name": "Secondary Stream (Dummy / Test)", "stream_key": "sample_dummy_stream_key_secondary"},
+        ]
+    }
+    cleaned_streams = web_ui.ensure_channel_streams(channel_legacy)
+    assert len(cleaned_streams) == 1, f"Expected legacy dummy stream to be filtered out, got {len(cleaned_streams)}"
+    assert cleaned_streams[0]["name"] == "Main Stream Feed"
+    assert cleaned_streams[0]["stream_key"] == "main_key"
+
+
 def main() -> int:
     assert_channel_scoped_schedule_routes_to_linked_accounts()
     assert_schedule_preserves_dual_stream_preference()
@@ -1270,9 +1293,11 @@ def main() -> int:
     assert_live_chat_parser_keeps_event_comments_and_emoji()
     assert_live_chat_messages_are_saved_with_stream_history()
     assert_prestart_checks_replace_stale_broadcast()
+    assert_ensure_channel_streams_no_dummy_streams()
     print("channel_workspace_contract_test: PASS")
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

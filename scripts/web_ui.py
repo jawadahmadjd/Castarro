@@ -1621,7 +1621,7 @@ def ensure_channel_streams(channel: dict[str, Any]) -> list[dict[str, Any]]:
     if not isinstance(channel, dict):
         return []
     streams = channel.get("streams")
-    if not isinstance(streams, list) or not streams:
+    if not isinstance(streams, list):
         key = str(channel.get("stream_key") or "").strip()
         key_env = str(channel.get("stream_key_env") or "").strip()
         streams = [
@@ -1632,20 +1632,35 @@ def ensure_channel_streams(channel: dict[str, Any]) -> list[dict[str, Any]]:
                 "stream_key_env": key_env,
                 "enabled": bool(channel.get("enabled", True)),
                 "playlist": [],
-            },
-            {
-                "id": "stream_2",
-                "name": "Secondary Stream (Dummy / Test)",
-                "stream_key": "sample_dummy_stream_key_secondary",
-                "stream_key_env": "",
-                "enabled": True,
-                "playlist": [],
             }
         ]
         channel["streams"] = streams
     else:
-        for idx, s in enumerate(streams):
-            if isinstance(s, dict):
+        filtered_streams = []
+        for s in streams:
+            if not isinstance(s, dict):
+                continue
+            sname = str(s.get("name") or "").strip()
+            skey = str(s.get("stream_key") or "").strip()
+            if skey == "sample_dummy_stream_key_secondary" or "dummy" in sname.lower() or sname == "Secondary Stream (Dummy / Test)":
+                continue
+            filtered_streams.append(s)
+
+        if not filtered_streams:
+            key = str(channel.get("stream_key") or "").strip()
+            key_env = str(channel.get("stream_key_env") or "").strip()
+            filtered_streams = [
+                {
+                    "id": "stream_1",
+                    "name": "Main Stream Feed",
+                    "stream_key": key,
+                    "stream_key_env": key_env,
+                    "enabled": bool(channel.get("enabled", True)),
+                    "playlist": [],
+                }
+            ]
+        else:
+            for idx, s in enumerate(filtered_streams):
                 if not s.get("id"):
                     s["id"] = f"stream_{idx + 1}"
                 if not s.get("name"):
@@ -1654,7 +1669,9 @@ def ensure_channel_streams(channel: dict[str, Any]) -> list[dict[str, Any]]:
                     s["enabled"] = True
                 if "playlist" not in s:
                     s["playlist"] = []
+        channel["streams"] = filtered_streams
     return channel["streams"]
+
 
 
 def comparable_youtube_name(value: Any, *, letters_only: bool = True) -> str:
@@ -5800,6 +5817,7 @@ def status_payload(config_name: str, *, include_youtube_health: bool = False) ->
         "stream_cycles": stream_cycle_status(config_name, config) if config else default_stream_cycle_settings(),
         "usage": {
             "stream_transfer_today_bytes": app_db.stream_transfer_today_bytes(config_name) + active_transfer_bytes,
+            "stream_transfer_month_bytes": app_db.stream_transfer_month_bytes(config_name) + active_transfer_bytes,
             "active_stream_transfer_bytes": active_transfer_bytes,
             "battery_today": {
                 "status": "unavailable",
@@ -7146,6 +7164,21 @@ class Handler(BaseHTTPRequestHandler):
 
             if parsed.path == "/api/sync/status":
                 json_response(self, sync_public_status())
+                return
+
+            if parsed.path == "/api/data-usage":
+                config_name = safe_config_name(query.get("config", [DEFAULT_CONFIG])[0])
+                start_at = str(query.get("start", [""])[0] or "").strip() or None
+                end_at = str(query.get("end", [""])[0] or "").strip() or None
+                update_request_trace(self, config_name=config_name)
+                details = app_db.stream_transfer_range_details(config_name, start_date=start_at, end_date=end_at)
+                st_payload = status_payload(config_name)
+                active_bytes = int(st_payload.get("usage", {}).get("active_stream_transfer_bytes", 0) or 0)
+                if active_bytes > 0:
+                    details["total_bytes"] += active_bytes
+                details["start_date"] = start_at
+                details["end_date"] = end_at
+                json_response(self, details)
                 return
 
             if parsed.path == "/api/stream-history":

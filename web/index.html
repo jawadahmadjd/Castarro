@@ -141,13 +141,13 @@
               <span class="field-hint">RAM</span>
               <strong id="workspaceUsageRam">Checking</strong>
             </div>
-            <div class="workspace-status-item">
+            <div class="workspace-status-item interactive-status-item" id="workspaceUsageTodayItem" role="button" tabindex="0" title="Click to view and select custom date range data usage" onclick="openDataUsageModal()">
               <span class="field-hint">Data today</span>
               <strong id="workspaceUsageData">Checking</strong>
             </div>
-            <div class="workspace-status-item">
-              <span class="field-hint">GPU</span>
-              <strong id="workspaceUsageGpu">Checking</strong>
+            <div class="workspace-status-item interactive-status-item" id="workspaceUsageMonthItem" role="button" tabindex="0" title="Click to view and select custom date range data usage" onclick="openDataUsageModal()">
+              <span class="field-hint">Data month 📅</span>
+              <strong id="workspaceUsageDataMonth">Checking</strong>
             </div>
           </section>
 
@@ -502,6 +502,69 @@
         <div class="modal-actions">
           <button class="pill ghost" id="cancelStreamVideoPicker" type="button" onclick="closeStreamVideoPickerModal()">Cancel</button>
           <button class="pill primary" id="applyStreamVideoPicker" type="button" onclick="confirmStreamVideoPickerSelection()">Apply Selected Videos</button>
+        </div>
+      </section>
+    </div>
+    <div class="modal-backdrop hidden" id="dataUsageModal" role="dialog" aria-modal="true" aria-labelledby="dataUsageTitle">
+      <section class="modal-panel data-usage-modal">
+        <div class="modal-head">
+          <div class="modal-head-row">
+            <div>
+              <h2 id="dataUsageTitle">Data Usage Tracker 📅</h2>
+              <p class="helper">Select custom dates from calendar to track stream data usage without capping.</p>
+            </div>
+            <button class="pill ghost icon-only" type="button" onclick="closeDataUsageModal()" title="Close dialog">✕</button>
+          </div>
+        </div>
+        <div class="data-usage-body">
+          <div class="data-usage-presets-row">
+            <button class="pill small" type="button" onclick="setDataUsagePreset('month')">This Month</button>
+            <button class="pill small ghost" type="button" onclick="setDataUsagePreset('today')">Today</button>
+            <button class="pill small ghost" type="button" onclick="setDataUsagePreset('7days')">Last 7 Days</button>
+            <button class="pill small ghost" type="button" onclick="setDataUsagePreset('30days')">Last 30 Days</button>
+          </div>
+          <div class="data-usage-date-picker-row">
+            <label>
+              Start Date
+              <input type="date" id="dataUsageStartDate" onchange="fetchCustomDataUsage()">
+            </label>
+            <label>
+              End Date
+              <input type="date" id="dataUsageEndDate" onchange="fetchCustomDataUsage()">
+            </label>
+            <button class="pill primary small" type="button" onclick="fetchCustomDataUsage()">Query Usage</button>
+          </div>
+          <div class="data-usage-summary-card" id="dataUsageSummaryCard">
+            <div class="data-usage-stat">
+              <span class="stat-label">Total Data Used</span>
+              <strong class="stat-value" id="dataUsageTotalBytes">0 B</strong>
+            </div>
+            <div class="data-usage-stat">
+              <span class="stat-label">Sessions</span>
+              <strong class="stat-value" id="dataUsageSessionCount">0</strong>
+            </div>
+            <div class="data-usage-stat">
+              <span class="stat-label">Period</span>
+              <span class="stat-range-text" id="dataUsageRangeLabel">Month to Date</span>
+            </div>
+          </div>
+          <div class="data-usage-details-grid">
+            <div class="data-usage-panel">
+              <h3>Channel Breakdown</h3>
+              <div id="dataUsageChannelList" class="data-usage-list">
+                <div class="panel-empty">No data for selected period.</div>
+              </div>
+            </div>
+            <div class="data-usage-panel">
+              <h3>Daily Usage</h3>
+              <div id="dataUsageDailyList" class="data-usage-list">
+                <div class="panel-empty">No data for selected period.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="modal-actions">
+          <button class="pill ghost" type="button" onclick="closeDataUsageModal()">Close</button>
         </div>
       </section>
     </div>

@@ -193,30 +193,15 @@ async function collectUsageMetrics(payload = {}) {
   const backendPid = backend?.pid || readBackendInfo()?.pid || null;
   const externalPids = [backendPid, ...streamPids].filter(Boolean);
   const electronMetrics = electronProcessMetrics();
-  const trackedPids = [...electronMetrics.map((item) => item.pid), ...externalPids];
-  const [externalMetrics, gpuSnapshot] = await Promise.all([
-    queryWindowsProcesses(externalPids),
-    queryWindowsGpuUsage(trackedPids),
-  ]);
-  const gpuByPid = new Map((gpuSnapshot.items || []).map((item) => [item.pid, item.gpuPercent]));
+  const externalMetrics = await queryWindowsProcesses(externalPids);
   const processes = [...electronMetrics, ...externalMetrics]
-    .filter((item) => item.pid > 0)
-    .map((item) => ({
-      ...item,
-      gpuPercent: Math.max(0, safeNumber(gpuByPid.get(item.pid), 0)),
-    }));
+    .filter((item) => item.pid > 0);
   const cpuPercent = processes.reduce((sum, item) => sum + safeNumber(item.cpuPercent, 0), 0);
   const memoryBytes = processes.reduce((sum, item) => sum + safeNumber(item.memoryBytes, 0), 0);
-  const gpuPercent = Math.min(100, processes.reduce((sum, item) => sum + safeNumber(item.gpuPercent, 0), 0));
   return {
     cpuPercent,
-    gpuPercent,
     memoryBytes,
     processes,
-    gpuStatus: gpuSnapshot.ok ? "available" : "unavailable",
-    gpuDetail: gpuSnapshot.ok
-      ? "Estimated GPU utilization across Castarro, backend, and FFmpeg processes."
-      : "GPU usage is unavailable on this Windows device.",
   };
 }
 

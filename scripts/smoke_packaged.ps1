@@ -34,7 +34,14 @@ foreach ($Required in @($Python, $Script, $WebRoot, $FFmpeg, $FFprobe)) {
 }
 
 if (Test-Path -LiteralPath $UserData) {
-    Remove-Item -LiteralPath $UserData -Recurse -Force
+    try {
+        Remove-Item -LiteralPath $UserData -Recurse -Force -ErrorAction Stop
+    }
+    catch {
+        Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -and ($_.CommandLine -like "*$DataRoot*" -or $_.CommandLine -like "*$UserData*") } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+        Start-Sleep -Milliseconds 500
+        Remove-Item -LiteralPath $UserData -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
 New-Item -ItemType Directory -Force -Path $DataRoot, $LogRoot | Out-Null
 @{

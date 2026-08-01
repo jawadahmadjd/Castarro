@@ -111,8 +111,8 @@ async function run() {
           },
           {
             id: "stream_2",
-            name: "Secondary Stream (Dummy / Test)",
-            stream_key: "sample_dummy_stream_key_secondary",
+            name: "Backup Stream Feed",
+            stream_key: "sample_stream_key_backup",
             playlist: [],
           },
         ],
@@ -187,7 +187,7 @@ async function run() {
     // Verify Stream Cards
     await page.waitForSelector(".stream-card", { timeout: 5000 });
     const count = await page.locator(".stream-card").count();
-    console.log(`[playwright-test] Found ${count} stream cards (Main Feed + Dummy Stream).`);
+    console.log(`[playwright-test] Found ${count} stream cards (Main Feed + Backup Stream).`);
 
     // Click first card header to expand details
     console.log("[playwright-test] Expanding first stream card...");
