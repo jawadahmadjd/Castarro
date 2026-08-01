@@ -392,13 +392,19 @@ function formatBitrate(value) {
 
 function getUniqueActiveStreams(streams = {}) {
   const seenPids = new Set();
+  const seenIds = new Set();
   const result = [];
-  for (const stream of Object.values(streams || {})) {
+  for (const [key, stream] of Object.entries(streams || {})) {
     if (!stream || !isStreamCurrentlyRunning(stream)) continue;
     const pid = Number(stream?.pid);
-    const identifier = Number.isFinite(pid) && pid > 0 ? pid : JSON.stringify(stream);
-    if (seenPids.has(identifier)) continue;
-    seenPids.add(identifier);
+    const streamId = stream?.id || key;
+    if (Number.isFinite(pid) && pid > 0) {
+      if (seenPids.has(pid)) continue;
+      seenPids.add(pid);
+    } else {
+      if (seenIds.has(streamId)) continue;
+      seenIds.add(streamId);
+    }
     result.push(stream);
   }
   return result;
@@ -1420,8 +1426,20 @@ function getChannelTasks(tasks, channelName) {
 }
 
 function getChannelStreams(streams, channelName) {
-  if (!channelName) return null;
-  return streams?.[channelName] || null;
+  if (!channelName || !streams) return null;
+  if (streams[channelName]) return streams[channelName];
+  const prefix = `${channelName}:`;
+  for (const [key, stream] of Object.entries(streams)) {
+    if ((key.startsWith(prefix) || stream?.channel === channelName || stream?.name === channelName) && isStreamCurrentlyRunning(stream)) {
+      return stream;
+    }
+  }
+  for (const [key, stream] of Object.entries(streams)) {
+    if (key.startsWith(prefix) || stream?.channel === channelName || stream?.name === channelName) {
+      return stream;
+    }
+  }
+  return null;
 }
 
 function isStreamCurrentlyRunning(stream) {
@@ -1429,11 +1447,17 @@ function isStreamCurrentlyRunning(stream) {
   if (Object.prototype.hasOwnProperty.call(stream, "process_running")) {
     return Boolean(stream.process_running);
   }
+  if (Object.prototype.hasOwnProperty.call(stream, "is_running")) {
+    return Boolean(stream.is_running);
+  }
+  if (stream.status === "running") {
+    return true;
+  }
   return Boolean(stream.running);
 }
 
 function isStreamActive(stream) {
-  return Boolean(stream?.running || stream?.process_running || stream?.recovering);
+  return Boolean(stream?.running || stream?.process_running || stream?.recovering || stream?.is_running || stream?.status === "running");
 }
 
 function getChannelEvents(events, channelName) {
@@ -2038,7 +2062,7 @@ function renderChannels(payload) {
   const channelsNode = $("channels");
   if (!channelsNode) return;
   channelsNode.innerHTML = payload.channels.map((channel) => {
-    const stream = payload.streams[channel.name];
+    const stream = getChannelStreams(payload?.streams || {}, channel.name);
     const live = isStreamCurrentlyRunning(stream);
     const importBusy = isLiveImportBusy(channel.name);
     const key = streamKeyLabel(channel);
@@ -2317,7 +2341,7 @@ function renderWorkspaceChannelList(payload) {
   list.innerHTML = visibleChannels.map((statusChannel) => {
     const channel = channelWithConfigVisuals(statusChannel);
     const channelName = String(channel?.name || "").trim();
-    const stream = payload?.streams?.[channel.name];
+    const stream = getChannelStreams(payload?.streams || {}, channelName);
     const linked = getLinkedAccountForChannel(state.youtubeStatus, channel);
     const isConnected = Boolean(linked?.connected);
     const connectionText = isConnected ? "Connected" : "Disconnected";
@@ -2756,7 +2780,7 @@ function renderWorkspaceHeader(payload, channel) {
   }
   const alertScrollSnapshot = captureWorkspaceAlertsScroll();
   const escapedName = escapeJs(channel.name);
-  const stream = payload?.streams?.[channel.name] || null;
+  const stream = getChannelStreams(payload?.streams || {}, channel.name);
   const streamRunning = isStreamActive(stream);
   const importBusy = isLiveImportBusy(channel.name);
   const streamAction = streamRunning ? "stopStream" : "startStream";
@@ -6520,7 +6544,7 @@ function renderYoutubeSettingsPanel(config) {
   const videosMarkup = activeLiveIndex >= 0
     ? liveVideosCard(channelConfig.channels[activeLiveIndex], activeLiveIndex)
     : "";
-  const selectedStream = selectedChannelName ? state.status?.streams?.[selectedChannelName] : null;
+  const selectedStream = selectedChannelName ? getChannelStreams(state.status?.streams || {}, selectedChannelName) : null;
   const selectedStreamRunning = Boolean(selectedStream?.running);
   const storageProviders = Array.isArray(state.storageStatus?.providers) ? state.storageStatus.providers : [];
   const storageById = new Map(storageProviders.map((item) => [String(item.id || ""), item]));
@@ -10959,6 +10983,9 @@ async function renderWorkspaceStreamsTab(channelName, cachedStreamsData = null) 
     container.innerHTML = `<div class="panel-empty">Please select a channel to manage its streams.</div>`;
     return;
   }
+  if (channelName && !state.workspace.selectedChannelName) {
+    state.workspace.selectedChannelName = channelName;
+  }
 
   try {
     let streams = cachedStreamsData;
@@ -11252,15 +11279,96 @@ async function stopSingleStream(channelName, streamId) {
 }
 
 async function openAddStreamModal(channelName) {
-  const targetChannel = channelName || state.workspace.selectedChannelName;
+  const targetChannel = String(
+    channelName ||
+    state.workspace.selectedChannelName ||
+    (Array.isArray(state.configData?.channels) && state.configData.channels[0]?.name) ||
+    ""
+  ).trim();
+
   if (!targetChannel) {
     toast("Please select a channel first.", "warn");
     return;
   }
-  const streamName = prompt("Enter a name for this new stream (e.g. Gaming Stream, Music Feed, Stream 2):", "Stream 2");
-  if (!streamName || !streamName.trim()) return;
-  const streamKey = prompt("Paste the YouTube Stream Key for this stream:", "");
-  if (streamKey === null) return;
+
+  state.addStreamTargetChannel = targetChannel;
+
+  const channelInput = $("addStreamChannelInput");
+  const nameInput = $("addStreamNameInput");
+  const keyInput = $("addStreamKeyInput");
+  const modal = $("addStreamModal");
+
+  if (channelInput) channelInput.value = targetChannel;
+
+  let defaultName = "Stream 2";
+  try {
+    const cfg = state.config || "config.ready.json";
+    const data = await fetchApi(`/api/channel/streams?config=${encodeURIComponent(cfg)}&channel=${encodeURIComponent(targetChannel)}`);
+    if (data && data.ok && Array.isArray(data.streams)) {
+      defaultName = `Stream ${data.streams.length + 1}`;
+    }
+  } catch (err) {
+    // fallback
+  }
+
+  if (nameInput) nameInput.value = defaultName;
+  if (keyInput) keyInput.value = "";
+
+  if (modal) {
+    modal.classList.remove("hidden");
+    window.setTimeout(() => {
+      nameInput?.focus();
+      nameInput?.select?.();
+    }, 0);
+  }
+}
+
+function closeAddStreamModal() {
+  const modal = $("addStreamModal");
+  if (modal) modal.classList.add("hidden");
+}
+
+function handleAddStreamModalKey(event) {
+  if (event.key === "Escape") {
+    closeAddStreamModal();
+    return;
+  }
+  if (event.key === "Enter") {
+    event.preventDefault();
+    submitAddStreamModal();
+  }
+}
+
+async function submitAddStreamModal() {
+  const targetChannel = String(
+    state.addStreamTargetChannel ||
+    $("addStreamChannelInput")?.value ||
+    state.workspace.selectedChannelName ||
+    ""
+  ).trim();
+
+  if (!targetChannel) {
+    toast("Please select a channel first.", "warn");
+    return;
+  }
+
+  const nameInput = $("addStreamNameInput");
+  const keyInput = $("addStreamKeyInput");
+  const confirmBtn = $("confirmAddStreamBtn");
+
+  const streamName = (nameInput?.value || "").trim();
+  const streamKey = (keyInput?.value || "").trim();
+
+  if (!streamName) {
+    toast("Please enter a name for the new stream.", "warn");
+    nameInput?.focus();
+    return;
+  }
+
+  if (confirmBtn) {
+    confirmBtn.disabled = true;
+    confirmBtn.textContent = "Adding...";
+  }
 
   try {
     const response = await fetchApi("/api/channel/streams/add", {
@@ -11268,21 +11376,33 @@ async function openAddStreamModal(channelName) {
       body: JSON.stringify({
         config: state.config,
         channel: targetChannel,
-        name: streamName.trim(),
-        stream_key: (streamKey || "").trim()
+        name: streamName,
+        stream_key: streamKey
       })
     });
+
     if (response?.error) {
       toast("Failed to add stream: " + response.error, "danger");
     } else {
       toast(`Stream "${streamName}" added!`, "success");
+      closeAddStreamModal();
       await refresh();
       renderWorkspaceStreamsTab(targetChannel);
     }
   } catch (err) {
     toast("Error adding stream: " + err.message, "danger");
+  } finally {
+    if (confirmBtn) {
+      confirmBtn.disabled = false;
+      confirmBtn.textContent = "Add Stream";
+    }
   }
 }
+
+window.openAddStreamModal = openAddStreamModal;
+window.closeAddStreamModal = closeAddStreamModal;
+window.handleAddStreamModalKey = handleAddStreamModalKey;
+window.submitAddStreamModal = submitAddStreamModal;
 
 async function deleteStreamFromChannel(channelName, streamId) {
   if (!confirm("Are you sure you want to delete this stream from the channel?")) return;

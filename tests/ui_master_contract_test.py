@@ -132,6 +132,17 @@ def test_master_color_references_resolve():
     assert not missing, "Missing master color token declarations: " + ", ".join(missing)
 
 
+def test_add_stream_modal_contract():
+    index = read("web/index.html")
+    app_js = read("web/app.js")
+    assert 'id="addStreamModal"' in index
+    assert 'id="addStreamNameInput"' in index
+    assert 'id="addStreamKeyInput"' in index
+    assert 'window.openAddStreamModal = openAddStreamModal;' in app_js
+    assert 'window.closeAddStreamModal = closeAddStreamModal;' in app_js
+    assert 'window.submitAddStreamModal = submitAddStreamModal;' in app_js
+
+
 if __name__ == "__main__":
     test_ui_master_is_loaded_by_the_app()
     test_non_master_ui_files_do_not_define_colors()
@@ -139,4 +150,5 @@ if __name__ == "__main__":
     test_special_desktop_web_pages_use_ui_master()
     test_master_colors_are_only_raw_registry_values()
     test_master_color_references_resolve()
+    test_add_stream_modal_contract()
     print("UI master contract passed.")

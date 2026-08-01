@@ -5525,6 +5525,16 @@ def stop_stream(
             )
             stopped.append(name)
             STATE.streams.pop(name, None)
+            ch_base = name.split(":")[0]
+            remaining = [
+                s for k, s in STATE.streams.items()
+                if (k == ch_base or k.startswith(f"{ch_base}:"))
+                and (s.running.process.poll() is None or s.recovering)
+            ]
+            if remaining:
+                STATE.streams[ch_base] = remaining[0]
+            else:
+                STATE.streams.pop(ch_base, None)
     if cycle_runtime_changed:
         persist_stream_cycle_runtime()
     return stopped
@@ -5738,6 +5748,17 @@ def status_payload(config_name: str, *, include_youtube_health: bool = False) ->
     channels = config.get("channels", []) if config else []
     with STATE.lock:
         streams = {name: state.as_dict() for name, state in STATE.streams.items()}
+        for ch in channels:
+            ch_name = str(ch.get("name") or "").strip()
+            if not ch_name:
+                continue
+            if ch_name not in streams:
+                active_s = [
+                    s.as_dict() for k, s in STATE.streams.items()
+                    if (k.startswith(f"{ch_name}:") or s.channel_name == ch_name) and (s.running.process.poll() is None or s.recovering)
+                ]
+                if active_s:
+                    streams[ch_name] = active_s[0]
         tasks = [task.as_dict() for task in list(STATE.tasks)]
         preview = STATE.preview.as_dict() if STATE.preview else None
     channel_map = {

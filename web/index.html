@@ -505,6 +505,37 @@
         </div>
       </section>
     </div>
+    <div class="modal-backdrop hidden" id="addStreamModal" role="dialog" aria-modal="true" aria-labelledby="addStreamModalTitle">
+      <section class="modal-panel add-stream-modal">
+        <div class="modal-head">
+          <div class="modal-head-row">
+            <div>
+              <h2 id="addStreamModalTitle">Add New Stream Key</h2>
+              <p class="helper">Configure a new stream key for this channel.</p>
+            </div>
+            <button class="pill ghost icon-only" type="button" onclick="closeAddStreamModal()" title="Close dialog">✕</button>
+          </div>
+        </div>
+        <div class="add-stream-body">
+          <label>
+            Channel
+            <input id="addStreamChannelInput" type="text" readonly disabled>
+          </label>
+          <label>
+            Stream Name
+            <input id="addStreamNameInput" type="text" placeholder="e.g. Gaming Stream, Music Feed, Stream 2" autocomplete="off" spellcheck="false" onkeydown="handleAddStreamModalKey(event)">
+          </label>
+          <label>
+            YouTube Stream Key
+            <input id="addStreamKeyInput" type="text" placeholder="Paste YouTube Stream Key" autocomplete="off" spellcheck="false" onkeydown="handleAddStreamModalKey(event)">
+          </label>
+        </div>
+        <div class="modal-actions">
+          <button class="pill ghost" type="button" onclick="closeAddStreamModal()">Cancel</button>
+          <button class="pill primary" id="confirmAddStreamBtn" type="button" onclick="submitAddStreamModal()">Add Stream</button>
+        </div>
+      </section>
+    </div>
     <div class="modal-backdrop hidden" id="dataUsageModal" role="dialog" aria-modal="true" aria-labelledby="dataUsageTitle">
       <section class="modal-panel data-usage-modal">
         <div class="modal-head">

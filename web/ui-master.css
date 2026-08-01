@@ -6076,6 +6076,16 @@ select option {
   width: min(600px, 92vw);
 }
 
+.add-stream-modal {
+  width: min(500px, 92vw);
+}
+
+.add-stream-body {
+  display: grid;
+  gap: var(--space-3);
+  margin-top: 10px;
+}
+
 .stream-video-picker-body {
   max-height: 340px;
   overflow-y: auto;
