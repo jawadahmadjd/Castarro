@@ -1,6 +1,6 @@
 {
   "name": "castarro-desktop",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "description": "Windows desktop package for Castarro, a local multi-channel live streaming dashboard.",
   "main": "desktop/main.js",
   "author": "Jawad Ahmad",
@@ -96,14 +96,9 @@
         "AppImage"
       ],
       "category": "AudioVideo",
-      "desktop": {
-        "Name": "Castarro",
-        "Exec": "Castarro %U --no-sandbox",
-        "Terminal": false,
-        "Type": "Application",
-        "Icon": "com.jawadahmad.castarro",
-        "Categories": "AudioVideo;"
-      }
+      "executableArgs": [
+        "--no-sandbox"
+      ]
     },
     "nsis": {
       "oneClick": true,
