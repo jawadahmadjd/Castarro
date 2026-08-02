@@ -101,6 +101,51 @@ def test_multi_stream_status_tracking() -> None:
             web_ui.STATE.streams.clear()
 
 
+def test_start_all_streams_resiliency() -> None:
+    config_name = "config.ready.json"
+    dummy_config = {
+        "channels": [
+            {
+                "name": "Inside Us",
+                "enabled": True,
+                "stream_key_env": "qz1f-zzpq-ucz6-s9vk-fhsg",
+                "streams": [
+                    {"id": "stream_1", "name": "Default Stream", "enabled": True, "stream_key": "", "stream_key_env": ""},
+                    {"id": "stream_2", "name": "Created Stream 2", "enabled": True, "stream_key": "abcd-efgh-ijkl-mnop-qrst", "stream_key_env": ""},
+                ],
+            }
+        ]
+    }
+
+    started_items = []
+
+    def mock_start_stream(config_dir, config, channel, stream_item=None):
+        sid = stream_item.get("id") if stream_item else "stream_1"
+        if sid == "stream_1":
+            raise ValueError("Stream 1 unconfigured key error")
+        rs = DummyRunningStream("Inside Us", pid=202)
+        started_items.append(sid)
+        return rs
+
+    with mock.patch("stream_manager.load_config", return_value=(dummy_config, Path("."))), \
+         mock.patch("web_ui.normalize_scheduler_settings", return_value=None), \
+         mock.patch("web_ui.ensure_youtube_broadcasts_ready_for_start", return_value=[]), \
+         mock.patch("stream_manager.enabled_channels", return_value=dummy_config["channels"]), \
+         mock.patch("web_ui.prepare_channel_cloud_playlist", return_value=(dummy_config["channels"][0], [])), \
+         mock.patch("stream_manager.start_stream", side_effect=mock_start_stream), \
+         mock.patch("web_ui.app_db.record_stream_start", return_value=None), \
+         mock.patch("web_ui.app_db.record_event", return_value=None):
+
+        started = web_ui.start_stream(config_name, None)
+        assert "Inside Us:stream_2" in started
+        assert "stream_2" in started_items
+
+    # Clean up
+    with web_ui.STATE.lock:
+        web_ui.STATE.streams.clear()
+
+
 if __name__ == "__main__":
     test_multi_stream_status_tracking()
+    test_start_all_streams_resiliency()
     print("Multi-stream status test passed.")

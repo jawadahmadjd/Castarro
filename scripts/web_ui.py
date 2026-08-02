@@ -708,6 +708,7 @@ class StreamState:
         self.adaptive_variant_id = current_adaptive_variant_id(running.channel)
         self.last_adaptive_switch_at = 0.0
         self.playwright_dismissed = False
+        self.stream_id: str | None = None
 
     def replace_running(self, running: stream_manager.RunningStream, cloud_asset_ids: list[str] | None = None) -> None:
         self.running = running
@@ -5281,6 +5282,23 @@ def start_stream(config_name: str, channel_name: str | None, stream_id: str | No
                 existing = STATE.streams.get(stream_key_id) or (STATE.streams.get(name) if sid == "stream_1" else None)
             if existing and (existing.running.process.poll() is None or existing.recovering):
                 continue
+
+            try:
+                target_url = stream_manager.output_url(channel, config.get("defaults", {}), stream_item=s)
+            except Exception:
+                target_url = ""
+            if target_url:
+                key_ref = stream_manager.stream_key_reference(name)
+                masked_target = stream_manager.mask_url(target_url, key_ref)
+                with STATE.lock:
+                    url_busy = any(
+                        st for st in STATE.streams.values()
+                        if (st.running.process.poll() is None or st.recovering)
+                        and getattr(st.running, "masked_output_url", None) == masked_target
+                    )
+                if url_busy:
+                    print(f"[{name}] Stream {stream_key_id} shares output URL already in use; skipping duplicate start.")
+                    continue
             prepared_channel, cloud_asset_ids = prepare_channel_cloud_playlist(config, channel)
             try:
                 running = stream_manager.start_stream(
@@ -5289,13 +5307,18 @@ def start_stream(config_name: str, channel_name: str | None, stream_id: str | No
                     prepared_channel,
                     stream_item=s,
                 )
-            except Exception:
+            except Exception as exc:
                 unregister_cloud_assets(cloud_asset_ids)
-                raise
+                if stream_id:
+                    raise
+                print(f"[{name}] Failed to start stream {stream_key_id}: {exc}")
+                continue
             state_obj = StreamState(config_name, running, cloud_asset_ids=cloud_asset_ids)
+            state_obj.stream_id = sid
             with STATE.lock:
                 STATE.streams[stream_key_id] = state_obj
-                STATE.streams[name] = state_obj
+                if sid == "stream_1" or name not in STATE.streams:
+                    STATE.streams[name] = state_obj
                 STATE.stream_exit_recorded.discard((config_name, stream_key_id))
                 STATE.stream_exit_recorded.discard((config_name, name))
             app_db.record_stream_start(
@@ -5478,12 +5501,14 @@ def stop_stream(
             targets = [k for k in STATE.streams.keys() if k == channel_name or k.startswith(f"{channel_name}:")]
         else:
             targets = list(STATE.streams.keys())
+        seen_states: set[int] = set()
         for name in targets:
             if not name:
                 continue
             state = STATE.streams.get(name)
-            if not state:
+            if not state or id(state) in seen_states:
                 continue
+            seen_states.add(id(state))
             if STATE.preview and STATE.preview.channel_name in (name, name.split(":")[0]):
                 preview = STATE.preview
                 request_stop_running_stream(
@@ -5585,22 +5610,27 @@ def get_channel_streams_api(config_name: str, channel_name: str, fetch_stats: bo
         key_env = str(s.get("stream_key_env") or "")
         playlist = s.get("playlist") if isinstance(s.get("playlist"), list) else []
         stream_state_key = f"{channel_name}:{sid}"
-        state = STATE.streams.get(stream_state_key) or STATE.streams.get(channel_name)
+        state = STATE.streams.get(stream_state_key)
+        if not state and sid == "stream_1":
+            candidate = STATE.streams.get(channel_name)
+            if candidate and getattr(candidate, "stream_id", "stream_1") == "stream_1":
+                state = candidate
         
         is_running = False
+        is_recovering = False
         uptime_seconds = 0
         started_at = None
-        if state and (state.running.process.poll() is None or state.recovering):
+        if state and state.running.process.poll() is None:
             is_running = True
             started_at = state.started_at
             uptime_seconds = int(time.time() - state.started_at)
-            
-        cached_stats = STREAM_STATS_CACHE.get(broadcast_id) or STREAM_STATS_CACHE.get(channel_name) or {}
-        stats_data = video_stats.get(broadcast_id) if (fetch_stats and broadcast_id in video_stats) else cached_stats
-        concurrent_viewers = stats_data.get("concurrent_viewers")
-        total_views = stats_data.get("total_views")
-        avg_view_duration = stats_data.get("avg_view_duration")
-        
+        elif state and state.recovering:
+            is_recovering = True
+            started_at = state.started_at
+            uptime_seconds = int(time.time() - state.started_at)
+
+        status_text = "running" if is_running else "recovering" if is_recovering else "stopped"
+
         results.append({
             "id": sid,
             "channel": channel_name,
@@ -5609,11 +5639,12 @@ def get_channel_streams_api(config_name: str, channel_name: str, fetch_stats: bo
             "stream_key_env": key_env,
             "playlist": playlist,
             "enabled": bool(s.get("enabled", True)),
-            "status": "running" if is_running else "stopped",
+            "status": status_text,
             "is_running": is_running,
+            "is_recovering": is_recovering,
             "started_at": started_at,
             "uptime_seconds": uptime_seconds,
-            "duration_formatted": format_duration_hhmmss(uptime_seconds) if is_running else "Stopped",
+            "duration_formatted": format_duration_hhmmss(uptime_seconds) if (is_running or is_recovering) else "Stopped",
             "concurrent_viewers": concurrent_viewers,
             "total_views": total_views,
             "avg_view_duration": avg_view_duration,
@@ -6294,9 +6325,21 @@ def finalize_stream_lifecycle() -> None:
             continue
         with STATE.lock:
             if key in STATE.stream_exit_recorded:
+                STATE.streams.pop(channel_name, None)
                 continue
             STATE.stream_exit_recorded.add(key)
             state.recovering = False
+            STATE.streams.pop(channel_name, None)
+            ch_base = channel_name.split(":")[0]
+            remaining = [
+                s for k, s in STATE.streams.items()
+                if (k == ch_base or k.startswith(f"{ch_base}:"))
+                and (s.running.process.poll() is None or s.recovering)
+            ]
+            if remaining:
+                STATE.streams[ch_base] = remaining[0]
+            else:
+                STATE.streams.pop(ch_base, None)
         unregister_cloud_assets(state.cloud_asset_ids)
         transferred_bytes = state.transferred_bytes()
         app_db.record_stream_stop(state.config_name, channel_name, process.returncode, transferred_bytes)

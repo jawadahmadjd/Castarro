@@ -1,6 +1,6 @@
 {
   "name": "castarro-desktop",
-  "version": "1.5.1",
+  "version": "1.5.2",
   "description": "Windows desktop package for Castarro, a local multi-channel live streaming dashboard.",
   "main": "desktop/main.js",
   "author": "Jawad Ahmad",

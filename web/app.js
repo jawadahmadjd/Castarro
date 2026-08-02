@@ -11030,12 +11030,15 @@ async function renderWorkspaceStreamsTab(channelName, cachedStreamsData = null) 
       }
 
       const isRunning = Boolean(s.is_running || s.status === "running");
+      const isRecovering = Boolean(s.is_recovering || s.status === "recovering");
       const isExpanded = Boolean(streamCardExpandedState[s.id]);
       const statusBadge = isRunning
         ? `<span class="badge live pulse">● RUNNING</span>`
+        : isRecovering
+        ? `<span class="badge warn pulse">🔄 RECONNECTING...</span>`
         : `<span class="badge">STOPPED</span>`;
       
-      const durationBadge = isRunning
+      const durationBadge = (isRunning || isRecovering)
         ? `<span class="badge duration-badge" title="Stream Uptime">⏱ ${escapeHtml(s.duration_formatted || "00:00:00")}</span>`
         : `<span class="badge duration-badge text-muted">⏱ --:--:--</span>`;
 
@@ -11055,7 +11058,7 @@ async function renderWorkspaceStreamsTab(channelName, cachedStreamsData = null) 
       const keyVal = s.stream_key || s.stream_key_env || "";
       const streamPlaylist = Array.isArray(s.playlist) ? s.playlist.join(", ") : "";
 
-      const actionBtn = isRunning
+      const actionBtn = (isRunning || isRecovering)
         ? `<button class="pill danger" type="button" onclick="stopSingleStream('${escapeJs(channelName)}', '${escapeJs(s.id)}')">Stop Stream</button>`
         : `<button class="pill success" type="button" onclick="startSingleStream('${escapeJs(channelName)}', '${escapeJs(s.id)}')">Start Stream</button>`;
 
