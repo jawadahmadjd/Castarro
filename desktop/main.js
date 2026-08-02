@@ -522,15 +522,19 @@ function bundledPythonPath(root = resourcesRoot(), appCodeRoot = codeRoot()) {
     path.join(appCodeRoot, "desktop", "resources", "python", exe)
   ]);
   if (bundled) return bundled;
+  if (process.platform === "linux") return "python3";
   return app.isPackaged ? null : "python";
 }
 
 function bundledToolPath(name, root = resourcesRoot(), appCodeRoot = codeRoot()) {
   const exe = executableName(name);
-  return firstExisting([
+  const bundled = firstExisting([
     path.join(root, "ffmpeg", exe),
     path.join(appCodeRoot, "desktop", "resources", "ffmpeg", exe)
   ]);
+  if (bundled) return bundled;
+  if (process.platform === "linux") return name;
+  return null;
 }
 
 function findOpenPort() {

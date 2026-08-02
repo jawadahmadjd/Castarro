@@ -7175,6 +7175,10 @@ class Handler(BaseHTTPRequestHandler):
                 write_response(self, 200, vendor_path.read_bytes(), "application/javascript; charset=utf-8")
                 return
 
+            if parsed.path == "/api/health":
+                json_response(self, {"status": "ok", "app": "Castarro", "version": app_version()})
+                return
+
             if parsed.path == "/api/status":
                 config_name = safe_config_name(query.get("config", [DEFAULT_CONFIG])[0])
                 update_request_trace(self, config_name=config_name)

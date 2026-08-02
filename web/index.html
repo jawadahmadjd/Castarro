@@ -491,14 +491,18 @@
     <div class="modal-backdrop hidden" id="streamVideoPickerModal" role="dialog" aria-modal="true" aria-labelledby="streamVideoPickerTitle">
       <section class="modal-panel stream-video-picker-modal">
         <div class="modal-head">
-          <div>
-            <h2 id="streamVideoPickerTitle">Select Stream Videos</h2>
-            <p class="helper">Select normalized video files from the channel folder to play on this specific stream.</p>
+          <div class="modal-head-row stream-video-picker-head-row">
+            <div>
+              <h2 id="streamVideoPickerTitle">Select Stream Videos</h2>
+              <p class="helper">Choose existing channel videos or pick new videos directly from your PC.</p>
+            </div>
+            <button class="pill secondary small" type="button" id="streamPickerBrowsePcBtn" onclick="browseStreamVideosFromPc()">💻 Select from PC...</button>
           </div>
         </div>
         <div class="stream-video-picker-body" id="streamVideoPickerList">
           <div class="panel-empty">Loading video files...</div>
         </div>
+        <input type="file" id="streamPickerFileInput" multiple accept="video/*" class="hidden" onchange="handleStreamPickerFileInput(event)" />
         <div class="modal-actions">
           <button class="pill ghost" id="cancelStreamVideoPicker" type="button" onclick="closeStreamVideoPickerModal()">Cancel</button>
           <button class="pill primary" id="applyStreamVideoPicker" type="button" onclick="confirmStreamVideoPickerSelection()">Apply Selected Videos</button>

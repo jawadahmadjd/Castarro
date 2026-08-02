@@ -11156,7 +11156,7 @@ async function updateStreamPlaylistInline(channelName, streamId, rawText) {
 
 let activePickerStreamTarget = { channelName: "", streamId: "" };
 
-async function openStreamVideoPickerModal(channelName, streamId) {
+async function openStreamVideoPickerModal(channelName, streamId, autoSelectPaths = []) {
   activePickerStreamTarget = { channelName, streamId };
   const modal = $("streamVideoPickerModal");
   const listContainer = $("streamVideoPickerList");
@@ -11171,13 +11171,16 @@ async function openStreamVideoPickerModal(channelName, streamId) {
     const files = Array.isArray(data?.files) ? data.files : [];
     
     const currentInputValue = ($(`streamVideoInput_${streamId}`)?.value || "").trim();
-    const currentSelectedList = currentInputValue.split(",").map((s) => s.trim()).filter(Boolean);
+    const currentSelectedList = [
+      ...currentInputValue.split(",").map((s) => s.trim()).filter(Boolean),
+      ...(Array.isArray(autoSelectPaths) ? autoSelectPaths : [])
+    ];
 
     if (!files.length) {
       listContainer.innerHTML = `
-        <div class="streams-empty-state">
-          <p class="helper">No normalized video files found in Go Live/${escapeHtml(channelName)}.</p>
-          <p class="helper">Upload or normalize videos in the Dashboard tab first.</p>
+        <div class="streams-empty-state stream-picker-empty">
+          <p class="helper">No video files found for <strong>${escapeHtml(channelName)}</strong>.</p>
+          <button class="pill primary small" type="button" onclick="browseStreamVideosFromPc()">💻 Select / Add Videos from PC...</button>
         </div>
       `;
       return;
@@ -11186,18 +11189,19 @@ async function openStreamVideoPickerModal(channelName, streamId) {
     listContainer.innerHTML = `
       <div class="stream-video-picker-grid">
         ${files.map((file, idx) => {
-          const fileName = file.split(/[/\\]/).pop();
-          const isChecked = currentSelectedList.includes(file) || currentSelectedList.includes(fileName);
+          const filePath = typeof file === "string" ? file : String(file?.path || file?.name || "");
+          const fileName = typeof file === "string" ? (file.split(/[/\\]/).pop() || file) : String(file?.name || filePath.split(/[/\\]/).pop() || filePath);
+          const isChecked = currentSelectedList.includes(filePath) || currentSelectedList.includes(fileName);
           return `
             <label class="picker-file-item" for="pickerFile_${idx}">
               <input
                 id="pickerFile_${idx}"
                 type="checkbox"
                 class="picker-checkbox"
-                value="${escapeHtml(file)}"
+                value="${escapeHtml(filePath)}"
                 ${isChecked ? "checked" : ""}
               />
-              <span class="picker-file-name" title="${escapeHtml(file)}">${escapeHtml(fileName)}</span>
+              <span class="picker-file-name" title="${escapeHtml(filePath)}">${escapeHtml(fileName)}</span>
             </label>
           `;
         }).join("")}
@@ -11206,6 +11210,109 @@ async function openStreamVideoPickerModal(channelName, streamId) {
   } catch (err) {
     listContainer.innerHTML = `<div class="notice danger">Error loading videos: ${escapeHtml(err.message)}</div>`;
   }
+}
+
+async function browseStreamVideosFromPc() {
+  const { channelName, streamId } = activePickerStreamTarget;
+  if (!channelName || !streamId) {
+    toast("No active stream selected.", "danger");
+    return;
+  }
+
+  const bridge = desktopBridge();
+  let newlySelectedPaths = [];
+
+  if (bridge && typeof bridge.selectVideos === "function") {
+    const picked = await bridge.selectVideos({
+      title: `Select videos from PC for ${channelName}`,
+    });
+    const paths = Array.isArray(picked?.paths) ? picked.paths.filter(Boolean) : [];
+    if (!picked || picked.canceled || !paths.length) return;
+
+    toast(`Adding ${paths.length} video(s) from PC...`);
+    try {
+      const payload = await api("/api/normalized-files/import", {
+        method: "POST",
+        action: "normalized.import",
+        body: JSON.stringify({
+          config: state.config,
+          channel: channelName,
+          paths: paths,
+          useOriginals: true,
+        }),
+      });
+      const imported = Array.isArray(payload.saved)
+        ? payload.saved.map((item) => item?.path || item?.name || item).filter(Boolean)
+        : [];
+      newlySelectedPaths = imported;
+      toast(`Added ${imported.length} video(s) from PC.`, "success");
+    } catch (err) {
+      toast("Failed to import videos from PC: " + err.message, "danger");
+      return;
+    }
+  } else {
+    const fileInput = $("streamPickerFileInput");
+    if (fileInput) {
+      fileInput.click();
+      return;
+    }
+  }
+
+  if (newlySelectedPaths.length > 0) {
+    const input = $(`streamVideoInput_${streamId}`);
+    const currentInputValue = (input?.value || "").trim();
+    const existing = currentInputValue.split(",").map((s) => s.trim()).filter(Boolean);
+    const combined = Array.from(new Set([...existing, ...newlySelectedPaths]));
+    if (input) {
+      input.value = combined.join(", ");
+    }
+  }
+
+  await openStreamVideoPickerModal(channelName, streamId, newlySelectedPaths);
+}
+
+async function handleStreamPickerFileInput(event) {
+  const files = Array.from(event.target.files || []);
+  if (!files.length) return;
+  const { channelName, streamId } = activePickerStreamTarget;
+  if (!channelName || !streamId) return;
+
+  toast(`Uploading ${files.length} video(s) from PC...`);
+  const newlySelectedPaths = [];
+  try {
+    for (const file of files) {
+      const url = `/api/normalized-files/upload?config=${encodeURIComponent(state.config)}&channel=${encodeURIComponent(channelName)}&filename=${encodeURIComponent(file.name)}`;
+      const requestUrl = apiRequestUrl(url);
+      const response = await fetch(requestUrl, {
+        method: "POST",
+        headers: {
+          "X-Client-Action": "normalized.upload",
+        },
+        body: file,
+      });
+      const payload = await response.json();
+      if (response.ok && payload.saved?.path) {
+        newlySelectedPaths.push(payload.saved.path);
+      }
+    }
+    toast(`Uploaded ${newlySelectedPaths.length} video(s) from PC.`, "success");
+  } catch (err) {
+    toast("Failed to upload videos: " + err.message, "danger");
+  } finally {
+    event.target.value = "";
+  }
+
+  if (newlySelectedPaths.length > 0) {
+    const input = $(`streamVideoInput_${streamId}`);
+    const currentInputValue = (input?.value || "").trim();
+    const existing = currentInputValue.split(",").map((s) => s.trim()).filter(Boolean);
+    const combined = Array.from(new Set([...existing, ...newlySelectedPaths]));
+    if (input) {
+      input.value = combined.join(", ");
+    }
+  }
+
+  await openStreamVideoPickerModal(channelName, streamId, newlySelectedPaths);
 }
 
 function closeStreamVideoPickerModal() {

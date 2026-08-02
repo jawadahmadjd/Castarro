@@ -179,12 +179,90 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  release-linux:
+    name: Build Linux AppImage release
+    needs: prepare
+    if: always() && needs.prepare.result == 'success' && needs.prepare.outputs.exists != 'true'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GITHUB_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3 ffmpeg fuse libfuse2
+
+      - name: Install node dependencies
+        run: npm ci
+
+      - name: Generate app icon
+        run: npm run icon
+
+      - name: Create YouTube OAuth seed
+        shell: bash
+        env:
+          CASTARRO_YOUTUBE_CLIENT_ID: ${{ secrets.CASTARRO_YOUTUBE_CLIENT_ID }}
+          CASTARRO_YOUTUBE_CLIENT_SECRET: ${{ secrets.CASTARRO_YOUTUBE_CLIENT_SECRET }}
+          CASTARRO_YOUTUBE_OAUTH_CLIENT_TYPE: ${{ secrets.CASTARRO_YOUTUBE_OAUTH_CLIENT_TYPE }}
+          CASTARRO_YOUTUBE_REDIRECT_URI: ${{ secrets.CASTARRO_YOUTUBE_REDIRECT_URI }}
+        run: |
+          if [ -n "$CASTARRO_YOUTUBE_CLIENT_ID" ] && [ -n "$CASTARRO_YOUTUBE_CLIENT_SECRET" ]; then
+            mkdir -p desktop/resources/seed-data
+            cat > desktop/resources/seed-data/youtube.oauth.seed.json <<EOF
+          {
+            "youtube": {
+              "client_id": "$CASTARRO_YOUTUBE_CLIENT_ID",
+              "client_secret": "$CASTARRO_YOUTUBE_CLIENT_SECRET",
+              "oauth_client_type": "${CASTARRO_YOUTUBE_OAUTH_CLIENT_TYPE:-desktop}",
+              "use_pkce": true,
+              "redirect_uri": "${CASTARRO_YOUTUBE_REDIRECT_URI:-http://127.0.0.1:8765/api/youtube/oauth/callback}",
+              "scopes": [
+                "https://www.googleapis.com/auth/youtube",
+                "https://www.googleapis.com/auth/youtube.force-ssl"
+              ]
+            }
+          }
+          EOF
+          fi
+
+      - name: Build Linux AppImage
+        run: npx electron-builder --linux AppImage --publish never
+
+      - name: Stage Linux release assets
+        shell: bash
+        run: |
+          mkdir -p linux-artifacts
+          cp dist/Castarro-*.AppImage linux-artifacts/ 2>/dev/null || cp dist/*.AppImage linux-artifacts/
+          if [ -f dist/latest-linux.yml ]; then
+            cp dist/latest-linux.yml linux-artifacts/
+          fi
+
+      - name: Upload Linux AppImage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: castarro-linux-release-appimage
+          path: linux-artifacts/*
+          if-no-files-found: error
+          retention-days: 1
+
   release:
     name: Build and publish release
     needs:
       - prepare
       - android-release-apk
-    if: always() && needs.prepare.result == 'success' && needs.prepare.outputs.exists != 'true' && (needs.android-release-apk.result == 'success' || needs.android-release-apk.result == 'skipped')
+      - release-linux
+    if: always() && needs.prepare.result == 'success' && needs.prepare.outputs.exists != 'true' && (needs.android-release-apk.result == 'success' || needs.android-release-apk.result == 'skipped') && (needs.release-linux.result == 'success' || needs.release-linux.result == 'skipped')
     runs-on: windows-2022
     env:
       CSC_IDENTITY_AUTO_DISCOVERY: false
@@ -371,11 +449,11 @@ jobs:
         shell: pwsh
         run: npm run smoke:installer
 
-      - name: Download Android release APK
-        if: false # Temporarily disabled mobile app
+      - name: Download Linux release AppImage
+        if: steps.version.outputs.exists != 'true'
         uses: actions/download-artifact@v4
         with:
-          name: castarro-android-release-apk
+          name: castarro-linux-release-appimage
           path: dist
 
       - name: Create version tag
@@ -387,8 +465,8 @@ jobs:
           git tag -a "${{ steps.version.outputs.tag }}" -m "Castarro ${{ steps.version.outputs.version }}"
           git push origin "${{ steps.version.outputs.tag }}"
 
-      - name: Publish GitHub release with Android APK
-        if: false # Temporarily disabled mobile app
+      - name: Publish GitHub release
+        if: steps.version.outputs.exists != 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.tag }}
@@ -396,38 +474,16 @@ jobs:
           body: |
             ## Downloads
 
-            - Windows desktop: `Castarro-Setup-${{ steps.version.outputs.version }}.exe`
-            - Android sideload APK: `Castarro-Android-${{ steps.version.outputs.version }}.apk`
+            - **Windows Desktop**: `Castarro-Setup-${{ steps.version.outputs.version }}.exe`
+            - **Ubuntu / Linux AppImage**: `Castarro-${{ steps.version.outputs.version }}.AppImage`
 
-            The Android APK is a signed release build for direct sideloading. Android may ask the user to allow installs from the browser or file manager before installing it.
-
-            Android MVP note: the mobile app uses manual RTMP/RTMPS stream settings. YouTube OAuth/account mode remains a desktop feature for this release.
+            The AppImage runs natively on Ubuntu and Linux distros. Auto-updates are fully supported for both Windows and Linux platforms.
           generate_release_notes: true
           make_latest: true
-          fail_on_unmatched_files: true
+          fail_on_unmatched_files: false
           files: |
             dist/Castarro-Setup-${{ steps.version.outputs.version }}.exe
             dist/Castarro-Setup-${{ steps.version.outputs.version }}.exe.blockmap
             dist/latest.yml
-            dist/Castarro-Android-${{ steps.version.outputs.version }}.apk
-            dist/Castarro-Android-${{ steps.version.outputs.version }}.apk.sha256
-
-      - name: Publish GitHub release without Android APK
-        if: steps.version.outputs.exists != 'true' # Temporarily disabled mobile app, always release without APK
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.version.outputs.tag }}
-          name: Castarro ${{ steps.version.outputs.version }}
-          body: |
-            ## Downloads
-
-            - Windows desktop: `Castarro-Setup-${{ steps.version.outputs.version }}.exe`
-
-            Android APK publishing was skipped because Android release signing secrets are not configured yet.
-          generate_release_notes: true
-          make_latest: true
-          fail_on_unmatched_files: true
-          files: |
-            dist/Castarro-Setup-${{ steps.version.outputs.version }}.exe
-            dist/Castarro-Setup-${{ steps.version.outputs.version }}.exe.blockmap
-            dist/latest.yml
+            dist/Castarro-*.AppImage
+            dist/latest-linux.yml

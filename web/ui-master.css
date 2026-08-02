@@ -6076,6 +6076,22 @@ select option {
   width: min(600px, 92vw);
 }
 
+.stream-video-picker-head-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: 100%;
+}
+
+.stream-picker-empty {
+  text-align: center;
+  padding: 24px 12px;
+}
+
+.stream-picker-empty p {
+  margin-bottom: 12px;
+}
+
 .add-stream-modal {
   width: min(500px, 92vw);
 }
