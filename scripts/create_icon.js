@@ -113,4 +113,7 @@ const directory = entries.map((png) => {
 });
 
 fs.writeFileSync(outFile, Buffer.concat([header, ...directory, ...entries]));
+const outPngFile = path.join(outDir, "icon.png");
+fs.writeFileSync(outPngFile, makePng(512));
 console.log(outFile);
+console.log(outPngFile);

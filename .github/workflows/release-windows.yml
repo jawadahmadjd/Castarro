@@ -236,6 +236,11 @@ jobs:
           EOF
           fi
 
+      - name: Prepare resource directories
+        run: |
+          mkdir -p desktop/resources/python desktop/resources/ffmpeg desktop/resources/seed-data
+          touch desktop/resources/python/.keep desktop/resources/ffmpeg/.keep desktop/resources/seed-data/.keep
+
       - name: Build Linux AppImage
         run: npx electron-builder --linux AppImage --publish never
 
