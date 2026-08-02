@@ -1514,10 +1514,46 @@ async function boot() {
   await loadApplicationUi();
 }
 
+function ensureLinuxDesktopShortcut() {
+  if (process.platform !== "linux") return;
+  try {
+    const appImagePath = process.env.APPIMAGE || process.execPath;
+    const desktopFileContent = `[Desktop Entry]
+Name=Castarro
+Comment=Local multi-channel live streaming dashboard
+Exec="${appImagePath}" --no-sandbox %U
+Icon=${path.join(appRoot(), "desktop", "assets", "icon.png")}
+Terminal=false
+Type=Application
+Categories=AudioVideo;
+StartupWMClass=com.jawadahmad.castarro
+`;
+
+    const appsDir = path.join(os.homedir(), ".local", "share", "applications");
+    const desktopDir = path.join(os.homedir(), "Desktop");
+
+    fs.mkdirSync(appsDir, { recursive: true });
+    const appShortcut = path.join(appsDir, "com.jawadahmad.castarro.desktop");
+    if (!fs.existsSync(appShortcut)) {
+      fs.writeFileSync(appShortcut, desktopFileContent, { encoding: "utf8", mode: 0o755 });
+    }
+
+    if (fs.existsSync(desktopDir)) {
+      const desktopShortcut = path.join(desktopDir, "Castarro.desktop");
+      if (!fs.existsSync(desktopShortcut)) {
+        fs.writeFileSync(desktopShortcut, desktopFileContent, { encoding: "utf8", mode: 0o755 });
+      }
+    }
+  } catch (err) {
+    diagnosticLog("linux desktop shortcut setup failed", err);
+  }
+}
+
 app.whenReady().then(() => {
   app.setName(PRODUCT_NAME);
   app.setAppUserModelId("com.jawadahmad.castarro");
   diagnosticLog("app ready");
+  ensureLinuxDesktopShortcut();
   configureAutoUpdates();
   boot().catch((error) => {
     diagnosticLog("boot failed", error);
