@@ -1113,7 +1113,15 @@ function createMainWindow() {
     }
   });
 
-  mainWindow.once("ready-to-show", () => mainWindow.show());
+  const revealWindow = () => {
+    if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isVisible()) {
+      mainWindow.show();
+      mainWindow.focus();
+    }
+  };
+  mainWindow.once("ready-to-show", revealWindow);
+  mainWindow.webContents.on("did-finish-load", revealWindow);
+  setTimeout(revealWindow, 1200);
   mainWindow.webContents.on("did-finish-load", () => {
     publishUpdateState();
     if (backendUrl && mainWindow.webContents.getURL().startsWith(backendUrl)) {
