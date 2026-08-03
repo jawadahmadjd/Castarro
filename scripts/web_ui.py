@@ -710,6 +710,10 @@ class StreamState:
         self.playwright_dismissed = False
         self.stream_id: str | None = None
 
+    @property
+    def channel_name(self) -> str:
+        return str(self.running.channel.get("name") or "")
+
     def replace_running(self, running: stream_manager.RunningStream, cloud_asset_ids: list[str] | None = None) -> None:
         self.running = running
         self.log_path = Path(running.log_handle.name)
@@ -1643,7 +1647,7 @@ def ensure_channel_streams(channel: dict[str, Any]) -> list[dict[str, Any]]:
                 continue
             sname = str(s.get("name") or "").strip()
             skey = str(s.get("stream_key") or "").strip()
-            if skey == "sample_dummy_stream_key_secondary" or "dummy" in sname.lower() or sname == "Secondary Stream (Dummy / Test)":
+            if skey == "sample_dummy_stream_key_secondary" or sname == "Secondary Stream (Dummy / Test)":
                 continue
             filtered_streams.append(s)
 
@@ -5616,6 +5620,11 @@ def get_channel_streams_api(config_name: str, channel_name: str, fetch_stats: bo
             if candidate and getattr(candidate, "stream_id", "stream_1") == "stream_1":
                 state = candidate
         
+        stat_item = STREAM_STATS_CACHE.get(broadcast_id) or STREAM_STATS_CACHE.get(channel_name) or {}
+        concurrent_viewers = stat_item.get("concurrent_viewers")
+        total_views = stat_item.get("total_views")
+        avg_view_duration = stat_item.get("avg_view_duration")
+
         is_running = False
         is_recovering = False
         uptime_seconds = 0

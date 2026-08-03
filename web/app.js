@@ -1848,7 +1848,7 @@ async function initDesktopIntegration() {
   const canCloseUi = typeof bridge?.requestQuit === "function";
   const canStopAndExit = typeof bridge?.requestStopStreamsAndExit === "function";
   if (closeUiButton) closeUiButton.hidden = !canCloseUi;
-  if (stopAndExitButton) stopAndExitButton.hidden = !canStopAndExit;
+  if (stopAndExitButton) stopAndExitButton.hidden = false;
   if (!bridge) return;
 
   if (typeof bridge.getBackendUrl === "function") {
@@ -1906,13 +1906,22 @@ async function closeUiOnly() {
 
 async function stopStreamsAndExit() {
   const bridge = desktopBridge();
-  if (!bridge || typeof bridge.requestStopStreamsAndExit !== "function") {
-    toast("Stop and exit action is unavailable.");
+  if (bridge && typeof bridge.requestStopStreamsAndExit === "function") {
+    const response = await bridge.requestStopStreamsAndExit();
+    if (!response?.ok) {
+      toast("Could not stop streams and exit.");
+    }
     return;
   }
-  const response = await bridge.requestStopStreamsAndExit();
-  if (!response?.ok) {
-    toast("Could not stop streams and exit.");
+  try {
+    toast("Stopping streams and shutting down...");
+    await fetchApi("/api/system/shutdown", {
+      method: "POST",
+      body: JSON.stringify({ stop_streams: true, stop_tasks: true })
+    });
+    toast("Application shut down cleanly.", "info");
+  } catch (err) {
+    toast("Shutdown completed: " + (err?.message || "Server closed"));
   }
 }
 
@@ -11385,6 +11394,52 @@ async function stopSingleStream(channelName, streamId) {
     }
   } catch (err) {
     toast("Error stopping stream: " + err.message, "danger");
+  }
+}
+
+async function startAllChannelStreams(channelName = null) {
+  const targetChannel = String(channelName || state.workspace.selectedChannelName || "").trim();
+  try {
+    toast(`Starting all streams for ${targetChannel || "all channels"}...`);
+    const response = await fetchApi("/api/stream/start", {
+      method: "POST",
+      body: JSON.stringify({
+        config: state.config,
+        channel: targetChannel || null
+      })
+    });
+    if (response?.error) {
+      toast("Failed to start streams: " + response.error, "danger");
+    } else {
+      toast("All streams started successfully!", "success");
+      await refresh();
+      if (targetChannel) renderWorkspaceStreamsTab(targetChannel);
+    }
+  } catch (err) {
+    toast("Error starting all streams: " + err.message, "danger");
+  }
+}
+
+async function stopAllChannelStreams(channelName = null) {
+  const targetChannel = String(channelName || state.workspace.selectedChannelName || "").trim();
+  try {
+    toast(`Stopping all streams for ${targetChannel || "all channels"}...`);
+    const response = await fetchApi("/api/stream/stop", {
+      method: "POST",
+      body: JSON.stringify({
+        config: state.config,
+        channel: targetChannel || null
+      })
+    });
+    if (response?.error) {
+      toast("Failed to stop streams: " + response.error, "danger");
+    } else {
+      toast("All streams stopped.", "info");
+      await refresh();
+      if (targetChannel) renderWorkspaceStreamsTab(targetChannel);
+    }
+  } catch (err) {
+    toast("Error stopping streams: " + err.message, "danger");
   }
 }
 
