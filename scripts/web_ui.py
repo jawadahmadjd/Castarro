@@ -3148,14 +3148,22 @@ def replace_stale_youtube_broadcast_for_start(
     if privacy_status == "unlisted":
         privacy_status = "public"
 
-    description = str((source_broadcast or {}).get("description") or "").strip()
-    if not description:
-        description = "Auto-created by Castarro after the previous YouTube broadcast ended."
-
-    old_details = None
     source_id = source_broadcast.get("id") if source_broadcast else None
+    old_details = None
     if source_id:
-        old_details = youtube_service.video_details(access_token, source_id)
+        try:
+            old_details = youtube_service.video_details(access_token, source_id)
+        except Exception:
+            old_details = None
+
+    description = str(
+        (old_details or {}).get("description")
+        or (source_broadcast or {}).get("description")
+        or channel.get("youtube_broadcast_description")
+        or channel.get("description")
+        or settings.get("default_description")
+        or ""
+    ).strip()
 
     auto_start = bool(channel.get("youtube_auto_start", settings.get("default_auto_start", True)))
     auto_stop = bool(channel.get("youtube_auto_stop", settings.get("default_auto_stop", True)))
@@ -3208,14 +3216,15 @@ def replace_stale_youtube_broadcast_for_start(
                     channel_name,
                     {"message": str(exc)},
                 )
-        thumbnail_url = str((source_broadcast or {}).get("thumbnail_url") or "").strip()
-        if thumbnail_url:
-            youtube_service.copy_video_thumbnail(
-                access_token,
-                src_video_id=source_id,
-                dest_video_id=new_broadcast_id,
-                thumbnail_url=thumbnail_url,
-            )
+        thumbnail_url = str((source_broadcast or {}).get("thumbnail_url") or (old_details or {}).get("thumbnail_url") or "").strip()
+        thumb_copied = youtube_service.copy_video_thumbnail(
+            access_token,
+            src_video_id=str(source_id or ""),
+            dest_video_id=new_broadcast_id,
+            thumbnail_url=thumbnail_url,
+        )
+        if not thumb_copied:
+            print(f"[{channel_name}] Warning: Thumbnail copy for auto-created broadcast '{new_broadcast_id}' failed.")
 
     save_config(config_name, config)
     clear_youtube_account_caches(config_name, account_id)

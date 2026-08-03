@@ -1110,27 +1110,59 @@ def update_video_details(
     )
 
 
-def copy_video_thumbnail(access_token: str, src_video_id: str, dest_video_id: str, thumbnail_url: str) -> bool:
-    if not thumbnail_url or not dest_video_id:
+def copy_video_thumbnail(access_token: str, src_video_id: str, dest_video_id: str, thumbnail_url: str = "") -> bool:
+    if not dest_video_id:
         return False
-    try:
-        import urllib.request
-        req = urllib.request.Request(
-            thumbnail_url,
-            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-        )
-        with urllib.request.urlopen(req, timeout=15) as response:
-            image_data = response.read()
-            content_type = response.headers.get("Content-Type") or "image/jpeg"
-            upload_thumbnail(
-                access_token,
-                video_id=dest_video_id,
-                image_data=image_data,
-                content_type=content_type,
+
+    candidate_urls: list[str] = []
+    if thumbnail_url and str(thumbnail_url).strip():
+        candidate_urls.append(str(thumbnail_url).strip())
+
+    clean_src = str(src_video_id or "").strip()
+    if clean_src:
+        candidate_urls.extend([
+            f"https://i.ytimg.com/vi/{clean_src}/maxresdefault.jpg",
+            f"https://img.youtube.com/vi/{clean_src}/maxresdefault.jpg",
+            f"https://img.youtube.com/vi/{clean_src}/sddefault.jpg",
+            f"https://img.youtube.com/vi/{clean_src}/hqdefault.jpg",
+            f"https://img.youtube.com/vi/{clean_src}/mqdefault.jpg",
+            f"https://img.youtube.com/vi/{clean_src}/default.jpg",
+        ])
+
+    seen: set[str] = set()
+    unique_candidates: list[str] = []
+    for u in candidate_urls:
+        if u and u not in seen:
+            seen.add(u)
+            unique_candidates.append(u)
+
+    import urllib.request
+
+    for url in unique_candidates:
+        try:
+            req = urllib.request.Request(
+                url,
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
             )
-            return True
-    except Exception:
-        return False
+            with urllib.request.urlopen(req, timeout=10) as response:
+                if response.status == 200:
+                    image_data = response.read()
+                    if image_data and len(image_data) > 500:
+                        content_type = response.headers.get("Content-Type") or "image/jpeg"
+                        upload_thumbnail(
+                            access_token,
+                            video_id=dest_video_id,
+                            image_data=image_data,
+                            content_type=content_type,
+                        )
+                        print(f"[YOUTUBE THUMBNAIL] Successfully copied thumbnail for broadcast '{dest_video_id}' from URL: {url}")
+                        return True
+        except Exception as exc:
+            print(f"[YOUTUBE THUMBNAIL] Candidate '{url}' failed: {exc}")
+            continue
+
+    print(f"[YOUTUBE THUMBNAIL] Could not copy thumbnail from any candidate URL for broadcast '{dest_video_id}'")
+    return False
 
 
 def find_upcoming_broadcast_for_stream(access_token: str, stream_id: str) -> dict[str, Any] | None:
