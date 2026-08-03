@@ -79,6 +79,7 @@ class RunningStream:
     monitor_thread: threading.Thread | None = None
     started_monotonic: float = 0.0
     kind: str = "stream"
+    output_url: str | None = None
     masked_output_url: str | None = None
     log_redactions: tuple[tuple[str, str], ...] = ()
     playlist_path: Path | None = None
@@ -1052,6 +1053,7 @@ def start_stream(
         preview_warning=preview_warning,
         started_monotonic=time.monotonic(),
         kind="stream",
+        output_url=url,
         masked_output_url=masked_url,
         log_redactions=log_redactions,
         playlist_path=playlist_path,

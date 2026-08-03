@@ -11364,6 +11364,8 @@ async function startSingleStream(channelName, streamId) {
     });
     if (response?.error) {
       toast("Failed to start stream: " + response.error, "danger");
+    } else if (!response?.started || !response.started.length) {
+      toast("Could not start stream. Ensure a valid stream key is configured.", "danger");
     } else {
       toast("Stream started successfully!", "success");
       await refresh();

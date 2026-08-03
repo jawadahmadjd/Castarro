@@ -5292,15 +5292,15 @@ def start_stream(config_name: str, channel_name: str | None, stream_id: str | No
             except Exception:
                 target_url = ""
             if target_url:
-                key_ref = stream_manager.stream_key_reference(name)
-                masked_target = stream_manager.mask_url(target_url, key_ref)
                 with STATE.lock:
                     url_busy = any(
                         st for st in STATE.streams.values()
                         if (st.running.process.poll() is None or st.recovering)
-                        and getattr(st.running, "masked_output_url", None) == masked_target
+                        and (getattr(st.running, "output_url", None) == target_url)
                     )
                 if url_busy:
+                    if stream_id:
+                        raise ValueError(f"Stream '{sid}' shares an RTMP output URL or stream key that is already in use by an active stream.")
                     print(f"[{name}] Stream {stream_key_id} shares output URL already in use; skipping duplicate start.")
                     continue
             prepared_channel, cloud_asset_ids = prepare_channel_cloud_playlist(config, channel)
@@ -5336,6 +5336,8 @@ def start_stream(config_name: str, channel_name: str | None, stream_id: str | No
             )
             app_db.record_event("stream_started", config_name, name, {"pid": running.process.pid, "stream_id": sid})
             started.append(stream_key_id)
+    if stream_id and not started:
+        raise ValueError(f"Stream '{stream_id}' could not be started. Check that a valid stream key is configured for this stream.")
     return started
 
 
