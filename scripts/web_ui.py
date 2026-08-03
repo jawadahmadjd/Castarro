@@ -5266,44 +5266,92 @@ def emit_alert(
     )
 
 
+def mask_secret_str(val: Any) -> str:
+    s = str(val or "").strip()
+    if not s:
+        return "<empty>"
+    if len(s) <= 4:
+        return "****"
+    return f"****{s[-4:]}"
+
+
 def start_stream(config_name: str, channel_name: str | None, stream_id: str | None = None) -> list[str]:
+    print(f"\n==========================================================================")
+    print(f"[STREAM PIPELINE REQ] start_stream(config='{config_name}', channel='{channel_name}', stream_id='{stream_id}')")
+    print(f"==========================================================================")
+
     config, config_dir = stream_manager.load_config((ROOT / config_name).resolve())
     normalize_scheduler_settings(config)
     ensure_youtube_broadcasts_ready_for_start(config_name, config, channel_name)
     channels = stream_manager.enabled_channels(config, channel_name)
+    print(f"[STREAM PIPELINE] Enabled channels matching request: {[c.get('name') for c in channels]}")
+
     started: list[str] = []
     for channel in channels:
         name = str(channel["name"])
         streams = ensure_channel_streams(channel)
+        print(f"[{name}] Channel has {len(streams)} configured stream entry/entries:")
+        for idx, s_item in enumerate(streams):
+            s_id = str(s_item.get("id") or f"stream_{idx+1}")
+            s_key = mask_secret_str(s_item.get("stream_key"))
+            s_key_env = str(s_item.get("stream_key_env") or "")
+            s_enabled = bool(s_item.get("enabled", True))
+            print(f"  |- Stream #{idx+1}: id='{s_id}', name='{s_item.get('name')}', enabled={s_enabled}, stream_key='{s_key}', stream_key_env='{s_key_env}'")
+
         for s in streams:
             sid = str(s.get("id") or "stream_1")
+            sname = str(s.get("name") or sid)
             if stream_id and sid != stream_id:
+                print(f"[{name}] Skipping stream '{sid}' ('{sname}') because request specified stream_id='{stream_id}'")
                 continue
             if not s.get("enabled", True):
+                print(f"[{name}] Stream '{sid}' ('{sname}') is disabled in configuration.")
+                if stream_id and sid == stream_id:
+                    raise ValueError(f"Stream '{sid}' is disabled in configuration.")
                 continue
+
             stream_key_id = f"{name}:{sid}"
             with STATE.lock:
                 existing = STATE.streams.get(stream_key_id) or (STATE.streams.get(name) if sid == "stream_1" else None)
             if existing and (existing.running.process.poll() is None or existing.recovering):
+                pid = existing.running.process.pid if existing.running.process else "N/A"
+                print(f"[{name}] Stream '{stream_key_id}' is ALREADY RUNNING (PID={pid}). Skipping duplicate start.")
+                if stream_id and sid == stream_id:
+                    raise ValueError(f"Stream '{sid}' is already running (PID={pid}).")
                 continue
 
             try:
                 target_url = stream_manager.output_url(channel, config.get("defaults", {}), stream_item=s)
-            except Exception:
+                key_ref = stream_manager.stream_key_reference(name)
+                masked_target = stream_manager.mask_url(target_url, key_ref)
+                print(f"[{name}] Resolved output RTMP URL for stream '{sid}': {masked_target}")
+            except Exception as url_err:
                 target_url = ""
+                masked_target = "UNRESOLVED"
+                print(f"[{name}] Failed to resolve output RTMP URL for stream '{sid}': {url_err}")
+                if stream_id and sid == stream_id:
+                    raise ValueError(f"Stream '{sid}' stream key is missing or invalid: {url_err}")
+
             if target_url:
                 with STATE.lock:
-                    url_busy = any(
-                        st for st in STATE.streams.values()
-                        if (st.running.process.poll() is None or st.recovering)
-                        and (getattr(st.running, "output_url", None) == target_url)
-                    )
+                    busy_stream_id = None
+                    busy_pid = None
+                    for st_key, st in STATE.streams.items():
+                        if (st.running.process.poll() is None or st.recovering) and getattr(st.running, "output_url", None) == target_url:
+                            busy_stream_id = st_key
+                            busy_pid = st.running.process.pid if st.running.process else "N/A"
+                            break
+                    url_busy = busy_stream_id is not None
+
                 if url_busy:
+                    err_msg = f"Stream '{sid}' shares an RTMP output URL or stream key with active stream '{busy_stream_id}' (PID={busy_pid})."
+                    print(f"[{name}] [REJECTED] {err_msg}")
                     if stream_id:
-                        raise ValueError(f"Stream '{sid}' shares an RTMP output URL or stream key that is already in use by an active stream.")
-                    print(f"[{name}] Stream {stream_key_id} shares output URL already in use; skipping duplicate start.")
+                        raise ValueError(err_msg)
                     continue
+
             prepared_channel, cloud_asset_ids = prepare_channel_cloud_playlist(config, channel)
+            print(f"[{name}] Launching FFmpeg process for stream '{stream_key_id}'...")
             try:
                 running = stream_manager.start_stream(
                     config_dir,
@@ -5313,10 +5361,12 @@ def start_stream(config_name: str, channel_name: str | None, stream_id: str | No
                 )
             except Exception as exc:
                 unregister_cloud_assets(cloud_asset_ids)
+                print(f"[{name}] [ERROR] FFmpeg launch failed for '{stream_key_id}': {exc}")
+                app_db.record_event("stream_start_error", config_name, name, {"stream_id": sid, "error": str(exc)})
                 if stream_id:
-                    raise
-                print(f"[{name}] Failed to start stream {stream_key_id}: {exc}")
+                    raise ValueError(f"Failed to start stream '{sid}': {exc}")
                 continue
+
             state_obj = StreamState(config_name, running, cloud_asset_ids=cloud_asset_ids)
             state_obj.stream_id = sid
             with STATE.lock:
@@ -5325,19 +5375,31 @@ def start_stream(config_name: str, channel_name: str | None, stream_id: str | No
                     STATE.streams[name] = state_obj
                 STATE.stream_exit_recorded.discard((config_name, stream_key_id))
                 STATE.stream_exit_recorded.discard((config_name, name))
+
+            log_file = str(Path(running.log_handle.name))
+            print(f"[{name}] [SUCCESS] Stream '{stream_key_id}' STARTED! PID={running.process.pid}, log={log_file}")
+
             app_db.record_stream_start(
                 config_name,
                 name,
                 running.process.pid,
                 subprocess.list2cmdline(running.command),
-                str(Path(running.log_handle.name)),
+                log_file,
                 stream_live_title(prepared_channel),
                 str(prepared_channel.get("youtube_broadcast_id") or ""),
             )
-            app_db.record_event("stream_started", config_name, name, {"pid": running.process.pid, "stream_id": sid})
+            app_db.record_event("stream_started", config_name, name, {
+                "pid": running.process.pid,
+                "stream_id": sid,
+                "stream_name": s.get("name"),
+                "log_file": log_file,
+                "output_url": running.masked_output_url,
+            })
             started.append(stream_key_id)
+
+    print(f"[STREAM PIPELINE END] Successfully started {len(started)} stream(s): {started}\n")
     if stream_id and not started:
-        raise ValueError(f"Stream '{stream_id}' could not be started. Check that a valid stream key is configured for this stream.")
+        raise ValueError(f"Stream '{stream_id}' could not be started. Check that a valid stream key is configured.")
     return started
 
 
@@ -7619,18 +7681,21 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             if parsed.path == "/api/stream/start":
-                update_request_trace(self, channel_name=body.get("channel") or None)
-                assert_youtube_channel_keys_match(config_name, body.get("channel") or None)
                 channel_name = body.get("channel") or None
                 stream_id = body.get("stream_id") or None
+                print(f"[API SERVER] REQ POST /api/stream/start -> channel='{channel_name}', stream_id='{stream_id}', config='{config_name}'")
+                update_request_trace(self, channel_name=channel_name)
+                assert_youtube_channel_keys_match(config_name, channel_name)
                 started = start_stream(config_name, channel_name, stream_id=stream_id)
+                print(f"[API SERVER] RES POST /api/stream/start -> started={started}")
                 json_response(self, {"ok": True, "started": started})
                 return
 
             if parsed.path == "/api/stream/stop":
-                update_request_trace(self, channel_name=body.get("channel") or None)
                 channel = body.get("channel") or None
                 stream_id = body.get("stream_id") or None
+                print(f"[API SERVER] REQ POST /api/stream/stop -> channel='{channel}', stream_id='{stream_id}', config='{config_name}'")
+                update_request_trace(self, channel_name=channel)
                 stopped = stop_stream(
                     channel,
                     stream_id=stream_id,
@@ -7643,6 +7708,7 @@ class Handler(BaseHTTPRequestHandler):
                         else "HTTP /api/stream/stop with no channel; stop all streams"
                     ),
                 )
+                print(f"[API SERVER] RES POST /api/stream/stop -> stopped={stopped}")
                 json_response(self, {"ok": True, "stopped": stopped})
                 return
 

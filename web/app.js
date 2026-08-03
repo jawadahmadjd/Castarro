@@ -11351,9 +11351,17 @@ async function confirmStreamVideoPickerSelection() {
   closeStreamVideoPickerModal();
 }
 
+function logUiAction(tag, message, data = null) {
+  const ts = new Date().toLocaleTimeString();
+  const detailStr = data ? ` | Details: ${JSON.stringify(data)}` : "";
+  console.log(`[${ts}] [UI ${tag}] ${message}${detailStr}`);
+}
+
 async function startSingleStream(channelName, streamId) {
+  logUiAction("Button Click", "Start Stream button clicked", { channel: channelName, stream_id: streamId });
   try {
     toast(`Starting stream...`);
+    logUiAction("API Outgoing", "POST /api/stream/start", { channel: channelName, stream_id: streamId, config: state.config });
     const response = await fetchApi("/api/stream/start", {
       method: "POST",
       body: JSON.stringify({
@@ -11362,23 +11370,30 @@ async function startSingleStream(channelName, streamId) {
         stream_id: streamId
       })
     });
+    logUiAction("API Response", "POST /api/stream/start result", response);
     if (response?.error) {
+      logUiAction("Stream Error", "Failed to start stream", response.error);
       toast("Failed to start stream: " + response.error, "danger");
     } else if (!response?.started || !response.started.length) {
+      logUiAction("Stream Warning", "Backend returned empty started array", response);
       toast("Could not start stream. Ensure a valid stream key is configured.", "danger");
     } else {
+      logUiAction("Stream Success", "Stream started successfully", response.started);
       toast("Stream started successfully!", "success");
       await refresh();
       renderWorkspaceStreamsTab(channelName);
     }
   } catch (err) {
+    logUiAction("Stream Exception", "Error starting stream", err.message);
     toast("Error starting stream: " + err.message, "danger");
   }
 }
 
 async function stopSingleStream(channelName, streamId) {
+  logUiAction("Button Click", "Stop Stream button clicked", { channel: channelName, stream_id: streamId });
   try {
     toast(`Stopping stream...`);
+    logUiAction("API Outgoing", "POST /api/stream/stop", { channel: channelName, stream_id: streamId, config: state.config });
     const response = await fetchApi("/api/stream/stop", {
       method: "POST",
       body: JSON.stringify({
@@ -11387,22 +11402,28 @@ async function stopSingleStream(channelName, streamId) {
         stream_id: streamId
       })
     });
+    logUiAction("API Response", "POST /api/stream/stop result", response);
     if (response?.error) {
+      logUiAction("Stream Error", "Failed to stop stream", response.error);
       toast("Failed to stop stream: " + response.error, "danger");
     } else {
+      logUiAction("Stream Success", "Stream stopped cleanly", response.stopped);
       toast("Stream stopped.", "info");
       await refresh();
       renderWorkspaceStreamsTab(channelName);
     }
   } catch (err) {
+    logUiAction("Stream Exception", "Error stopping stream", err.message);
     toast("Error stopping stream: " + err.message, "danger");
   }
 }
 
 async function startAllChannelStreams(channelName = null) {
   const targetChannel = String(channelName || state.workspace.selectedChannelName || "").trim();
+  logUiAction("Button Click", "Start All Streams button clicked", { channel: targetChannel });
   try {
     toast(`Starting all streams for ${targetChannel || "all channels"}...`);
+    logUiAction("API Outgoing", "POST /api/stream/start", { channel: targetChannel || null, config: state.config });
     const response = await fetchApi("/api/stream/start", {
       method: "POST",
       body: JSON.stringify({
@@ -11410,22 +11431,28 @@ async function startAllChannelStreams(channelName = null) {
         channel: targetChannel || null
       })
     });
+    logUiAction("API Response", "POST /api/stream/start result", response);
     if (response?.error) {
+      logUiAction("Stream Error", "Failed to start all streams", response.error);
       toast("Failed to start streams: " + response.error, "danger");
     } else {
+      logUiAction("Stream Success", "Started streams count=" + (response.started ? response.started.length : 0), response.started);
       toast("All streams started successfully!", "success");
       await refresh();
       if (targetChannel) renderWorkspaceStreamsTab(targetChannel);
     }
   } catch (err) {
+    logUiAction("Stream Exception", "Error starting all streams", err.message);
     toast("Error starting all streams: " + err.message, "danger");
   }
 }
 
 async function stopAllChannelStreams(channelName = null) {
   const targetChannel = String(channelName || state.workspace.selectedChannelName || "").trim();
+  logUiAction("Button Click", "Stop All Streams button clicked", { channel: targetChannel });
   try {
     toast(`Stopping all streams for ${targetChannel || "all channels"}...`);
+    logUiAction("API Outgoing", "POST /api/stream/stop", { channel: targetChannel || null, config: state.config });
     const response = await fetchApi("/api/stream/stop", {
       method: "POST",
       body: JSON.stringify({
@@ -11433,14 +11460,18 @@ async function stopAllChannelStreams(channelName = null) {
         channel: targetChannel || null
       })
     });
+    logUiAction("API Response", "POST /api/stream/stop result", response);
     if (response?.error) {
+      logUiAction("Stream Error", "Failed to stop all streams", response.error);
       toast("Failed to stop streams: " + response.error, "danger");
     } else {
+      logUiAction("Stream Success", "Stopped streams count=" + (response.stopped ? response.stopped.length : 0), response.stopped);
       toast("All streams stopped.", "info");
       await refresh();
       if (targetChannel) renderWorkspaceStreamsTab(targetChannel);
     }
   } catch (err) {
+    logUiAction("Stream Exception", "Error stopping all streams", err.message);
     toast("Error stopping streams: " + err.message, "danger");
   }
 }
