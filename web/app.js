@@ -1985,6 +1985,72 @@ function renderUpdateBanner() {
   }
 }
 
+async function checkSystemUpdateInteractive(interactive = true) {
+  logUiAction("UpdateCheck", "Checking for system updates...");
+  if (interactive) toast("Checking for updates...", "info");
+  try {
+    const res = await fetchApi("/api/system/update-check");
+    logUiAction("UpdateCheck", "Response from update check", res);
+    if (!res || !res.ok) {
+      if (interactive) toast("Failed to check for updates: " + (res?.error || "Server error"), "danger");
+      return;
+    }
+    const currentVer = res.current_version || "unknown";
+    const latestVer = res.latest_version || currentVer;
+
+    const verBadge = $("appVersionLabel");
+    if (verBadge) verBadge.textContent = currentVer.startsWith("v") ? currentVer : `v${currentVer}`;
+
+    const banner = $("updateBanner");
+    const textNode = $("updateBannerText");
+    const restartButton = $("restartToUpdate");
+
+    if (res.has_update) {
+      logUiAction("UpdateAvailable", `New update available: ${latestVer} (current: ${currentVer})`);
+      if (banner && textNode) {
+        banner.classList.remove("hidden");
+        banner.classList.add("ready");
+        textNode.innerHTML = `<strong>✨ Update ${escapeHtml(latestVer)} is available!</strong> Current: ${escapeHtml(currentVer)}. (Active streams continue running without interruption)`;
+        if (restartButton) {
+          restartButton.hidden = false;
+          restartButton.textContent = "⚡ Update Now";
+          restartButton.onclick = () => triggerSystemUpdateNow();
+        }
+      }
+      toast(`✨ Update ${latestVer} is available! Click 'Update Now' to apply.`, "info");
+    } else {
+      if (interactive) {
+        toast(`Castarro is up to date (${currentVer})!`, "success");
+      }
+      if (banner && !state.updateStatus?.status) {
+        banner.classList.add("hidden");
+      }
+    }
+  } catch (err) {
+    logUiAction("UpdateException", "Error checking for updates", err.message);
+    if (interactive) toast("Error checking updates: " + err.message, "danger");
+  }
+}
+
+async function triggerSystemUpdateNow() {
+  logUiAction("UpdateNow", "User initiated system update now...");
+  toast("Downloading and applying update... Live streams will continue uninterrupted.", "info");
+  try {
+    const res = await fetchApi("/api/system/update-now", { method: "POST" });
+    logUiAction("UpdateNowResponse", "Result from update execution", res);
+    if (!res || !res.ok) {
+      toast("Update failed: " + (res?.error || "Unknown error"), "danger");
+      return;
+    }
+    toast(`Successfully updated Castarro to ${res.new_version}! ${res.active_streams_count} active live stream(s) preserved.`, "success");
+    await refresh();
+    await checkSystemUpdateInteractive(false);
+  } catch (err) {
+    logUiAction("UpdateNowException", "Error performing update", err.message);
+    toast("Error applying update: " + err.message, "danger");
+  }
+}
+
 function renderConfigSelect(configs) {
   const select = $("configSelect");
   if (!select) return;

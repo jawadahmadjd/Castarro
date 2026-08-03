@@ -24,6 +24,7 @@ from difflib import SequenceMatcher
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+import urllib.request
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
 import app_db
@@ -5552,6 +5553,115 @@ def start_preview(config_name: str, channel_name: str | None) -> dict[str, Any]:
         return STATE.preview.as_dict()
 
 
+def parse_version_tuple(v_str: str) -> tuple[int, ...]:
+    clean = re.sub(r"[^0-9.]", "", v_str)
+    parts = [int(p) for p in clean.split(".") if p.isdigit()]
+    return tuple(parts) if parts else (0,)
+
+
+def check_system_update() -> dict[str, Any]:
+    curr = app_version() or "0.0.0"
+    curr_clean = curr.lstrip("v").strip()
+    latest_version = curr_clean
+    release_name = ""
+    published_at = ""
+    release_notes = ""
+    has_update = False
+
+    try:
+        req = urllib.request.Request(
+            "https://api.github.com/repos/jawadahmadjd/Castarro/releases/latest",
+            headers={"User-Agent": "Castarro-Updater/1.0"}
+        )
+        with urllib.request.urlopen(req, timeout=4) as resp:
+            if resp.status == 200:
+                data = json.loads(resp.read().decode("utf-8"))
+                tag = str(data.get("tag_name") or "").lstrip("v").strip()
+                if tag:
+                    latest_version = tag
+                    release_name = str(data.get("name") or "")
+                    published_at = str(data.get("published_at") or "")
+                    release_notes = str(data.get("body") or "")
+    except Exception as exc:
+        print(f"[UPDATER] GitHub API check skipped: {exc}")
+
+    try:
+        if (ROOT / ".git").exists():
+            subprocess.run(["git", "fetch", "origin", "main"], cwd=str(ROOT), timeout=8, capture_output=True)
+            local_hash = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=str(ROOT), text=True).strip()
+            remote_hash = subprocess.check_output(["git", "rev-parse", "origin/main"], cwd=str(ROOT), text=True).strip()
+            if local_hash != remote_hash and latest_version == curr_clean:
+                has_update = True
+    except Exception as exc:
+        print(f"[UPDATER] Git fetch check skipped: {exc}")
+
+    if parse_version_tuple(latest_version) > parse_version_tuple(curr_clean):
+        has_update = True
+
+    active_streams_count = 0
+    with STATE.lock:
+        active_streams_count = len([
+            st for st in STATE.streams.values()
+            if (st.running.process.poll() is None or st.recovering)
+        ])
+
+    return {
+        "ok": True,
+        "current_version": curr,
+        "latest_version": f"v{latest_version}" if not latest_version.startswith("v") else latest_version,
+        "has_update": has_update,
+        "release_name": release_name,
+        "published_at": published_at,
+        "release_notes": release_notes,
+        "running_streams_count": active_streams_count,
+    }
+
+
+def perform_system_update() -> dict[str, Any]:
+    old_version = app_version() or "unknown"
+    print(f"\n[UPDATER] Performing System Update... Current version={old_version}")
+
+    pull_output = ""
+    try:
+        res = subprocess.run(
+            ["git", "pull", "origin", "main"],
+            cwd=str(ROOT),
+            timeout=30,
+            capture_output=True,
+            text=True,
+        )
+        pull_output = (res.stdout or "") + (res.stderr or "")
+        print(f"[UPDATER] git pull output: {pull_output.strip()}")
+    except Exception as exc:
+        raise ValueError(f"Git update failed: {exc}")
+
+    new_version = app_version() or old_version
+
+    active_streams_count = 0
+    with STATE.lock:
+        active_streams_count = len([
+            st for st in STATE.streams.values()
+            if (st.running.process.poll() is None or st.recovering)
+        ])
+
+    app_db.record_event("system_updated", safe_config_name(DEFAULT_CONFIG), None, {
+        "previous_version": old_version,
+        "new_version": new_version,
+        "pull_output": pull_output,
+        "active_streams_count": active_streams_count,
+    })
+
+    return {
+        "ok": True,
+        "updated": True,
+        "previous_version": old_version,
+        "new_version": new_version,
+        "pull_output": pull_output,
+        "active_streams_count": active_streams_count,
+        "message": f"Successfully updated Castarro from {old_version} to {new_version}! Active live streams ({active_streams_count}) continue running without interruption.",
+    }
+
+
 def stop_stream(
     channel_name: str | None,
     *,
@@ -7357,6 +7467,10 @@ class Handler(BaseHTTPRequestHandler):
                 json_response(self, youtube_status(config_name))
                 return
 
+            if parsed.path == "/api/system/update-check":
+                json_response(self, check_system_update())
+                return
+
             if parsed.path == "/api/storage/status":
                 config_name = safe_config_name(query.get("config", [DEFAULT_CONFIG])[0])
                 update_request_trace(self, config_name=config_name)
@@ -7739,6 +7853,10 @@ class Handler(BaseHTTPRequestHandler):
                         "channel": channel_name,
                     },
                 )
+                return
+
+            if parsed.path == "/api/system/update-now":
+                json_response(self, perform_system_update())
                 return
 
             if parsed.path == "/api/system/shutdown":
