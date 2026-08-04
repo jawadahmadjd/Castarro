@@ -508,6 +508,16 @@ function setDataUsagePreset(preset) {
     startInput.value = formatDateForInput(start);
   }
 
+  const presetButtons = document.querySelectorAll(".data-usage-presets-row button");
+  presetButtons.forEach(btn => {
+    const onclickAttr = btn.getAttribute("onclick") || "";
+    if (onclickAttr.includes(`'${preset}'`)) {
+      btn.classList.remove("ghost");
+    } else {
+      btn.classList.add("ghost");
+    }
+  });
+
   fetchCustomDataUsage();
 }
 
@@ -530,9 +540,7 @@ async function fetchCustomDataUsage() {
     if (startVal) params.set("start", startVal);
     if (endVal) params.set("end", endVal);
 
-    const res = await fetch(`/api/data-usage?${params.toString()}`);
-    if (!res.ok) throw new Error("Failed to fetch data usage");
-    const data = await res.json();
+    const data = await api(`/api/data-usage?${params.toString()}`);
 
     if (totalNode) totalNode.textContent = formatBytes(data.total_bytes || 0);
     if (countNode) countNode.textContent = String(data.session_count || 0);
@@ -564,7 +572,9 @@ async function fetchCustomDataUsage() {
     }
   } catch (err) {
     if (totalNode) totalNode.textContent = "Error";
-    if (channelList) channelList.innerHTML = `<div class="panel-empty">Error: ${escapeHtml(err.message)}</div>`;
+    if (countNode) countNode.textContent = "0";
+    if (channelList) channelList.innerHTML = `<div class="panel-empty">Error: ${escapeHtml(err.message || String(err))}</div>`;
+    if (dailyList) dailyList.innerHTML = `<div class="panel-empty">Error: ${escapeHtml(err.message || String(err))}</div>`;
   }
 }
 

@@ -7440,9 +7440,56 @@ class Handler(BaseHTTPRequestHandler):
                 update_request_trace(self, config_name=config_name)
                 details = app_db.stream_transfer_range_details(config_name, start_date=start_at, end_date=end_at)
                 st_payload = status_payload(config_name)
-                active_bytes = int(st_payload.get("usage", {}).get("active_stream_transfer_bytes", 0) or 0)
-                if active_bytes > 0:
-                    details["total_bytes"] += active_bytes
+
+                today_local_str = datetime.now().astimezone().strftime("%Y-%m-%d")
+                is_today_in_range = True
+                if start_at and today_local_str < start_at:
+                    is_today_in_range = False
+                if end_at and today_local_str > end_at:
+                    is_today_in_range = False
+
+                if is_today_in_range:
+                    streams = st_payload.get("streams", {})
+                    active_by_channel: dict[str, int] = {}
+                    active_count = 0
+                    total_active_bytes = 0
+                    for ch_name, st in streams.items():
+                        if st.get("process_running", st.get("running")):
+                            tb = int(st.get("transferred_bytes") or 0)
+                            active_by_channel[ch_name] = active_by_channel.get(ch_name, 0) + tb
+                            total_active_bytes += tb
+                            active_count += 1
+
+                    if total_active_bytes > 0 or active_count > 0:
+                        details["total_bytes"] += total_active_bytes
+
+                        by_channel_map = {item["channel_name"]: dict(item) for item in details.get("by_channel", [])}
+                        for ch_name, act_bytes in active_by_channel.items():
+                            if ch_name in by_channel_map:
+                                by_channel_map[ch_name]["bytes"] += act_bytes
+                            else:
+                                by_channel_map[ch_name] = {
+                                    "channel_name": ch_name,
+                                    "bytes": act_bytes,
+                                    "session_count": 1,
+                                }
+                        merged_channels = list(by_channel_map.values())
+                        merged_channels.sort(key=lambda x: x["bytes"], reverse=True)
+                        details["by_channel"] = merged_channels
+
+                        by_day_map = {item["date"]: dict(item) for item in details.get("by_day", [])}
+                        if today_local_str in by_day_map:
+                            by_day_map[today_local_str]["bytes"] += total_active_bytes
+                        else:
+                            by_day_map[today_local_str] = {
+                                "date": today_local_str,
+                                "bytes": total_active_bytes,
+                                "session_count": active_count,
+                            }
+                        merged_days = list(by_day_map.values())
+                        merged_days.sort(key=lambda x: x["date"], reverse=True)
+                        details["by_day"] = merged_days
+
                 details["start_date"] = start_at
                 details["end_date"] = end_at
                 json_response(self, details)

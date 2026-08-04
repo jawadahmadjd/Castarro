@@ -942,7 +942,7 @@ def stream_transfer_range_details(
 
         day_rows = db.execute(
             f"""
-            SELECT strftime('%Y-%m-%d', started_at) AS date_str, COALESCE(SUM(transferred_bytes), 0) AS bytes, COUNT(*) as count
+            SELECT COALESCE(strftime('%Y-%m-%d', started_at, 'localtime'), strftime('%Y-%m-%d', started_at)) AS date_str, COALESCE(SUM(transferred_bytes), 0) AS bytes, COUNT(*) as count
             FROM stream_sessions
             {where_clause}
             GROUP BY date_str
