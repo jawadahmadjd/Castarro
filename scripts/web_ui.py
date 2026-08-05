@@ -3195,9 +3195,10 @@ def replace_stale_youtube_broadcast_for_start(
         auto_stop=auto_stop,
         stream_key=effective_key,
     )
-    stream_name = str(created.get("stream", {}).get("stream_name") or "").strip()
-    if stream_name:
-        channel["stream_key_env"] = stream_name
+    # Temporarily disabled YouTube tab stream key assignment so Streams tab remains source of truth
+    # stream_name = str(created.get("stream", {}).get("stream_name") or "").strip()
+    # if stream_name:
+    #     channel["stream_key_env"] = stream_name
     channel["youtube_account_id"] = account_id
     channel["youtube_auto_start"] = auto_start
     channel["youtube_auto_stop"] = auto_stop
@@ -3968,9 +3969,10 @@ def schedule_youtube(config_name: str, body: dict[str, Any]) -> dict[str, Any]:
     clear_youtube_account_caches(config_name, account_id)
 
     if selected_channel:
-        stream_name = str(created.get("stream", {}).get("stream_name") or "").strip()
-        if stream_name:
-            selected_channel["stream_key_env"] = stream_name
+        # Temporarily disabled YouTube tab stream key assignment so Streams tab remains source of truth
+        # stream_name = str(created.get("stream", {}).get("stream_name") or "").strip()
+        # if stream_name:
+        #     selected_channel["stream_key_env"] = stream_name
         selected_channel["youtube_account_id"] = account_id
         selected_channel["youtube_auto_start"] = auto_start
         selected_channel["youtube_auto_stop"] = auto_stop
@@ -4050,7 +4052,8 @@ def use_existing_youtube_broadcast(config_name: str, body: dict[str, Any]) -> di
     if not stream_name:
         raise ValueError("That YouTube broadcast does not have a bound stream key yet.")
 
-    selected_channel["stream_key_env"] = stream_name
+    # Temporarily disabled YouTube tab stream key assignment so Streams tab remains source of truth
+    # selected_channel["stream_key_env"] = stream_name
     selected_channel["youtube_account_id"] = account_id
     if isinstance(broadcast.get("auto_start"), bool):
         selected_channel["youtube_auto_start"] = bool(broadcast.get("auto_start"))

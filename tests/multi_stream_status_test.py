@@ -44,6 +44,7 @@ class DummyRunningStream:
         self.kind = "live"
         self.monitor_thread = None
         self.log_thread = None
+        self.masked_output_url = "rtmp://..."
 
 
 def test_multi_stream_status_tracking() -> None:
