@@ -180,7 +180,7 @@ jobs:
           retention-days: 7
 
   release-linux:
-    name: Build Linux AppImage release
+    name: Build Linux deb release
     needs: prepare
     if: always() && needs.prepare.result == 'success' && needs.prepare.outputs.exists != 'true'
     runs-on: ubuntu-latest
@@ -201,7 +201,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y python3 ffmpeg fuse libfuse2
+          sudo apt-get install -y python3 ffmpeg
 
       - name: Install node dependencies
         run: npm ci
@@ -241,22 +241,22 @@ jobs:
           mkdir -p desktop/resources/python desktop/resources/ffmpeg desktop/resources/seed-data
           touch desktop/resources/python/.keep desktop/resources/ffmpeg/.keep desktop/resources/seed-data/.keep
 
-      - name: Build Linux AppImage
-        run: npx electron-builder --linux AppImage --publish never
+      - name: Build Linux deb
+        run: npx electron-builder --linux deb --publish never
 
       - name: Stage Linux release assets
         shell: bash
         run: |
           mkdir -p linux-artifacts
-          cp dist/Castarro-*.AppImage linux-artifacts/ 2>/dev/null || cp dist/*.AppImage linux-artifacts/
+          cp dist/Castarro-*.deb linux-artifacts/ 2>/dev/null || cp dist/*.deb linux-artifacts/
           if [ -f dist/latest-linux.yml ]; then
             cp dist/latest-linux.yml linux-artifacts/
           fi
 
-      - name: Upload Linux AppImage artifact
+      - name: Upload Linux deb artifact
         uses: actions/upload-artifact@v4
         with:
-          name: castarro-linux-release-appimage
+          name: castarro-linux-release-deb
           path: linux-artifacts/*
           if-no-files-found: error
           retention-days: 1
@@ -454,11 +454,11 @@ jobs:
         shell: pwsh
         run: npm run smoke:installer
 
-      - name: Download Linux release AppImage
+      - name: Download Linux release deb
         if: steps.version.outputs.exists != 'true'
         uses: actions/download-artifact@v4
         with:
-          name: castarro-linux-release-appimage
+          name: castarro-linux-release-deb
           path: dist
 
       - name: Create version tag
@@ -480,9 +480,9 @@ jobs:
             ## Downloads
 
             - **Windows Desktop**: `Castarro-Setup-${{ steps.version.outputs.version }}.exe`
-            - **Ubuntu / Linux AppImage**: `Castarro-${{ steps.version.outputs.version }}.AppImage`
+            - **Ubuntu / Linux Installer (.deb)**: `Castarro-Setup-${{ steps.version.outputs.version }}.deb`
 
-            The AppImage runs natively on Ubuntu and Linux distros. Auto-updates are fully supported for both Windows and Linux platforms.
+            The `.deb` package installs natively on Ubuntu / Debian with automatic desktop shortcuts and system dependency integration.
           generate_release_notes: true
           make_latest: true
           fail_on_unmatched_files: false
@@ -490,5 +490,5 @@ jobs:
             dist/Castarro-Setup-${{ steps.version.outputs.version }}.exe
             dist/Castarro-Setup-${{ steps.version.outputs.version }}.exe.blockmap
             dist/latest.yml
-            dist/Castarro-*.AppImage
+            dist/Castarro-*.deb
             dist/latest-linux.yml

@@ -239,7 +239,8 @@ def write_concat_playlist(
 def output_url(channel: dict[str, Any], defaults: dict[str, Any], stream_item: dict[str, Any] | None = None) -> str:
     # Primary flow: user fills "stream_key_env" with either an env var name
     # or a direct stream key; app builds final RTMP URL automatically.
-    target_obj = stream_item if isinstance(stream_item, dict) and (stream_item.get("stream_key") or stream_item.get("stream_key_env")) else channel
+    has_item_key = isinstance(stream_item, dict) and (stream_item.get("stream_key") or stream_item.get("stream_key_env"))
+    target_obj = stream_item if has_item_key else channel
     stream_key = str(target_obj.get("stream_key") or "").strip()
     key_env = str(target_obj.get("stream_key_env") or "").strip()
     if key_env:
@@ -257,6 +258,9 @@ def output_url(channel: dict[str, Any], defaults: dict[str, Any], stream_item: d
                 )
 
     if stream_key:
+        sid = str(stream_item.get("id") or "") if isinstance(stream_item, dict) else ""
+        if not has_item_key and sid and sid != "stream_1":
+            stream_key = f"{stream_key}_{sid}"
         base = str(channel.get("rtmp_base") or defaults.get("rtmp_base")).strip().rstrip("/")
         return f"{base}/{stream_key}"
 

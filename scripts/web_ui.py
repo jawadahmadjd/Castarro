@@ -1766,9 +1766,22 @@ def find_channel_by_name(config: dict[str, Any], channel_name: str) -> dict[str,
     expected = str(channel_name or "").strip()
     if not expected:
         return None
+    base_name = expected.split(":")[0] if ":" in expected else expected
     for channel in config.get("channels", []):
-        if isinstance(channel, dict) and str(channel.get("name") or "").strip() == expected:
-            return channel
+        if isinstance(channel, dict):
+            c_name = str(channel.get("name") or "").strip()
+            if c_name in (expected, base_name):
+                return channel
+    return None
+
+
+def get_stream_item_for_channel(channel: dict[str, Any], channel_name: str) -> dict[str, Any] | None:
+    if not isinstance(channel, dict) or ":" not in str(channel_name or ""):
+        return None
+    sid = str(channel_name).split(":", 1)[1].strip()
+    for s in channel.get("streams", []):
+        if isinstance(s, dict) and str(s.get("id") or "").strip() == sid:
+            return s
     return None
 
 
@@ -5361,6 +5374,19 @@ def start_stream(config_name: str, channel_name: str | None, stream_id: str | No
                     continue
 
             prepared_channel, cloud_asset_ids = prepare_channel_cloud_playlist(config, channel)
+            prepared_channel = dict(prepared_channel)
+            if s.get("name"):
+                prepared_channel["stream_name"] = str(s.get("name"))
+            if s.get("title"):
+                prepared_channel["live_title"] = str(s.get("title"))
+                prepared_channel["title"] = str(s.get("title"))
+            if s.get("thumbnail"):
+                prepared_channel["thumbnail"] = str(s.get("thumbnail"))
+            if s.get("tags"):
+                prepared_channel["tags"] = s.get("tags")
+            if s.get("playlist") and isinstance(s.get("playlist"), list) and len(s.get("playlist")) > 0:
+                prepared_channel["playlist"] = s.get("playlist")
+
             print(f"[{name}] Launching FFmpeg process for stream '{stream_key_id}'...")
             try:
                 running = stream_manager.start_stream(
@@ -5369,7 +5395,7 @@ def start_stream(config_name: str, channel_name: str | None, stream_id: str | No
                     prepared_channel,
                     stream_item=s,
                 )
-            except Exception as exc:
+            except (Exception, SystemExit) as exc:
                 unregister_cloud_assets(cloud_asset_ids)
                 print(f"[{name}] [ERROR] FFmpeg launch failed for '{stream_key_id}': {exc}")
                 app_db.record_event("stream_start_error", config_name, name, {"stream_id": sid, "error": str(exc)})
@@ -5401,7 +5427,8 @@ def start_stream(config_name: str, channel_name: str | None, stream_id: str | No
             app_db.record_event("stream_started", config_name, name, {
                 "pid": running.process.pid,
                 "stream_id": sid,
-                "stream_name": s.get("name"),
+                "stream_name": s.get("name") or sid,
+                "title": stream_live_title(prepared_channel),
                 "log_file": log_file,
                 "output_url": running.masked_output_url,
             })
@@ -5688,14 +5715,29 @@ def stop_stream(
             targets = [k for k in STATE.streams.keys() if k == channel_name or k.startswith(f"{channel_name}:")]
         else:
             targets = list(STATE.streams.keys())
+
+        target_states: list[tuple[str, StreamState]] = []
         seen_states: set[int] = set()
-        for name in targets:
+        for name in list(targets):
             if not name:
                 continue
             state = STATE.streams.get(name)
             if not state or id(state) in seen_states:
                 continue
             seen_states.add(id(state))
+            target_states.append((name, state))
+
+        for key in list(STATE.streams.keys()):
+            if channel_name and stream_id:
+                if key == f"{channel_name}:{stream_id}":
+                    STATE.streams.pop(key, None)
+            elif channel_name:
+                if key == channel_name or key.startswith(f"{channel_name}:"):
+                    STATE.streams.pop(key, None)
+            elif not channel_name:
+                STATE.streams.pop(key, None)
+
+        for name, state in target_states:
             if STATE.preview and STATE.preview.channel_name in (name, name.split(":")[0]):
                 preview = STATE.preview
                 request_stop_running_stream(
@@ -5705,12 +5747,15 @@ def stop_stream(
                 )
                 if preview.running.preview_manifest:
                     stream_manager.clear_directory(preview.running.preview_manifest.parent)
-                app_db.record_event(
-                    "preview_stopped",
-                    preview.config_name,
-                    preview.channel_name,
-                    {"returncode": preview.running.process.returncode},
-                )
+                try:
+                    app_db.record_event(
+                        "preview_stopped",
+                        preview.config_name,
+                        preview.channel_name,
+                        {"returncode": preview.running.process.returncode},
+                    )
+                except Exception:
+                    pass
                 STATE.preview = None
             state.recovering = False
             state.last_reconnect_status = ""
@@ -5723,30 +5768,31 @@ def stop_stream(
             unregister_cloud_assets(state.cloud_asset_ids)
             transferred_bytes = state.transferred_bytes()
             STATE.stream_exit_recorded.add((state.config_name, name))
-            app_db.record_stream_stop(state.config_name, name, state.running.process.returncode, transferred_bytes)
-            app_db.record_event(
-                "stream_stopped",
-                state.config_name,
-                name,
-                {
-                    "returncode": state.running.process.returncode,
-                    "transferred_bytes": transferred_bytes,
-                    "stop_source": request_source,
-                    "stop_reason": request_reason,
-                },
-            )
+            try:
+                app_db.record_stream_stop(state.config_name, name, state.running.process.returncode, transferred_bytes)
+                app_db.record_event(
+                    "stream_stopped",
+                    state.config_name,
+                    name,
+                    {
+                        "returncode": state.running.process.returncode,
+                        "transferred_bytes": transferred_bytes,
+                        "stop_source": request_source,
+                        "stop_reason": request_reason,
+                    },
+                )
+            except Exception as db_err:
+                print(f"[WARN] DB record_stream_stop failed: {db_err}")
             stopped.append(name)
-            STATE.streams.pop(name, None)
-            ch_base = name.split(":")[0]
-            remaining = [
-                s for k, s in STATE.streams.items()
-                if (k == ch_base or k.startswith(f"{ch_base}:"))
-                and (s.running.process.poll() is None or s.recovering)
-            ]
-            if remaining:
-                STATE.streams[ch_base] = remaining[0]
-            else:
-                STATE.streams.pop(ch_base, None)
+
+        active_by_channel: dict[str, StreamState] = {}
+        for k, s in STATE.streams.items():
+            if ":" in k and (s.running.process.poll() is None or s.recovering):
+                ch = k.split(":")[0]
+                if ch not in active_by_channel:
+                    active_by_channel[ch] = s
+        for ch, s in active_by_channel.items():
+            STATE.streams[ch] = s
     if cycle_runtime_changed:
         persist_stream_cycle_runtime()
     return stopped
@@ -6262,8 +6308,10 @@ def maybe_reconnect_youtube_stream(
     if not bool(channel.get("restart_on_exit", True)):
         return False
 
+    ret_code = state.running.process.poll()
     log_tail = tail_file(state.log_path, max_chars=20000)
-    if not stream_manager.is_recoverable_network_exit(state.running.process.returncode, log_tail):
+    is_rec = stream_manager.is_recoverable_network_exit(ret_code, log_tail)
+    if not is_rec and ret_code == 0:
         return False
 
     delay_seconds = reconnect_delay_seconds(config, channel)
@@ -6326,7 +6374,21 @@ def maybe_reconnect_youtube_stream(
     cloud_asset_ids: list[str] = []
     try:
         prepared_channel, cloud_asset_ids = prepare_channel_cloud_playlist(config, channel)
-        running = stream_manager.start_stream(config_dir, config, prepared_channel)
+        s_item = get_stream_item_for_channel(channel, channel_name)
+        if s_item:
+            if s_item.get("name"):
+                prepared_channel["name"] = f"{channel.get('name')}:{s_item.get('id')}"
+            if s_item.get("stream_key"):
+                prepared_channel["stream_key"] = str(s_item.get("stream_key"))
+            if s_item.get("title"):
+                prepared_channel["title"] = str(s_item.get("title"))
+            if s_item.get("thumbnail"):
+                prepared_channel["thumbnail"] = str(s_item.get("thumbnail"))
+            if s_item.get("tags"):
+                prepared_channel["tags"] = s_item.get("tags")
+            if s_item.get("playlist") and isinstance(s_item.get("playlist"), list) and len(s_item.get("playlist")) > 0:
+                prepared_channel["playlist"] = s_item.get("playlist")
+        running = stream_manager.start_stream(config_dir, config, prepared_channel, stream_item=s_item)
     except Exception as exc:
         unregister_cloud_assets(old_assets)
         unregister_cloud_assets(cloud_asset_ids)
@@ -6397,6 +6459,20 @@ def restart_stalled_stream(
     cloud_asset_ids: list[str] = []
     try:
         prepared_channel, cloud_asset_ids = prepare_channel_cloud_playlist(config, channel)
+        s_item = get_stream_item_for_channel(channel, channel_name)
+        if s_item:
+            if s_item.get("name"):
+                prepared_channel["name"] = f"{channel.get('name')}:{s_item.get('id')}"
+            if s_item.get("stream_key"):
+                prepared_channel["stream_key"] = str(s_item.get("stream_key"))
+            if s_item.get("title"):
+                prepared_channel["title"] = str(s_item.get("title"))
+            if s_item.get("thumbnail"):
+                prepared_channel["thumbnail"] = str(s_item.get("thumbnail"))
+            if s_item.get("tags"):
+                prepared_channel["tags"] = s_item.get("tags")
+            if s_item.get("playlist") and isinstance(s_item.get("playlist"), list) and len(s_item.get("playlist")) > 0:
+                prepared_channel["playlist"] = s_item.get("playlist")
     except Exception as exc:
         unregister_cloud_assets(cloud_asset_ids)
         with STATE.lock:
@@ -6426,7 +6502,7 @@ def restart_stalled_stream(
     request_stop_running_stream(old_running, source="stall_restart", reason=reason)
     unregister_cloud_assets(old_assets)
     try:
-        running = stream_manager.start_stream(config_dir, config, prepared_channel)
+        running = stream_manager.start_stream(config_dir, config, prepared_channel, stream_item=s_item)
     except Exception as exc:
         unregister_cloud_assets(cloud_asset_ids)
         with STATE.lock:

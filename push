@@ -7,7 +7,7 @@ Automate release push flow for Castarro:
 
 GitHub Actions workflow on main then:
 - checks whether tag v<version> exists
-- builds and publishes Windows installer (.exe) + Linux AppImage (.AppImage) when version is new
+- builds and publishes Windows installer (.exe) + Linux installer (.deb) when version is new
 """
 
 from __future__ import annotations

@@ -165,6 +165,8 @@ function selectableConfigNames(configs = []) {
 
 function preferredConfigName(configs = []) {
   const names = selectableConfigNames(configs);
+  const urlConfig = new URLSearchParams(window.location.search).get("config");
+  if (urlConfig && names.includes(urlConfig)) return urlConfig;
   if (names.includes(state.config)) return state.config;
   if (names.includes("config.ready.json")) return "config.ready.json";
   if (names.includes("config.json")) return "config.json";
@@ -2912,11 +2914,28 @@ function renderWorkspaceHeader(payload, channel) {
             : `<p class="helper">No recent alerts for this workspace.</p>`}
         </div>
       </div>
-      <button class="${streamButtonClass}" type="button" ${!streamRunning && importBusy ? "disabled title=\"Wait for video import to finish.\"" : ""} onclick="${streamAction}('${escapedName}').catch((error) => toast(error.message))">${streamButtonLabel}</button>
+      <button class="${streamButtonClass}" id="headerStreamActionButton" type="button" ${!streamRunning && importBusy ? "disabled title=\"Wait for video import to finish.\"" : ""} onclick="handleHeaderStreamAction('${escapedName}', ${streamRunning})">${streamButtonLabel}</button>
     </div>
   `;
   syncThemeToggle();
   restoreWorkspaceAlertsScroll(alertScrollSnapshot);
+}
+
+async function handleHeaderStreamAction(channelName, isRunning) {
+  const btn = $("headerStreamActionButton");
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = isRunning ? "Stopping..." : "Starting...";
+  }
+  try {
+    if (isRunning) {
+      await stopStream(channelName);
+    } else {
+      await startStream(channelName);
+    }
+  } catch (err) {
+    // Errors toast automatically in startStream/stopStream
+  }
 }
 
 function renderWorkspaceStatusBand(payload, channel) {
@@ -9738,23 +9757,50 @@ async function startStream(channel = null) {
     toast(`Wait for video import to finish for ${busyChannel}.`);
     return;
   }
-  await flushSettingsAutosave();
-  await api("/api/stream/start", {
-    method: "POST",
-    body: JSON.stringify({ config: state.config, channel }),
-    action: channel ? "stream.start.channel" : "stream.start.all",
-  });
-  showTab("control");
-  await refresh();
+  toast(channel ? `Starting streams for ${channel}...` : `Starting all streams...`, "info");
+  try {
+    await flushSettingsAutosave();
+    const payload = await api("/api/stream/start", {
+      method: "POST",
+      body: JSON.stringify({ config: state.config, channel }),
+      action: channel ? "stream.start.channel" : "stream.start.all",
+    });
+    if (payload?.started?.length) {
+      toast(`Started ${payload.started.length} stream(s) successfully!`, "success");
+    } else {
+      toast("Stream start request sent.", "info");
+    }
+  } catch (err) {
+    toast(`Failed to start stream: ${err.message}`, "danger");
+    throw err;
+  } finally {
+    showTab("control");
+    await refresh();
+    if (channel) {
+      renderWorkspaceStreamsTab(channel);
+    }
+  }
 }
 
 async function stopStream(channel = null) {
-  await api("/api/stream/stop", {
-    method: "POST",
-    body: JSON.stringify({ config: state.config, channel }),
-    action: channel ? "stream.stop.channel" : "stream.stop.all",
-  });
-  await refresh();
+  toast(channel ? `Stopping streams for ${channel}...` : `Stopping all streams...`, "info");
+  try {
+    const payload = await api("/api/stream/stop", {
+      method: "POST",
+      body: JSON.stringify({ config: state.config, channel }),
+      action: channel ? "stream.stop.channel" : "stream.stop.all",
+    });
+    const stoppedCount = payload?.stopped?.length || 0;
+    toast(`Stopped ${stoppedCount} stream(s).`, "info");
+  } catch (err) {
+    toast(`Failed to stop stream: ${err.message}`, "danger");
+    throw err;
+  } finally {
+    await refresh();
+    if (channel) {
+      renderWorkspaceStreamsTab(channel);
+    }
+  }
 }
 
 function showTab(tab) {
@@ -11144,8 +11190,8 @@ async function renderWorkspaceStreamsTab(channelName, cachedStreamsData = null) 
       const streamPlaylist = Array.isArray(s.playlist) ? s.playlist.join(", ") : "";
 
       const actionBtn = (isRunning || isRecovering)
-        ? `<button class="pill danger" type="button" onclick="stopSingleStream('${escapeJs(channelName)}', '${escapeJs(s.id)}')">Stop Stream</button>`
-        : `<button class="pill success" type="button" onclick="startSingleStream('${escapeJs(channelName)}', '${escapeJs(s.id)}')">Start Stream</button>`;
+        ? `<button class="pill danger" id="streamCardBtn_${escapeHtml(s.id)}" type="button" onclick="stopSingleStream('${escapeJs(channelName)}', '${escapeJs(s.id)}')">Stop Stream</button>`
+        : `<button class="pill success" id="streamCardBtn_${escapeHtml(s.id)}" type="button" onclick="startSingleStream('${escapeJs(channelName)}', '${escapeJs(s.id)}')">Start Stream</button>`;
 
       return `
         <div class="stream-card ${isRunning ? "active-stream" : ""}" id="streamCard_${escapeHtml(s.id)}">
@@ -11435,8 +11481,13 @@ function logUiAction(tag, message, data = null) {
 
 async function startSingleStream(channelName, streamId) {
   logUiAction("Button Click", "Start Stream button clicked", { channel: channelName, stream_id: streamId });
+  const cardBtn = $(`streamCardBtn_${streamId}`);
+  if (cardBtn) {
+    cardBtn.disabled = true;
+    cardBtn.textContent = "Starting...";
+  }
   try {
-    toast(`Starting stream...`);
+    toast(`Starting stream ${streamId}...`, "info");
     logUiAction("API Outgoing", "POST /api/stream/start", { channel: channelName, stream_id: streamId, config: state.config });
     const response = await fetchApi("/api/stream/start", {
       method: "POST",
@@ -11455,20 +11506,26 @@ async function startSingleStream(channelName, streamId) {
       toast("Could not start stream. Ensure a valid stream key is configured.", "danger");
     } else {
       logUiAction("Stream Success", "Stream started successfully", response.started);
-      toast("Stream started successfully!", "success");
-      await refresh();
-      renderWorkspaceStreamsTab(channelName);
+      toast(`Stream ${streamId} started successfully!`, "success");
     }
   } catch (err) {
     logUiAction("Stream Exception", "Error starting stream", err.message);
     toast("Error starting stream: " + err.message, "danger");
+  } finally {
+    await refresh();
+    renderWorkspaceStreamsTab(channelName);
   }
 }
 
 async function stopSingleStream(channelName, streamId) {
   logUiAction("Button Click", "Stop Stream button clicked", { channel: channelName, stream_id: streamId });
+  const cardBtn = $(`streamCardBtn_${streamId}`);
+  if (cardBtn) {
+    cardBtn.disabled = true;
+    cardBtn.textContent = "Stopping...";
+  }
   try {
-    toast(`Stopping stream...`);
+    toast(`Stopping stream ${streamId}...`, "info");
     logUiAction("API Outgoing", "POST /api/stream/stop", { channel: channelName, stream_id: streamId, config: state.config });
     const response = await fetchApi("/api/stream/stop", {
       method: "POST",
@@ -11484,13 +11541,14 @@ async function stopSingleStream(channelName, streamId) {
       toast("Failed to stop stream: " + response.error, "danger");
     } else {
       logUiAction("Stream Success", "Stream stopped cleanly", response.stopped);
-      toast("Stream stopped.", "info");
-      await refresh();
-      renderWorkspaceStreamsTab(channelName);
+      toast(`Stream ${streamId} stopped.`, "info");
     }
   } catch (err) {
     logUiAction("Stream Exception", "Error stopping stream", err.message);
     toast("Error stopping stream: " + err.message, "danger");
+  } finally {
+    await refresh();
+    renderWorkspaceStreamsTab(channelName);
   }
 }
 

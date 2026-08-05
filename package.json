@@ -1,16 +1,16 @@
 {
   "name": "castarro-desktop",
-  "version": "1.5.8",
+  "version": "1.6.0",
   "description": "Windows desktop package for Castarro, a local multi-channel live streaming dashboard.",
   "main": "desktop/main.js",
-  "author": "Jawad Ahmad",
+  "author": "Jawad Ahmad <jawadahmadjd@users.noreply.github.com>",
   "license": "UNLICENSED",
   "private": true,
   "scripts": {
     "electron": "electron .",
     "pack": "electron-builder --dir",
     "dist": "npm run youtube:seed && electron-builder --win nsis --publish never",
-    "dist:linux": "npm run youtube:seed && electron-builder --linux AppImage --publish never",
+    "dist:linux": "npm run youtube:seed && electron-builder --linux deb --publish never",
     "dist:signed": "powershell -ExecutionPolicy Bypass -File scripts/dist_signed.ps1",
     "bundle:runtime": "powershell -ExecutionPolicy Bypass -File scripts/package_runtime.ps1",
     "youtube:seed": "powershell -ExecutionPolicy Bypass -File scripts/create_youtube_oauth_seed.ps1",
@@ -92,8 +92,9 @@
     },
     "linux": {
       "icon": "desktop/assets/icon.png",
+      "maintainer": "Jawad Ahmad <jawadahmadjd@users.noreply.github.com>",
       "target": [
-        "AppImage"
+        "deb"
       ],
       "category": "AudioVideo",
       "executableArgs": [

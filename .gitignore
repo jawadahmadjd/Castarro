@@ -62,3 +62,10 @@ tests/screenshots/mobile-app-skin-*.png
 Thumbs.db
 *.tmp
 *.log
+
+# Test artifacts and temporary test configs
+Multi Stream Testing/
+config.test_*.json
+tests/multi_stream_e2e.js
+tests/test_247_auto_recovery.js
+
