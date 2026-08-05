@@ -7,6 +7,13 @@ const os = require("os");
 const path = require("path");
 const { pathToFileURL } = require("url");
 
+if (process.platform === "linux") {
+  app.disableHardwareAcceleration();
+  app.commandLine.appendSwitch("no-sandbox");
+  app.commandLine.appendSwitch("disable-gpu");
+  app.commandLine.appendSwitch("disable-software-rasterizer");
+}
+
 const HEALTHCHECK_TIMEOUT_MS = 30000;
 const HEALTHCHECK_INTERVAL_MS = 500;
 const UPDATE_CHECK_INTERVAL_MS = 60 * 1000;
@@ -1176,19 +1183,25 @@ function createMenu() {
 
 function createTray() {
   const iconPath = firstExisting([
+    path.join(codeRoot(), "desktop", "assets", "icon.png"),
     path.join(codeRoot(), "desktop", "assets", "icon.ico"),
+    path.join(resourcesRoot(), "icon.png"),
     path.join(resourcesRoot(), "icon.ico")
   ]);
   if (!iconPath) return;
-  tray = new Tray(iconPath);
-  tray.setToolTip(PRODUCT_NAME);
-  tray.setContextMenu(buildTrayMenu(0));
+  try {
+    tray = new Tray(iconPath);
+    tray.setToolTip(PRODUCT_NAME);
+    tray.setContextMenu(buildTrayMenu(0));
 
-  const refresh = () => refreshTrayPresentation().catch((error) => diagnosticLog("tray status refresh failed", error));
-  refresh();
-  if (trayStatusTimer) clearInterval(trayStatusTimer);
-  trayStatusTimer = setInterval(refresh, TRAY_TOOLTIP_REFRESH_MS);
-  trayStatusTimer.unref();
+    const refresh = () => refreshTrayPresentation().catch((error) => diagnosticLog("tray status refresh failed", error));
+    refresh();
+    if (trayStatusTimer) clearInterval(trayStatusTimer);
+    trayStatusTimer = setInterval(refresh, TRAY_TOOLTIP_REFRESH_MS);
+    trayStatusTimer.unref();
+  } catch (error) {
+    diagnosticLog("failed to create tray icon", error);
+  }
 }
 
 function trayTooltipText(streamCount) {
