@@ -145,6 +145,11 @@ def bump_semver_version(current_version: str, bump: str) -> str:
     return f"{major}.{minor}.{patch}"
 
 
+def is_remote_tag_present(remote: str, tag: str) -> bool:
+    result = run(["git", "ls-remote", "--tags", remote, f"refs/tags/{tag}"], capture_output=True, check=False)
+    return bool(result.stdout and result.stdout.strip())
+
+
 def resolve_target_version(
     *,
     current_version: str,
@@ -152,10 +157,22 @@ def resolve_target_version(
     bump: str,
     preid: str | None,
     version_strategy: str,
+    remote: str = "origin",
 ) -> str:
     if explicit_version:
         validate_semver(explicit_version)
         return explicit_version
+
+    # Check if the current package version has been published/tagged on remote origin.
+    # If the tag does not exist (e.g. previous CI build failed), reuse the current version.
+    current_tag = f"v{current_version}"
+    if not is_remote_tag_present(remote, current_tag):
+        print(
+            f"[info] Current version '{current_version}' has not been tagged/released on {remote} yet. "
+            f"Reusing version '{current_version}' for release."
+        )
+        return current_version
+
     if version_strategy == "digit-cycle" and bump == "patch" and not preid:
         return next_digit_cycle_version(current_version)
     if bump in {"patch", "minor", "major"} and not preid:
@@ -170,6 +187,7 @@ def bump_version(
     bump: str,
     preid: str | None,
     version_strategy: str,
+    remote: str = "origin",
 ) -> str:
     try:
         target_version = resolve_target_version(
@@ -178,6 +196,7 @@ def bump_version(
             bump=bump,
             preid=preid,
             version_strategy=version_strategy,
+            remote=remote,
         )
         validate_semver(target_version)
 
@@ -412,6 +431,7 @@ def main() -> int:
                 bump=args.bump,
                 preid=args.preid,
                 version_strategy=args.version_strategy,
+                remote=args.remote,
             )
         except Exception:
             target = f"{args.bump} (from {old_version}, strategy={args.version_strategy})"
@@ -439,6 +459,7 @@ def main() -> int:
         bump=args.bump,
         preid=args.preid,
         version_strategy=args.version_strategy,
+        remote=args.remote,
     )
 
     expected_tag = f"v{new_version}"
