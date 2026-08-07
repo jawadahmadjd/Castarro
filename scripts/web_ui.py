@@ -3103,15 +3103,10 @@ def replace_stale_youtube_broadcast_for_start(
     config_name: str,
     config: dict[str, Any],
     channel: dict[str, Any],
+    target_stream: dict[str, Any] | None = None,
 ) -> bool:
     channel_name = str(channel.get("name") or "").strip()
-    broadcast_id = str(channel.get("youtube_broadcast_id") or "").strip()
-    last_broadcast_id = str(channel.get("youtube_last_broadcast_id") or "").strip()
-    
-    if not broadcast_id:
-        broadcast_id = last_broadcast_id
-
-    if not channel_name or not broadcast_id:
+    if not channel_name:
         return False
 
     account_id = channel_account_id(config, channel)
@@ -3119,43 +3114,63 @@ def replace_stale_youtube_broadcast_for_start(
     if not account:
         return False
 
-    try:
-        scoped_config = account_config_view(config, account)
-        access_token, _tokens = youtube_service.valid_access_token(ROOT, scoped_config)
-        profile = cached_connected_account_profile(config_name, account, access_token)
-        mismatch_message = youtube_profile_mismatch_message(channel_name or youtube_account_expected_channel_name(config, account), profile)
-        if mismatch_message:
-            raise ValueError(mismatch_message)
-        broadcast = youtube_service.broadcast_by_id(access_token, broadcast_id)
-    except Exception as exc:
-        app_db.record_event(
-            "youtube_prestart_broadcast_check_failed",
-            config_name,
-            channel_name,
-            {"broadcast_id": broadcast_id, "message": str(exc)},
-        )
-        return False
+    stream_broadcast_id = str((target_stream or {}).get("youtube_broadcast_id") or "").strip()
+    broadcast_id = stream_broadcast_id or str(channel.get("youtube_broadcast_id") or "").strip()
+    last_broadcast_id = str(channel.get("youtube_last_broadcast_id") or "").strip()
+    if not broadcast_id:
+        broadcast_id = last_broadcast_id
+
+    broadcast = None
+    if broadcast_id:
+        try:
+            scoped_config = account_config_view(config, account)
+            access_token, _tokens = youtube_service.valid_access_token(ROOT, scoped_config)
+            profile = cached_connected_account_profile(config_name, account, access_token)
+            mismatch_message = youtube_profile_mismatch_message(channel_name or youtube_account_expected_channel_name(config, account), profile)
+            if mismatch_message:
+                raise ValueError(mismatch_message)
+            broadcast = youtube_service.broadcast_by_id(access_token, broadcast_id)
+        except Exception as exc:
+            app_db.record_event(
+                "youtube_prestart_broadcast_check_failed",
+                config_name,
+                channel_name,
+                {"broadcast_id": broadcast_id, "message": str(exc)},
+            )
+            broadcast = None
+    else:
+        try:
+            scoped_config = account_config_view(config, account)
+            access_token, _tokens = youtube_service.valid_access_token(ROOT, scoped_config)
+        except Exception:
+            return False
 
     lifecycle = "missing" if not broadcast else str(broadcast.get("life_cycle_status") or "").strip().lower()
     is_stale = lifecycle in YOUTUBE_STALE_LIFECYCLE_STATUSES
 
     settings = youtube_service.merge_settings(config)
-    auto_stop = bool(channel.get("youtube_auto_stop", settings.get("default_auto_stop", True)))
+    auto_stop = bool(channel.get("youtube_auto_stop", settings.get("default_auto_stop", False)))
     if not is_stale and auto_stop and lifecycle in {"live", "testing", "livestarting", "teststarting"}:
         is_stale = True
 
-    if not is_stale:
+    if not is_stale and broadcast_id:
         return False
+
     # Prioritize searching for an upcoming broadcast currently bound to our stream key on YouTube
     # (This represents the live settings the user configured in the YouTube Studio Live Control Room)
     upcoming_broadcast = None
-    stream_id = str(channel.get("youtube_stream_id") or "").strip()
+    stream_id = str((target_stream or {}).get("youtube_stream_id") or channel.get("youtube_stream_id") or "").strip()
     if stream_id:
         upcoming_broadcast = youtube_service.find_upcoming_broadcast_for_stream(access_token, stream_id)
 
     source_broadcast = upcoming_broadcast if upcoming_broadcast else broadcast
 
-    privacy_status = str((source_broadcast or {}).get("privacy_status") or settings.get("default_privacy_status") or "public").strip().lower()
+    privacy_status = str(
+        (target_stream or {}).get("privacy_status")
+        or (source_broadcast or {}).get("privacy_status")
+        or settings.get("default_privacy_status")
+        or "public"
+    ).strip().lower()
     if privacy_status not in {"private", "unlisted", "public"}:
         privacy_status = "public"
     if privacy_status == "unlisted":
@@ -3170,7 +3185,8 @@ def replace_stale_youtube_broadcast_for_start(
             old_details = None
 
     description = str(
-        (old_details or {}).get("description")
+        (target_stream or {}).get("description")
+        or (old_details or {}).get("description")
         or (source_broadcast or {}).get("description")
         or channel.get("youtube_broadcast_description")
         or channel.get("description")
@@ -3178,12 +3194,26 @@ def replace_stale_youtube_broadcast_for_start(
         or ""
     ).strip()
 
-    auto_start = bool(channel.get("youtube_auto_start", settings.get("default_auto_start", True)))
-    auto_stop = bool(channel.get("youtube_auto_stop", settings.get("default_auto_stop", True)))
-    scheduled_start_time, scheduled_end_time = youtube_start_replacement_times()
-    title = stream_live_title({**channel, "youtube_broadcast_title": str((source_broadcast or {}).get("title") or channel.get("youtube_broadcast_title") or "")})
+    auto_start = bool(channel.get("youtube_auto_start", settings.get("default_auto_start", False)))
+    auto_stop = bool(channel.get("youtube_auto_stop", settings.get("default_auto_stop", False)))
+    
+    start_replacement, end_replacement = youtube_start_replacement_times()
+    scheduled_start_time = str((target_stream or {}).get("scheduled_start_time") or "").strip() or start_replacement
+    scheduled_end_time = end_replacement
 
-    effective_key, _key_source = channel_effective_stream_key(channel)
+    stream_title_source = str(
+        (target_stream or {}).get("title")
+        or (target_stream or {}).get("name")
+        or (source_broadcast or {}).get("title")
+        or channel.get("youtube_broadcast_title")
+        or ""
+    ).strip()
+    title = stream_live_title({**channel, "youtube_broadcast_title": stream_title_source})
+
+    effective_key = str((target_stream or {}).get("stream_key") or (target_stream or {}).get("stream_key_env") or "").strip()
+    if not effective_key:
+        effective_key, _key_source = channel_effective_stream_key(channel)
+
     created = youtube_service.schedule_broadcast(
         access_token,
         title=title,
@@ -3195,21 +3225,30 @@ def replace_stale_youtube_broadcast_for_start(
         auto_stop=auto_stop,
         stream_key=effective_key,
     )
-    # Temporarily disabled YouTube tab stream key assignment so Streams tab remains source of truth
-    # stream_name = str(created.get("stream", {}).get("stream_name") or "").strip()
-    # if stream_name:
-    #     channel["stream_key_env"] = stream_name
+
+    studio_url = str(created.get("broadcast", {}).get("studio_url") or "")
+    new_broadcast_id = str(created.get("broadcast", {}).get("id") or "")
+    new_stream_id = str(created.get("stream", {}).get("id") or "")
+
+    if target_stream and isinstance(target_stream, dict):
+        target_stream["youtube_studio_url"] = studio_url
+        target_stream["youtube_broadcast_id"] = new_broadcast_id
+        target_stream["youtube_stream_id"] = new_stream_id
+        target_stream["title"] = title
+        target_stream["description"] = description
+        target_stream["privacy_status"] = privacy_status
+        target_stream["scheduled_start_time"] = scheduled_start_time
+
     channel["youtube_account_id"] = account_id
     channel["youtube_auto_start"] = auto_start
     channel["youtube_auto_stop"] = auto_stop
     if "youtube_dual_stream" not in channel:
         channel["youtube_dual_stream"] = True
-    channel["youtube_studio_url"] = str(created.get("broadcast", {}).get("studio_url") or "")
-    channel["youtube_broadcast_id"] = str(created.get("broadcast", {}).get("id") or "")
-    channel["youtube_stream_id"] = str(created.get("stream", {}).get("id") or "")
+    channel["youtube_studio_url"] = studio_url
+    channel["youtube_broadcast_id"] = new_broadcast_id
+    channel["youtube_stream_id"] = new_stream_id
     channel["youtube_broadcast_title"] = title
 
-    new_broadcast_id = channel["youtube_broadcast_id"]
     if new_broadcast_id:
         if old_details:
             try:
@@ -3230,15 +3269,34 @@ def replace_stale_youtube_broadcast_for_start(
                     channel_name,
                     {"message": str(exc)},
                 )
-        thumbnail_url = str((source_broadcast or {}).get("thumbnail_url") or (old_details or {}).get("thumbnail_url") or "").strip()
-        thumb_copied = youtube_service.copy_video_thumbnail(
-            access_token,
-            src_video_id=str(source_id or ""),
-            dest_video_id=new_broadcast_id,
-            thumbnail_url=thumbnail_url,
-        )
-        if not thumb_copied:
-            print(f"[{channel_name}] Warning: Thumbnail copy for auto-created broadcast '{new_broadcast_id}' failed.")
+        thumbnail_path_str = str((target_stream or {}).get("thumbnail_path") or "").strip()
+        thumb_uploaded = False
+        if thumbnail_path_str and Path(thumbnail_path_str).is_file():
+            try:
+                img_path = Path(thumbnail_path_str)
+                img_data = img_path.read_bytes()
+                c_type = "image/jpeg" if img_path.suffix.lower() in {".jpg", ".jpeg"} else f"image/{img_path.suffix.lower().lstrip('.')}"
+                youtube_service.upload_thumbnail(
+                    access_token,
+                    video_id=new_broadcast_id,
+                    image_data=img_data,
+                    content_type=c_type,
+                )
+                thumb_uploaded = True
+                print(f"[{channel_name}] Uploaded local thumbnail for stream broadcast '{new_broadcast_id}'")
+            except Exception as thumb_err:
+                print(f"[{channel_name}] Warning: Stream thumbnail upload failed: {thumb_err}")
+
+        if not thumb_uploaded:
+            thumbnail_url = str((source_broadcast or {}).get("thumbnail_url") or (old_details or {}).get("thumbnail_url") or "").strip()
+            thumb_copied = youtube_service.copy_video_thumbnail(
+                access_token,
+                src_video_id=str(source_id or ""),
+                dest_video_id=new_broadcast_id,
+                thumbnail_url=thumbnail_url,
+            )
+            if not thumb_copied:
+                print(f"[{channel_name}] Warning: Thumbnail copy for auto-created broadcast '{new_broadcast_id}' failed.")
 
     save_config(config_name, config)
     clear_youtube_account_caches(config_name, account_id)
@@ -3248,11 +3306,8 @@ def replace_stale_youtube_broadcast_for_start(
         channel_name,
         {
             "old_broadcast_id": broadcast_id,
-            "old_life_cycle_status": lifecycle,
-            "new_broadcast_id": channel["youtube_broadcast_id"],
-            "new_stream_id": channel["youtube_stream_id"],
-            "auto_start": auto_start,
-            "auto_stop": auto_stop,
+            "new_broadcast_id": new_broadcast_id,
+            "studio_url": channel["youtube_studio_url"],
         },
     )
     return True
@@ -3262,10 +3317,21 @@ def ensure_youtube_broadcasts_ready_for_start(
     config_name: str,
     config: dict[str, Any],
     channel_name: str | None,
+    target_stream_id: str | None = None,
 ) -> list[str]:
     replaced: list[str] = []
     for channel in stream_manager.enabled_channels(config, channel_name):
-        if replace_stale_youtube_broadcast_for_start(config_name, config, channel):
+        streams = ensure_channel_streams(channel)
+        channel_replaced = False
+        for s in streams:
+            sid = str(s.get("id") or "")
+            if target_stream_id and sid != target_stream_id:
+                continue
+            if not s.get("enabled", True):
+                continue
+            if replace_stale_youtube_broadcast_for_start(config_name, config, channel, target_stream=s):
+                channel_replaced = True
+        if channel_replaced:
             replaced.append(str(channel.get("name") or ""))
     return replaced
 
@@ -4685,7 +4751,9 @@ def transfer_copy_database(source: Path, target: Path) -> dict[str, Any]:
             target_connection.close()
         if source_connection is not None:
             source_connection.close()
+    app_db.purge_notification_events(target)
     return transfer_file_record(target)
+
 
 
 def copy_transfer_item(source: Path, target: Path, manifest_root: Path) -> list[dict[str, Any]]:
@@ -4907,7 +4975,13 @@ def import_transfer_package(body: dict[str, Any]) -> dict[str, Any]:
         copy_transfer_item(source, ROOT / relative_name, ROOT)
         imported.append(relative_name)
 
+    app_db.purge_notification_events(ROOT / "stream_control.db")
+    with STATE.lock:
+        STATE.alert_cooldowns.clear()
+        STATE.connection_watch.clear()
+
     for config_name in available_configs():
+
         config, _error = load_config_or_none(config_name)
         if config:
             ensure_media_folders(config)
@@ -5876,6 +5950,14 @@ def get_channel_streams_api(config_name: str, channel_name: str, fetch_stats: bo
             "id": sid,
             "channel": channel_name,
             "name": sname,
+            "title": str(s.get("title") or sname),
+            "description": str(s.get("description") or ""),
+            "privacy_status": str(s.get("privacy_status") or "public"),
+            "scheduled_start_time": str(s.get("scheduled_start_time") or ""),
+            "thumbnail_path": str(s.get("thumbnail_path") or ""),
+            "thumbnail_url": str(s.get("thumbnail_url") or ""),
+            "youtube_broadcast_id": str(s.get("youtube_broadcast_id") or channel.get("youtube_broadcast_id") or ""),
+            "youtube_studio_url": str(s.get("youtube_studio_url") or channel.get("youtube_studio_url") or ""),
             "stream_key": skey,
             "stream_key_env": key_env,
             "playlist": playlist,
@@ -5905,11 +5987,19 @@ def add_channel_stream_api(config_name: str, body: dict[str, Any]) -> dict[str, 
     streams = ensure_channel_streams(channel)
     sname = str(body.get("name") or f"Stream {len(streams) + 1}").strip()
     skey = str(body.get("stream_key") or "").strip()
+    stitle = str(body.get("title") or sname).strip()
+    sdesc = str(body.get("description") or "").strip()
+    sprivacy = str(body.get("privacy_status") or "public").strip()
+    sstart = str(body.get("scheduled_start_time") or "").strip()
     sid = f"stream_{int(time.time())}"
     
     new_stream = {
         "id": sid,
         "name": sname,
+        "title": stitle,
+        "description": sdesc,
+        "privacy_status": sprivacy,
+        "scheduled_start_time": sstart,
         "stream_key": skey,
         "stream_key_env": "",
         "enabled": True,
@@ -5934,7 +6024,105 @@ def delete_channel_stream_api(config_name: str, body: dict[str, Any]) -> dict[st
     stop_stream(channel_name, stream_id=stream_id, request_source="delete_stream", request_reason=f"stream {stream_id} deleted")
     channel["streams"] = [s for s in streams if str(s.get("id")) != stream_id]
     save_config(config_name, config)
-    return get_channel_streams_api(config_name, channel_name)
+def schedule_stream_only_api(config_name: str, body: dict[str, Any]) -> dict[str, Any]:
+    config, error = load_config_or_none(config_name)
+    if not config:
+        raise ValueError(error or "Config not found.")
+
+    channel_name = str(body.get("channel") or "").strip()
+    stream_id = str(body.get("stream_id") or "").strip()
+    if not channel_name:
+        raise ValueError("Channel name is required.")
+
+    channel = find_channel_by_name(config, channel_name)
+    if not channel:
+        raise ValueError(f"Channel '{channel_name}' not found.")
+
+    streams = ensure_channel_streams(channel)
+    target_stream = None
+    if stream_id:
+        target_stream = next((s for s in streams if str(s.get("id")) == stream_id), None)
+    if not target_stream and streams:
+        target_stream = streams[0]
+
+    replaced = replace_stale_youtube_broadcast_for_start(config_name, config, channel, target_stream=target_stream)
+    studio_url = str((target_stream or {}).get("youtube_studio_url") or channel.get("youtube_studio_url") or "")
+    broadcast_id = str((target_stream or {}).get("youtube_broadcast_id") or channel.get("youtube_broadcast_id") or "")
+
+    return {
+        "ok": True,
+        "scheduled": True,
+        "replaced": replaced,
+        "channel": channel_name,
+        "stream_id": stream_id,
+        "studio_url": studio_url,
+        "broadcast_id": broadcast_id,
+    }
+
+
+def upload_stream_thumbnail_api(handler: BaseHTTPRequestHandler, query: dict[str, list[str]]) -> dict[str, Any]:
+    config_name = safe_config_name(query.get("config", [None])[0])
+    channel_name = str(query.get("channel", [""])[0]).strip()
+    stream_id = str(query.get("stream_id", [""])[0]).strip()
+    filename = sanitize_filename(query.get("filename", ["thumbnail.jpg"])[0])
+
+    if not channel_name or not stream_id:
+        raise ValueError("Channel and Stream ID are required.")
+    if Path(filename).suffix.lower() not in THUMBNAIL_EXTENSIONS:
+        raise ValueError("Unsupported thumbnail file type.")
+
+    remaining = int(handler.headers.get("Content-Length", "0"))
+    if remaining <= 0:
+        raise ValueError("Thumbnail upload is empty.")
+    if remaining > THUMBNAIL_MAX_BYTES:
+        raise ValueError("Thumbnail must be 2 MB or smaller.")
+
+    image_data = handler.rfile.read(remaining)
+    if len(image_data) != remaining:
+        raise ValueError("Upload ended before the full thumbnail was received.")
+
+    config, error = load_config_or_none(config_name)
+    if not config:
+        raise ValueError(error or "Config not found.")
+    channel = find_channel_by_name(config, channel_name)
+    if not channel:
+        raise ValueError(f"Channel '{channel_name}' not found.")
+
+    streams = ensure_channel_streams(channel)
+    target = next((s for s in streams if str(s.get("id")) == stream_id), None)
+    if not target:
+        raise ValueError(f"Stream '{stream_id}' not found.")
+
+    thumb_dir = ROOT / ".runtime" / "thumbnails" / "stream_thumbnails"
+    thumb_dir.mkdir(parents=True, exist_ok=True)
+    suffix = Path(filename).suffix.lower()
+    dest_path = thumb_dir / f"{sanitize_filename(channel_name)}_{sanitize_filename(stream_id)}{suffix}"
+    dest_path.write_bytes(image_data)
+
+    target["thumbnail_path"] = str(dest_path)
+
+    uploaded_to_youtube = False
+    broadcast_id = str(target.get("youtube_broadcast_id") or channel.get("youtube_broadcast_id") or "").strip()
+    account_id = channel_account_id(config, channel)
+    account = find_youtube_account(config, account_id)
+    if account and broadcast_id:
+        try:
+            scoped_config = account_config_view(config, account)
+            access_token, _tokens = youtube_service.valid_access_token(ROOT, scoped_config)
+            c_type = "image/jpeg" if suffix in {".jpg", ".jpeg"} else f"image/{suffix.lstrip('.')}"
+            youtube_service.upload_thumbnail(access_token, video_id=broadcast_id, image_data=image_data, content_type=c_type)
+            uploaded_to_youtube = True
+        except Exception as exc:
+            print(f"[{channel_name}] Stream thumbnail upload to YouTube failed: {exc}")
+
+    save_config(config_name, config)
+    return {
+        "ok": True,
+        "channel": channel_name,
+        "stream_id": stream_id,
+        "thumbnail_path": str(dest_path),
+        "uploaded_to_youtube": uploaded_to_youtube,
+    }
 
 
 def save_channel_streams_api(config_name: str, body: dict[str, Any]) -> dict[str, Any]:
@@ -7938,6 +8126,21 @@ class Handler(BaseHTTPRequestHandler):
                 started = start_stream(config_name, channel_name, stream_id=stream_id)
                 print(f"[API SERVER] RES POST /api/stream/start -> started={started}")
                 json_response(self, {"ok": True, "started": started})
+                return
+
+            if parsed.path == "/api/stream/schedule":
+                channel_name = body.get("channel") or None
+                stream_id = body.get("stream_id") or None
+                print(f"[API SERVER] REQ POST /api/stream/schedule -> channel='{channel_name}', stream_id='{stream_id}', config='{config_name}'")
+                update_request_trace(self, channel_name=channel_name)
+                assert_youtube_channel_keys_match(config_name, channel_name)
+                result = schedule_stream_only_api(config_name, body)
+                print(f"[API SERVER] RES POST /api/stream/schedule -> result={result}")
+                json_response(self, result)
+                return
+
+            if parsed.path == "/api/channel/streams/thumbnail":
+                json_response(self, upload_stream_thumbnail_api(self, query))
                 return
 
             if parsed.path == "/api/stream/stop":

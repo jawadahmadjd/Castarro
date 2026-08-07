@@ -1200,6 +1200,7 @@ def clear_app_events(
     config_name: str | None = None,
     include_global: bool = True,
     channel_name: str | None = None,
+    event_type: str | None = None,
 ) -> int:
     init_db()
     where: list[str] = []
@@ -1213,7 +1214,28 @@ def clear_app_events(
     if channel_name:
         where.append("channel_name = ?")
         params.append(channel_name)
+    if event_type:
+        where.append("event_type = ?")
+        params.append(event_type)
     where_clause = f" WHERE {' AND '.join(where)}" if where else ""
     with connect() as db:
         cursor = db.execute(f"DELETE FROM app_events{where_clause}", params)
     return int(cursor.rowcount or 0)
+
+
+def purge_notification_events(db_path: Path | str | None = None) -> int:
+    target = Path(db_path) if db_path else DB_PATH
+    if not target.exists():
+        return 0
+    try:
+        connection = sqlite3.connect(str(target), timeout=30)
+        try:
+            cursor = connection.execute("DELETE FROM app_events WHERE event_type = 'alert_raised'")
+            connection.commit()
+            return int(cursor.rowcount or 0)
+        finally:
+            connection.close()
+    except Exception as exc:
+        print(f"[app_db] Failed to purge notification events from {target}: {exc}")
+        return 0
+

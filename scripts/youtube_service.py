@@ -95,8 +95,8 @@ def default_settings(redirect_uri: str | None = None) -> dict[str, Any]:
         "tokens_file": ".runtime/youtube_tokens.json",
         "scopes": list(YOUTUBE_DEFAULT_SCOPES),
         "default_privacy_status": "public",
-        "default_auto_start": True,
-        "default_auto_stop": True,
+        "default_auto_start": False,
+        "default_auto_stop": False,
     }
 
 
@@ -157,8 +157,8 @@ def merge_settings(config: dict[str, Any], redirect_uri: str | None = None) -> d
     oauth_client_type = str(merged.get("oauth_client_type") or "desktop").strip().lower()
     merged["oauth_client_type"] = "web" if oauth_client_type == "web" else "desktop"
     merged["use_pkce"] = bool(merged.get("use_pkce", True))
-    merged["default_auto_start"] = bool(merged.get("default_auto_start", True))
-    merged["default_auto_stop"] = bool(merged.get("default_auto_stop", True))
+    merged["default_auto_start"] = bool(merged.get("default_auto_start", False))
+    merged["default_auto_stop"] = bool(merged.get("default_auto_stop", False))
     return merged
 
 

@@ -1,6 +1,6 @@
 {
   "name": "castarro-desktop",
-  "version": "1.6.1",
+  "version": "1.6.2",
   "description": "Windows desktop package for Castarro, a local multi-channel live streaming dashboard.",
   "main": "desktop/main.js",
   "author": "Jawad Ahmad <jawadahmadjd@users.noreply.github.com>",
@@ -91,14 +91,41 @@
       ]
     },
     "linux": {
-      "icon": "desktop/assets/icon.png",
+      "icon": "build/icons",
       "maintainer": "Jawad Ahmad <jawadahmadjd@users.noreply.github.com>",
       "target": [
-        "deb"
+        "deb",
+        "AppImage"
+      ],
+      "mimeTypes": [
+        "application/x-deb",
+        "application/vnd.debian.binary-package"
       ],
       "category": "AudioVideo",
       "executableArgs": [
-        "--no-sandbox"
+        "--no-sandbox",
+        "--ozone-platform-hint=auto"
+      ],
+      "desktop": {
+        "StartupWMClass": "Castarro",
+        "Terminal": "false",
+        "Type": "Application",
+        "Categories": "AudioVideo;Video;Player;",
+        "MimeType": "application/x-deb;application/vnd.debian.binary-package;x-scheme-handler/castarro;"
+      }
+    },
+    "deb": {
+      "afterInstall": "scripts/after_install.sh",
+      "depends": [
+        "python3",
+        "ffmpeg",
+        "gconf2",
+        "gconf-service",
+        "libnotify4",
+        "libnss3",
+        "libxss1",
+        "libxtst6",
+        "xdg-utils"
       ]
     },
     "nsis": {

@@ -102,6 +102,36 @@ def test_backend_http_server():
         print("  Backend server stopped successfully.")
 
 
+def test_linux_sandbox_configuration():
+    print("[4/4] Testing Linux sandbox & packaging configuration...")
+    pkg_path = ROOT / "package.json"
+    with open(pkg_path, "r", encoding="utf-8") as f:
+        pkg = json.load(f)
+
+    linux_cfg = pkg.get("build", {}).get("linux", {})
+    exec_args = linux_cfg.get("executableArgs", [])
+    assert "--no-sandbox" in exec_args, "package.json build.linux.executableArgs must contain '--no-sandbox'"
+
+    targets = linux_cfg.get("target", [])
+    assert "deb" in targets and "AppImage" in targets, "package.json build.linux.target must include 'deb' and 'AppImage'"
+
+    deb_cfg = pkg.get("build", {}).get("deb", {})
+    assert deb_cfg.get("afterInstall") == "scripts/after_install.sh", "package.json build.deb.afterInstall must be 'scripts/after_install.sh'"
+    assert (ROOT / "scripts" / "after_install.sh").exists(), "scripts/after_install.sh must exist"
+
+    desktop_cfg = linux_cfg.get("desktop", {})
+    assert desktop_cfg.get("StartupWMClass") == "Castarro"
+    assert desktop_cfg.get("Type") == "Application"
+
+    main_js_path = ROOT / "desktop" / "main.js"
+    main_js = main_js_path.read_text(encoding="utf-8")
+    assert 'process.env.ELECTRON_DISABLE_SANDBOX = "1"' in main_js, "desktop/main.js must set ELECTRON_DISABLE_SANDBOX environment variable for Linux"
+    assert "--no-sandbox" in main_js, "desktop/main.js must handle --no-sandbox switch"
+    assert "app.relaunch" in main_js, "desktop/main.js must include auto-relaunch logic for Linux without --no-sandbox"
+
+    print("  Linux sandbox configuration check passed.")
+
+
 def main():
     print("==================================================")
     print("Starting Castarro Linux / Cross-Platform Smoke Test")
@@ -109,8 +139,10 @@ def main():
     test_runtime_paths()
     test_database_initialization()
     test_backend_http_server()
+    test_linux_sandbox_configuration()
     print("\n[SUCCESS] All Linux smoke tests passed cleanly!")
 
 
 if __name__ == "__main__":
     main()
+

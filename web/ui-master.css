@@ -6044,6 +6044,32 @@ select option {
   margin-top: 10px;
 }
 
+.youtube-stream-schedule-group {
+  border: 1px solid var(--ui-line);
+  border-radius: 8px;
+  padding: 12px;
+  margin-top: 10px;
+  background: var(--ui-surface-2);
+}
+
+.youtube-stream-schedule-group .field-label-row {
+  margin-bottom: 8px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.youtube-stream-schedule-group .schedule-form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+}
+
+.youtube-stream-schedule-group .description-label {
+  margin-top: 8px;
+  display: block;
+}
+
 .duration-badge {
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.5px;

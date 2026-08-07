@@ -8,10 +8,24 @@ const path = require("path");
 const { pathToFileURL } = require("url");
 
 if (process.platform === "linux") {
-  app.disableHardwareAcceleration();
-  app.commandLine.appendSwitch("no-sandbox");
-  app.commandLine.appendSwitch("disable-gpu");
-  app.commandLine.appendSwitch("disable-software-rasterizer");
+  process.env.ELECTRON_DISABLE_SANDBOX = "1";
+  if (!process.argv.includes("--no-sandbox")) {
+    app.disableHardwareAcceleration();
+    app.commandLine.appendSwitch("no-sandbox");
+    app.commandLine.appendSwitch("disable-gpu");
+    app.commandLine.appendSwitch("disable-software-rasterizer");
+    app.commandLine.appendSwitch("ozone-platform-hint", "auto");
+    const args = process.argv.slice(1);
+    args.push("--no-sandbox");
+    app.relaunch({ args });
+    app.exit(0);
+  } else {
+    app.disableHardwareAcceleration();
+    app.commandLine.appendSwitch("no-sandbox");
+    app.commandLine.appendSwitch("disable-gpu");
+    app.commandLine.appendSwitch("disable-software-rasterizer");
+    app.commandLine.appendSwitch("ozone-platform-hint", "auto");
+  }
 }
 
 const HEALTHCHECK_TIMEOUT_MS = 30000;
@@ -1531,15 +1545,16 @@ function ensureLinuxDesktopShortcut() {
   if (process.platform !== "linux") return;
   try {
     const appImagePath = process.env.APPIMAGE || process.execPath;
+    const iconName = "castarro-desktop";
     const desktopFileContent = `[Desktop Entry]
 Name=Castarro
 Comment=Local multi-channel live streaming dashboard
 Exec="${appImagePath}" --no-sandbox %U
-Icon=${path.join(appRoot(), "desktop", "assets", "icon.png")}
+Icon=${iconName}
 Terminal=false
 Type=Application
 Categories=AudioVideo;
-StartupWMClass=com.jawadahmad.castarro
+StartupWMClass=Castarro
 `;
 
     const appsDir = path.join(os.homedir(), ".local", "share", "applications");

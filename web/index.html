@@ -533,6 +533,22 @@
             <input id="addStreamNameInput" type="text" placeholder="e.g. Gaming Stream, Music Feed, Stream 2" autocomplete="off" spellcheck="false" onkeydown="handleAddStreamModalKey(event)">
           </label>
           <label>
+            Broadcast Title (Optional)
+            <input id="addStreamTitleInput" type="text" placeholder="Defaults to Stream Name" autocomplete="off" spellcheck="false" onkeydown="handleAddStreamModalKey(event)">
+          </label>
+          <label>
+            Privacy Status
+            <select id="addStreamPrivacyInput">
+              <option value="public">public</option>
+              <option value="unlisted">unlisted</option>
+              <option value="private">private</option>
+            </select>
+          </label>
+          <label>
+            Scheduled Start Time (Optional)
+            <input id="addStreamStartInput" type="datetime-local" onkeydown="handleAddStreamModalKey(event)">
+          </label>
+          <label>
             YouTube Stream Key
             <input id="addStreamKeyInput" type="text" placeholder="Paste YouTube Stream Key" autocomplete="off" spellcheck="false" onkeydown="handleAddStreamModalKey(event)">
           </label>

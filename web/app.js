@@ -626,8 +626,8 @@ const defaultYoutubeSettings = () => ({
   accounts: [],
   default_account_id: "",
   default_privacy_status: "unlisted",
-  default_auto_start: true,
-  default_auto_stop: true,
+  default_auto_start: false,
+  default_auto_stop: false,
 });
 
 const defaultStorageProviderOauth = () => ({
@@ -5689,6 +5689,13 @@ function isoToDatetimeLocal(value) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}T${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
 }
 
+function datetimeLocalToIso(value) {
+  if (!value) return "";
+  const date = new Date(String(value || ""));
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toISOString();
+}
+
 function youtubeBroadcastDurationMinutes(item) {
   const start = new Date(String(item?.scheduled_start_time || ""));
   const end = new Date(String(item?.scheduled_end_time || ""));
@@ -6740,6 +6747,11 @@ function renderYoutubeSettingsPanel(config) {
                 ${["private", "unlisted", "public"].map((privacy) => `<option value="${privacy}" ${privacy === schedulePrivacyValue ? "selected" : ""}>${privacy}</option>`).join("")}
               </select>
             </label>
+            <label>
+              Scheduled Start Time
+              <input id="youtubeScheduleStart" type="datetime-local" value="${escapeAttr(scheduleStartValue)}" onchange="syncYoutubeScheduleDraftFromForm()" ${disabledSchedule}>
+              <span class="setting-note">Required by YouTube API. Stream will start pushing immediately when you click Start Stream.</span>
+            </label>
             <label class="youtube-description">
               Description
               <textarea id="youtubeScheduleDescription" rows="4" placeholder="Optional broadcast description" oninput="syncYoutubeScheduleDraftFromForm()" ${disabledSchedule}>${escapeHtml(scheduleDescriptionValue)}</textarea>
@@ -7243,10 +7255,10 @@ async function scheduleYoutubeBroadcast() {
   const thumbnailFile = $("youtubeScheduleThumbnail")?.files?.[0] || null;
   const config = state.configData || defaultConfigData();
   const youtube = { ...defaultYoutubeSettings(), ...(config.youtube || {}) };
-  const autoStart = youtube.default_auto_start !== false;
-  const autoStop = youtube.default_auto_stop !== false;
   const configChannel = (config.channels || []).find((item) => String(item?.name || "").trim() === channelName);
   const channel = channelWithLatestStatus(configChannel, channelName);
+  const autoStart = Boolean(channel?.youtube_auto_start || youtube.default_auto_start || false);
+  const autoStop = Boolean(channel?.youtube_auto_stop || youtube.default_auto_stop || false);
   let linkedAccountId = normalizeAccountId(channel?.youtube_account_id || "");
   const accounts = mergedYoutubeAccounts(config, state.youtubeStatus);
   const linkedAccount = accounts.find((item) => normalizeAccountId(item?.id || "") === linkedAccountId);
@@ -10256,6 +10268,7 @@ function rememberDeliveredAlertIds(nextIds) {
 }
 
 function deliverDesktopAlerts(payload = state.status) {
+  if (state.transferBusy) return;
   const alerts = payload?.alerts || {};
   const recent = Array.isArray(alerts.recent) ? alerts.recent : [];
   const enabled = alerts.desktop_notifications_enabled !== false;
@@ -10544,6 +10557,8 @@ async function exportTransferPackage() {
       <div>${escapeHtml(payload.fileCount || 0)} files, ${escapeHtml(formatBytes(payload.totalBytes || 0))}</div>
       <div><span class="field-hint">Folder</span> ${escapeHtml(payload.packagePath || "")}</div>
     `);
+    state.deliveredAlertIds = [];
+    state.localNotifications = [];
     toast("Transfer package created.");
   } catch (error) {
     setTransferPackageStatus(`<strong>Package export failed.</strong><div>${escapeHtml(error.message || String(error))}</div>`, "warn");
@@ -10583,6 +10598,11 @@ async function importTransferPackage() {
     state.normalizedFilesByChannel = {};
     state.youtubeStatus = null;
     state.storageStatus = null;
+    state.deliveredAlertIds = [];
+    state.localNotifications = [];
+    state.workspace.readAlertIds = [];
+    writeWorkspaceAlertIds();
+    closeWorkspaceAlertsMenu();
     hydrateYoutubeStatusFromCache(true);
     await refresh();
     await loadConfigText();
@@ -10593,6 +10613,7 @@ async function importTransferPackage() {
       <div><span class="field-hint">Backup</span> ${escapeHtml(payload.backupPath || "")}</div>
     `);
     toast("Transfer package imported.");
+
   } catch (error) {
     setTransferPackageStatus(`<strong>Package import failed.</strong><div>${escapeHtml(error.message || String(error))}</div>`, "warn");
     throw error;
@@ -11110,6 +11131,12 @@ async function refreshChannelStreamStats(channelName) {
 async function renderWorkspaceStreamsTab(channelName, cachedStreamsData = null) {
   const container = $("streamsGrid");
   if (!container) return;
+
+  const activeEl = document.activeElement;
+  if (activeEl && container.contains(activeEl) && (activeEl.tagName === "SELECT" || activeEl.tagName === "INPUT" || activeEl.tagName === "TEXTAREA")) {
+    return;
+  }
+
   if (!channelName) {
     container.innerHTML = `<div class="panel-empty">Please select a channel to manage its streams.</div>`;
     return;
@@ -11193,6 +11220,8 @@ async function renderWorkspaceStreamsTab(channelName, cachedStreamsData = null) 
         ? `<button class="pill danger" id="streamCardBtn_${escapeHtml(s.id)}" type="button" onclick="stopSingleStream('${escapeJs(channelName)}', '${escapeJs(s.id)}')">Stop Stream</button>`
         : `<button class="pill success" id="streamCardBtn_${escapeHtml(s.id)}" type="button" onclick="startSingleStream('${escapeJs(channelName)}', '${escapeJs(s.id)}')">Start Stream</button>`;
 
+      const scheduleBtn = `<button class="pill ghost primary" id="streamScheduleBtn_${escapeHtml(s.id)}" type="button" onclick="scheduleSingleStream('${escapeJs(channelName)}', '${escapeJs(s.id)}')">Schedule Stream</button>`;
+
       return `
         <div class="stream-card ${isRunning ? "active-stream" : ""}" id="streamCard_${escapeHtml(s.id)}">
           <div class="stream-card-header" onclick="toggleStreamCardExpand('${escapeJs(s.id)}')">
@@ -11217,6 +11246,7 @@ async function renderWorkspaceStreamsTab(channelName, cachedStreamsData = null) 
               </div>
             </div>
             <div class="stream-card-actions" onclick="event.stopPropagation()">
+              ${scheduleBtn}
               ${actionBtn}
               <button class="pill ghost icon-only danger" type="button" onclick="deleteStreamFromChannel('${escapeJs(channelName)}', '${escapeJs(s.id)}')" title="Delete Stream">🗑</button>
             </div>
@@ -11240,6 +11270,65 @@ async function renderWorkspaceStreamsTab(channelName, cachedStreamsData = null) 
                   onclick="toggleStreamKeyMask('${escapeJs(s.id)}')"
                 >${masked ? "Show" : "Hide"}</button>
               </div>
+            </div>
+            <div class="field-group youtube-stream-schedule-group">
+              <div class="field-label-row">
+                <label class="field-label">Broadcast & Schedule Settings</label>
+                ${s.youtube_studio_url ? `<a href="${escapeHtml(s.youtube_studio_url)}" target="_blank" class="pill ghost small link-out">Studio Control Room ↗</a>` : ""}
+              </div>
+              <div class="form-grid schedule-form-grid">
+                <label class="field-label-sm">
+                  Broadcast Title
+                  <input
+                    id="streamTitleInput_${escapeHtml(s.id)}"
+                    type="text"
+                    class="field-input"
+                    value="${escapeHtml(s.title || s.name || "")}"
+                    onchange="updateStreamDetailInline('${escapeJs(channelName)}', '${escapeJs(s.id)}', 'title', this.value)"
+                    placeholder="Broadcast Title (e.g. Live Event #1)"
+                  />
+                </label>
+                <label class="field-label-sm">
+                  Privacy Status
+                  <select
+                    id="streamPrivacySelect_${escapeHtml(s.id)}"
+                    class="field-input"
+                    onchange="updateStreamDetailInline('${escapeJs(channelName)}', '${escapeJs(s.id)}', 'privacy_status', this.value)"
+                  >
+                    ${["public", "unlisted", "private"].map((p) => `<option value="${p}" ${(s.privacy_status || "public").toLowerCase() === p ? "selected" : ""}>${p}</option>`).join("")}
+                  </select>
+                </label>
+                <label class="field-label-sm">
+                  Scheduled Start Time
+                  <input
+                    id="streamStartInput_${escapeHtml(s.id)}"
+                    type="datetime-local"
+                    class="field-input"
+                    value="${escapeHtml(isoToDatetimeLocal(s.scheduled_start_time || "") || "")}"
+                    onchange="updateStreamDetailInline('${escapeJs(channelName)}', '${escapeJs(s.id)}', 'scheduled_start_time', this.value)"
+                  />
+                </label>
+                <label class="field-label-sm">
+                  Thumbnail Image (Optional)
+                  <input
+                    id="streamThumbnailInput_${escapeHtml(s.id)}"
+                    type="file"
+                    accept="image/jpeg,image/png,image/gif,image/bmp"
+                    class="field-input"
+                    onchange="uploadStreamThumbnailInline('${escapeJs(channelName)}', '${escapeJs(s.id)}', this.files[0])"
+                  />
+                </label>
+              </div>
+              <label class="field-label-sm description-label">
+                Description
+                <textarea
+                  id="streamDescInput_${escapeHtml(s.id)}"
+                  class="field-input"
+                  rows="2"
+                  onchange="updateStreamDetailInline('${escapeJs(channelName)}', '${escapeJs(s.id)}', 'description', this.value)"
+                  placeholder="Optional broadcast description..."
+                >${escapeHtml(s.description || "")}</textarea>
+              </label>
             </div>
             <div class="field-group stream-video-field-group">
               <div class="field-label-row">
@@ -11287,6 +11376,96 @@ async function updateStreamPlaylistInline(channelName, streamId, rawText) {
     toast("Failed to update stream playlist: " + err.message, "danger");
   }
 }
+
+async function updateStreamDetailInline(channelName, streamId, field, rawValue) {
+  try {
+    const cfg = state.config || "config.ready.json";
+    const data = await fetchApi(`/api/channel/streams?config=${encodeURIComponent(cfg)}&channel=${encodeURIComponent(channelName)}`);
+    if (!data || !data.ok) return;
+    const streams = Array.isArray(data.streams) ? data.streams : [];
+    const target = streams.find((s) => String(s.id) === String(streamId));
+    if (target) {
+      if (field === "scheduled_start_time") {
+        target[field] = datetimeLocalToIso(rawValue);
+      } else {
+        target[field] = String(rawValue || "").trim();
+      }
+      await fetchApi("/api/channel/streams/save", {
+        method: "POST",
+        body: JSON.stringify({
+          config: state.config,
+          channel: channelName,
+          streams: streams,
+        }),
+      });
+      toast(`Stream ${field.replace("_", " ")} updated.`, "success");
+    }
+  } catch (err) {
+    toast(`Failed to update stream detail: ${err.message}`, "danger");
+  }
+}
+window.updateStreamDetailInline = updateStreamDetailInline;
+
+async function uploadStreamThumbnailInline(channelName, streamId, file) {
+  if (!file) return;
+  if (file.size > 2 * 1024 * 1024) {
+    toast("Thumbnail image must be 2 MB or smaller.", "warn");
+    return;
+  }
+  try {
+    const cfg = state.config || "config.ready.json";
+    const url = `/api/channel/streams/thumbnail?config=${encodeURIComponent(cfg)}&channel=${encodeURIComponent(channelName)}&stream_id=${encodeURIComponent(streamId)}&filename=${encodeURIComponent(file.name)}`;
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": file.type || "application/octet-stream" },
+      body: file,
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) {
+      throw new Error(data?.error || `HTTP ${res.status}`);
+    }
+    toast("Stream thumbnail attached successfully!", "success");
+    if (data.uploaded_to_youtube) {
+      toast("Thumbnail also uploaded to YouTube Studio!", "info");
+    }
+  } catch (err) {
+    toast(`Thumbnail upload failed: ${err.message}`, "danger");
+  }
+}
+window.uploadStreamThumbnailInline = uploadStreamThumbnailInline;
+
+async function scheduleSingleStream(channelName, streamId) {
+  const btn = $(`streamScheduleBtn_${streamId}`);
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = "Scheduling...";
+  }
+  try {
+    const response = await fetchApi("/api/stream/schedule", {
+      method: "POST",
+      body: JSON.stringify({
+        config: state.config,
+        channel: channelName,
+        stream_id: streamId,
+      }),
+    });
+    if (response?.error) {
+      toast("Schedule failed: " + response.error, "danger");
+    } else {
+      toast("Stream scheduled successfully in YouTube Studio!", "success");
+      await refresh();
+      if (channelName) renderWorkspaceStreamsTab(channelName);
+    }
+  } catch (err) {
+    toast("Error scheduling stream: " + err.message, "danger");
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = "Schedule Stream";
+    }
+  }
+}
+window.scheduleSingleStream = scheduleSingleStream;
 
 let activePickerStreamTarget = { channelName: "", streamId: "" };
 
@@ -11685,10 +11864,16 @@ async function submitAddStreamModal() {
   }
 
   const nameInput = $("addStreamNameInput");
+  const titleInput = $("addStreamTitleInput");
+  const privacyInput = $("addStreamPrivacyInput");
+  const startInput = $("addStreamStartInput");
   const keyInput = $("addStreamKeyInput");
   const confirmBtn = $("confirmAddStreamBtn");
 
   const streamName = (nameInput?.value || "").trim();
+  const streamTitle = (titleInput?.value || streamName).trim();
+  const privacyStatus = (privacyInput?.value || "public").trim();
+  const startIso = datetimeLocalToIso(startInput?.value || "");
   const streamKey = (keyInput?.value || "").trim();
 
   if (!streamName) {
@@ -11709,6 +11894,9 @@ async function submitAddStreamModal() {
         config: state.config,
         channel: targetChannel,
         name: streamName,
+        title: streamTitle,
+        privacy_status: privacyStatus,
+        scheduled_start_time: startIso,
         stream_key: streamKey
       })
     });
