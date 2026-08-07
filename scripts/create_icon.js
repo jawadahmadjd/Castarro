@@ -119,13 +119,19 @@ console.log(outFile);
 console.log(outPngFile);
 
 // Generate Linux icon directory for electron-builder.
-// electron-builder reads build/icons/<size>x<size>/icon.png and installs
-// them to /usr/share/icons/hicolor/<size>x<size>/apps/ in the .deb package.
+// electron-builder's app-builder icon collector checks both direct <size>x<size>.png files
+// in build/icons and subdirectories <size>x<size>/icon.png.
 const linuxIconDir = path.join(root, "build", "icons");
+fs.mkdirSync(linuxIconDir, { recursive: true });
 const linuxSizes = [16, 32, 48, 64, 128, 256, 512];
 for (const size of linuxSizes) {
+  const pngData = makePng(size);
   const sizeDir = path.join(linuxIconDir, `${size}x${size}`);
   fs.mkdirSync(sizeDir, { recursive: true });
-  fs.writeFileSync(path.join(sizeDir, "icon.png"), makePng(size));
+  fs.writeFileSync(path.join(sizeDir, "icon.png"), pngData);
+  fs.writeFileSync(path.join(sizeDir, "castarro.png"), pngData);
+  fs.writeFileSync(path.join(linuxIconDir, `${size}x${size}.png`), pngData);
 }
+fs.writeFileSync(path.join(linuxIconDir, "icon.png"), makePng(512));
 console.log(linuxIconDir);
+

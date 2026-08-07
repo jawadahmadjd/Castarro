@@ -241,14 +241,15 @@ jobs:
           mkdir -p desktop/resources/python desktop/resources/ffmpeg desktop/resources/seed-data
           touch desktop/resources/python/.keep desktop/resources/ffmpeg/.keep desktop/resources/seed-data/.keep
 
-      - name: Build Linux deb
-        run: npx electron-builder --linux deb --publish never
+      - name: Build Linux deb and AppImage
+        run: npx electron-builder --linux deb AppImage --publish never
 
       - name: Stage Linux release assets
         shell: bash
         run: |
           mkdir -p linux-artifacts
-          cp dist/Castarro-*.deb linux-artifacts/ 2>/dev/null || cp dist/*.deb linux-artifacts/
+          cp dist/Castarro-*.deb linux-artifacts/ 2>/dev/null || cp dist/*.deb linux-artifacts/ 2>/dev/null || true
+          cp dist/Castarro-*.AppImage linux-artifacts/ 2>/dev/null || cp dist/*.AppImage linux-artifacts/ 2>/dev/null || true
           if [ -f dist/latest-linux.yml ]; then
             cp dist/latest-linux.yml linux-artifacts/
           fi
@@ -260,6 +261,7 @@ jobs:
           path: linux-artifacts/*
           if-no-files-found: error
           retention-days: 1
+
 
   release:
     name: Build and publish release
@@ -491,4 +493,6 @@ jobs:
             dist/Castarro-Setup-${{ steps.version.outputs.version }}.exe.blockmap
             dist/latest.yml
             dist/Castarro-*.deb
+            dist/Castarro-*.AppImage
             dist/latest-linux.yml
+
