@@ -1296,6 +1296,16 @@ async function installDownloadedUpdateAutomatically(version = null) {
   await requestQuit("auto-update", "restart-to-update", { installUpdate: true });
 }
 
+function isPkexecAvailable() {
+  if (process.platform !== "linux") return true;
+  if (process.env.APPIMAGE) return true;
+  return (
+    fs.existsSync("/usr/bin/pkexec") ||
+    fs.existsSync("/bin/pkexec") ||
+    fs.existsSync("/usr/sbin/pkexec")
+  );
+}
+
 function configureAutoUpdates() {
   if (!app.isPackaged || process.env.STREAM_DISABLE_AUTO_UPDATE === "1" || process.env.STREAM_HEADLESS_SMOKE === "1") {
     diagnosticLog("auto updates skipped");
@@ -1374,14 +1384,38 @@ function configureAutoUpdates() {
   });
   autoUpdater.on("error", (error) => {
     diagnosticLog("auto update failed", error);
+    const rawMsg = error?.message || String(error || "Update error");
+    let userMsg = rawMsg;
+    if (rawMsg.includes("pkexec") || rawMsg.includes("code 127")) {
+      userMsg = "Linux system package 'policykit-1' (pkexec) is missing. Install policykit-1 (`sudo apt install policykit-1`) or update Castarro manually.";
+    }
     setUpdateState({
       status: "error",
-      message: error?.message || String(error || "Update error")
+      message: userMsg
     });
   });
 
   const check = () => {
-    autoUpdater.checkForUpdates().catch((error) => diagnosticLog("update check failed", error));
+    if (process.platform === "linux" && !process.env.APPIMAGE && !isPkexecAvailable()) {
+      diagnosticLog("pkexec missing on linux deb installation; skipping automated background update check");
+      setUpdateState({
+        status: "warning",
+        message: "Linux system package 'policykit-1' (pkexec) is missing. Install policykit-1 (`sudo apt install policykit-1`) to enable automated updates."
+      });
+      return;
+    }
+    autoUpdater.checkForUpdates().catch((error) => {
+      diagnosticLog("update check failed", error);
+      const rawMsg = error?.message || String(error || "Update check failed");
+      let userMsg = rawMsg;
+      if (rawMsg.includes("pkexec") || rawMsg.includes("code 127")) {
+        userMsg = "Linux system package 'policykit-1' (pkexec) is missing. Install policykit-1 (`sudo apt install policykit-1`) to enable automated updates.";
+      }
+      setUpdateState({
+        status: "error",
+        message: userMsg
+      });
+    });
   };
   setTimeout(check, 15000);
   updateCheckTimer = setInterval(check, UPDATE_CHECK_INTERVAL_MS);
