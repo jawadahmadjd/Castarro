@@ -201,7 +201,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y python3 ffmpeg pkexec libgbm1 libgtk-3-0 libasound2 libnss3 libxss1 libxtst6
+          sudo apt-get install -y python3 ffmpeg pkexec libgbm1 libgtk-3-0 libasound2t64 libnss3 libxss1 libxtst6 || sudo apt-get install -y python3 ffmpeg pkexec libgbm1 libgtk-3-0 libasound2 libnss3 libxss1 libxtst6
 
       - name: Install node dependencies
         run: npm ci
