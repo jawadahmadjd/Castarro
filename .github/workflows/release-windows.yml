@@ -201,7 +201,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y python3 ffmpeg
+          sudo apt-get install -y python3 ffmpeg pkexec libgbm1 libgtk-3-0 libasound2 libnss3 libxss1 libxtst6
 
       - name: Install node dependencies
         run: npm ci
@@ -243,6 +243,21 @@ jobs:
 
       - name: Build Linux deb and AppImage
         run: npx electron-builder --linux deb AppImage --publish never
+
+      - name: Verify deb has no deprecated dependencies
+        shell: bash
+        run: |
+          DEB_FILE=$(find dist -name '*.deb' | head -1)
+          if [ -n "$DEB_FILE" ]; then
+            echo "Checking $DEB_FILE for deprecated dependencies..."
+            DEPS=$(dpkg-deb -f "$DEB_FILE" Depends)
+            echo "Dependencies: $DEPS"
+            if echo "$DEPS" | grep -q "policykit-1"; then
+              echo "::error::REGRESSION: .deb depends on deprecated 'policykit-1' package"
+              exit 1
+            fi
+            echo "✓ No deprecated dependencies found"
+          fi
 
       - name: Stage Linux release assets
         shell: bash

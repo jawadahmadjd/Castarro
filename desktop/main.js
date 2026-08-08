@@ -828,9 +828,26 @@ async function requestQuit(source = "unknown", mode = "ui-only", options = {}) {
       try {
         autoUpdater.autoInstallOnAppQuit = true;
         autoUpdater.autoRunAppAfterInstall = true;
+        // On Linux .deb, quitAndInstall runs `pkexec dpkg -i` but does NOT relaunch
+        // the app afterwards (autoRunAppAfterInstall is Windows-only). We must
+        // schedule an explicit relaunch so the updated app starts after dpkg finishes.
+        if (process.platform === "linux" && !process.env.APPIMAGE) {
+          diagnosticLog("linux deb update: scheduling explicit relaunch");
+          app.relaunch();
+        }
         autoUpdater.quitAndInstall(true, true);
+        // Safety net: if quitAndInstall didn't actually exit the process
+        // (known Linux issue where dpkg runs async and the app hangs),
+        // force exit after a generous timeout for dpkg to complete.
+        if (process.platform === "linux") {
+          setTimeout(() => {
+            diagnosticLog("quitAndInstall did not exit app; forcing exit for Linux update");
+            app.exit(0);
+          }, 15000);
+        }
       } catch (error) {
         diagnosticLog("quitAndInstall failed; falling back to app quit", error);
+        if (process.platform === "linux") app.relaunch();
         app.quit();
       }
     } else {
@@ -1299,11 +1316,60 @@ async function installDownloadedUpdateAutomatically(version = null) {
 function isPkexecAvailable() {
   if (process.platform !== "linux") return true;
   if (process.env.APPIMAGE) return true;
-  return (
+  // Check well-known paths first, then fall back to PATH lookup
+  if (
     fs.existsSync("/usr/bin/pkexec") ||
     fs.existsSync("/bin/pkexec") ||
     fs.existsSync("/usr/sbin/pkexec")
-  );
+  ) return true;
+  // Check PATH via synchronous spawn (works even if pkexec moved to an unusual location)
+  try {
+    const result = require("child_process").spawnSync("which", ["pkexec"], { timeout: 3000 });
+    if (result.status === 0) return true;
+  } catch (_) { /* ignore */ }
+  // polkitd being present means the polkit stack is installed; pkexec may still work
+  // via a polkit authentication agent even if the binary path check failed
+  if (
+    fs.existsSync("/usr/libexec/polkitd") ||
+    fs.existsSync("/usr/lib/polkit-1/polkitd")
+  ) return true;
+  return false;
+}
+
+function tryAutoRepairPkexec() {
+  if (process.platform !== "linux" || process.env.APPIMAGE) return Promise.resolve(false);
+  if (isPkexecAvailable()) return Promise.resolve(true);
+  diagnosticLog("pkexec missing; attempting automatic repair");
+  return new Promise((resolve) => {
+    // The after_install.sh script should have handled this, but if it didn't
+    // (e.g. manual dpkg -i without running scripts), attempt a fix now.
+    // We try multiple package names to cover all Ubuntu/Debian versions.
+    const packages = ["pkexec", "policykit-1", "polkitd"];
+    let idx = 0;
+    const tryNext = () => {
+      if (idx >= packages.length) {
+        diagnosticLog("pkexec auto-repair: all attempts exhausted");
+        resolve(false);
+        return;
+      }
+      const pkg = packages[idx++];
+      diagnosticLog(`pkexec auto-repair: trying apt-get install ${pkg}`);
+      const proc = spawn("sudo", ["apt-get", "install", "-y", "--no-install-recommends", pkg], {
+        stdio: "ignore",
+        timeout: 30000,
+      });
+      proc.on("error", () => tryNext());
+      proc.on("close", (code) => {
+        if (code === 0 && isPkexecAvailable()) {
+          diagnosticLog(`pkexec auto-repair: installed ${pkg} successfully`);
+          resolve(true);
+        } else {
+          tryNext();
+        }
+      });
+    };
+    tryNext();
+  });
 }
 
 function configureAutoUpdates() {
@@ -1387,7 +1453,19 @@ function configureAutoUpdates() {
     const rawMsg = error?.message || String(error || "Update error");
     let userMsg = rawMsg;
     if (rawMsg.includes("pkexec") || rawMsg.includes("code 127")) {
-      userMsg = "Linux system package 'policykit-1' (pkexec) is missing. Install policykit-1 (`sudo apt install policykit-1`) or update Castarro manually.";
+      // Attempt background repair instead of burdening the user
+      tryAutoRepairPkexec().then((repaired) => {
+        if (repaired) {
+          diagnosticLog("pkexec repaired after update error; retrying update check");
+          autoUpdater.checkForUpdates().catch((e) => diagnosticLog("retry after repair failed", e));
+        } else {
+          setUpdateState({
+            status: "warning",
+            message: "Automatic updates need a system component (pkexec). Run: sudo apt install pkexec"
+          });
+        }
+      });
+      return;
     }
     setUpdateState({
       status: "error",
@@ -1395,21 +1473,21 @@ function configureAutoUpdates() {
     });
   });
 
-  const check = () => {
+  const check = async () => {
     if (process.platform === "linux" && !process.env.APPIMAGE && !isPkexecAvailable()) {
-      diagnosticLog("pkexec missing on linux deb installation; skipping automated background update check");
-      setUpdateState({
-        status: "warning",
-        message: "Linux system package 'policykit-1' (pkexec) is missing. Install policykit-1 (`sudo apt install policykit-1`) to enable automated updates."
-      });
-      return;
+      diagnosticLog("pkexec missing on linux deb installation; attempting auto-repair before update check");
+      const repaired = await tryAutoRepairPkexec();
+      if (!repaired) {
+        diagnosticLog("pkexec auto-repair failed; proceeding with update check anyway");
+        // Still try the update — electron-updater may succeed if a polkit agent is active
+      }
     }
     autoUpdater.checkForUpdates().catch((error) => {
       diagnosticLog("update check failed", error);
       const rawMsg = error?.message || String(error || "Update check failed");
       let userMsg = rawMsg;
       if (rawMsg.includes("pkexec") || rawMsg.includes("code 127")) {
-        userMsg = "Linux system package 'policykit-1' (pkexec) is missing. Install policykit-1 (`sudo apt install policykit-1`) to enable automated updates.";
+        userMsg = "Automatic updates need a system component (pkexec). Run: sudo apt install pkexec";
       }
       setUpdateState({
         status: "error",
@@ -1632,6 +1710,14 @@ app.on("activate", () => {
     createMainWindow();
     loadApplicationUi().catch((error) => showError(error));
   }
+});
+
+// Electron emits this event specifically when quitAndInstall() triggers the quit.
+// We must set isQuitting=true here so the normal before-quit handler doesn't
+// call event.preventDefault() and block the update installation.
+app.on("before-quit-for-update", () => {
+  diagnosticLog("before-quit-for-update received; allowing update quit");
+  isQuitting = true;
 });
 
 app.on("before-quit", (event) => {

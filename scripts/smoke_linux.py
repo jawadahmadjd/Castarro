@@ -129,7 +129,51 @@ def test_linux_sandbox_configuration():
     assert "--no-sandbox" in main_js, "desktop/main.js must handle --no-sandbox switch"
     assert "app.relaunch" in main_js, "desktop/main.js must include auto-relaunch logic for Linux without --no-sandbox"
 
+    # ---- Dependency regression checks ----
+    deb_depends = deb_cfg.get("depends", [])
+    deb_depends_str = " ".join(deb_depends)
+
+    # policykit-1 must NOT be in deb.depends (deprecated, breaks on newer Ubuntu)
+    assert "policykit-1" not in deb_depends, \
+        "REGRESSION: package.json build.deb.depends must NOT list 'policykit-1' (use 'pkexec' instead)"
+
+    # pkexec must be present (the correct replacement)
+    assert "pkexec" in deb_depends, \
+        "package.json build.deb.depends must list 'pkexec'"
+
+    # Critical runtime dependencies that Electron/Chromium requires
+    required_deps = ["python3", "ffmpeg", "pkexec", "libnotify4", "libnss3", "libxss1", "libxtst6", "xdg-utils", "libgbm1"]
+    for dep in required_deps:
+        assert dep in deb_depends, f"package.json build.deb.depends must list '{dep}'"
+
+    # GTK3 and ALSA with t64 alternatives for Ubuntu 24.04+ compatibility
+    assert any("libgtk-3-0" in d for d in deb_depends), \
+        "package.json build.deb.depends must list 'libgtk-3-0' (with t64 alternative)"
+    assert any("libasound2" in d for d in deb_depends), \
+        "package.json build.deb.depends must list 'libasound2' (with t64 alternative)"
+
+    # main.js must NOT reference policykit-1 in user-facing error messages
+    # (Internal code like fallback package lists in tryAutoRepairPkexec is fine)
+    import re
+    user_facing_policykit_refs = re.findall(
+        r'(?:message|userMsg)\s*[:=].*policykit-1', main_js
+    )
+    assert not user_facing_policykit_refs, \
+        f"REGRESSION: desktop/main.js must not reference deprecated 'policykit-1' in user-facing messages. Found: {user_facing_policykit_refs}"
+
+    # main.js must have auto-repair logic
+    assert "tryAutoRepairPkexec" in main_js, \
+        "desktop/main.js must include tryAutoRepairPkexec() auto-repair function"
+
+    # after_install.sh must have dependency verification logic
+    after_install = (ROOT / "scripts" / "after_install.sh").read_text(encoding="utf-8")
+    assert "ensure_package" in after_install, \
+        "scripts/after_install.sh must include ensure_package() dependency verification function"
+    assert "pkexec" in after_install, \
+        "scripts/after_install.sh must verify/install pkexec"
+
     print("  Linux sandbox configuration check passed.")
+    print("  Dependency regression checks passed.")
 
 
 def main():

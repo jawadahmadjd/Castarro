@@ -1,6 +1,6 @@
 {
   "name": "castarro-desktop",
-  "version": "1.6.6",
+  "version": "1.6.7",
   "description": "Windows desktop package for Castarro, a local multi-channel live streaming dashboard.",
   "main": "desktop/main.js",
   "author": "Jawad Ahmad <jawadahmadjd@users.noreply.github.com>",
@@ -119,12 +119,15 @@
       "depends": [
         "python3",
         "ffmpeg",
-        "policykit-1",
+        "pkexec",
         "libnotify4",
         "libnss3",
         "libxss1",
         "libxtst6",
-        "xdg-utils"
+        "xdg-utils",
+        "libgbm1",
+        "libgtk-3-0 | libgtk-3-0t64",
+        "libasound2 | libasound2t64"
       ]
     },
     "nsis": {

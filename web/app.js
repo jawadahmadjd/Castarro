@@ -2002,6 +2002,10 @@ function renderUpdateBanner() {
     show = true;
     hasError = true;
     message = `Update check failed${update.message ? `: ${update.message}` : "."}`;
+  } else if (status === "warning") {
+    show = true;
+    hasError = true;
+    message = update.message || "Update system encountered an issue.";
   }
 
   if (!show) {
