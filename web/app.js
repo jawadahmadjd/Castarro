@@ -342,6 +342,26 @@ const routeToSettingsTab = {
   transfer: "transfer",
 };
 
+function normalizePath(value) {
+  if (!value) return "";
+  let str = String(value).trim().replace(/\\/g, "/");
+  if (/^[a-zA-Z]:\//.test(str)) {
+    str = str.charAt(0).toUpperCase() + str.slice(1);
+  }
+  return str;
+}
+
+function syncStreamToStateConfig(channelName, streamId, updaterFn) {
+  if (!state.configData || !Array.isArray(state.configData.channels)) return;
+  const channel = state.configData.channels.find((c) => c.name === channelName);
+  if (!channel) return;
+  if (!Array.isArray(channel.streams)) channel.streams = [];
+  let target = channel.streams.find((s) => String(s.id) === String(streamId));
+  if (target) {
+    updaterFn(target);
+  }
+}
+
 function formatBytes(value) {
   const bytes = Math.max(0, Number(value) || 0);
   const units = ["B", "KB", "MB", "GB", "TB"];
@@ -671,8 +691,11 @@ const defaultAlertSettings = () => ({
   mobile_notifications_enabled: true,
   cooldown_seconds: 300,
   rules: {
+    stream_started: true,
     stream_stopped: true,
-    poor_connection: true,
+    title_description_updated: true,
+    thumbnail_updated: true,
+    playlist_updated: true,
     scheduler_started: true,
     scheduler_stopped: true,
   },
@@ -3327,11 +3350,19 @@ function runRouteSideEffects(routeName) {
   }
 }
 
-function setWorkspaceRoute(routeName) {
+async function setWorkspaceRoute(routeName) {
   const route = normalizeWorkspaceRoute(routeName);
+  document.activeElement?.blur?.();
+  try {
+    await flushSettingsAutosave();
+    if (state.activeStreamSavePromise) {
+      await state.activeStreamSavePromise;
+    }
+  } catch (e) {
+    // Ignore non-critical flush errors during navigation
+  }
   state.workspace.activeRoute = route;
   state.settingsRenderPausedUntil = 0;
-  document.activeElement?.blur?.();
   syncActiveSettingsChannelFromWorkspace(false);
   syncYoutubeSelectedAccountFromChannel(state.configData || defaultConfigData());
   renderChannelWorkspace(state.status || {});
@@ -8196,25 +8227,28 @@ function orderedLiveFilesForDisplay(channel, files) {
   const byPath = new Map();
   files.forEach((file) => {
     const path = String(file?.path || "");
-    if (path && !byPath.has(path)) byPath.set(path, file);
+    const norm = normalizePath(path);
+    if (norm && !byPath.has(norm)) byPath.set(norm, file);
   });
 
   const ordered = [];
   const seen = new Set();
-  playlist.forEach((path) => {
-    if (seen.has(path)) return;
-    seen.add(path);
-    ordered.push(byPath.get(path) || {
-      name: path.split(/[\\/]/).pop() || path,
-      path,
-      folder: path.split(/[\\/]/).slice(0, -1).join("/") || "",
+  playlist.forEach((rawPath) => {
+    const norm = normalizePath(rawPath);
+    if (!norm || seen.has(norm)) return;
+    seen.add(norm);
+    ordered.push(byPath.get(norm) || {
+      name: rawPath.split(/[\\/]/).pop() || rawPath,
+      path: rawPath,
+      folder: rawPath.split(/[\\/]/).slice(0, -1).join("/") || "",
       exists: false,
     });
   });
   files.forEach((file) => {
     const path = String(file?.path || "");
-    if (!path || seen.has(path)) return;
-    seen.add(path);
+    const norm = normalizePath(path);
+    if (!norm || seen.has(norm)) return;
+    seen.add(norm);
     ordered.push(file);
   });
   return ordered;
@@ -9445,6 +9479,7 @@ function settingsAutosaveTargetChanged(target) {
   if (!(target instanceof HTMLInputElement || target instanceof HTMLSelectElement || target instanceof HTMLTextAreaElement)) return false;
   if (!target.closest("#viewSettings")) return false;
   if (target.type === "file") return false;
+  if (target.closest("#streamsGrid")) return true;
   return Boolean(target.matches([
     "[data-default-field]",
     "[data-profile-field]",
@@ -10369,20 +10404,32 @@ function renderAutomationSettingsPanel(config = state.configData || defaultConfi
             <span class="helper">Paired phones can surface new desktop alerts while remote monitoring is active.</span>
           </div>
           <div class="automation-toggle">
-            <label><input type="checkbox" ${alerts.rules.stream_stopped ? "checked" : ""} onchange="updateAlertToggle('rules.stream_stopped', this.checked)"> Unexpected stream stop</label>
-            <span class="helper">Warn when FFmpeg exits unexpectedly.</span>
+            <label><input type="checkbox" ${alerts.rules.stream_started !== false ? "checked" : ""} onchange="updateAlertToggle('rules.stream_started', this.checked)"> Stream start</label>
+            <span class="helper">Notify when a live stream is launched.</span>
           </div>
           <div class="automation-toggle">
-            <label><input type="checkbox" ${alerts.rules.poor_connection ? "checked" : ""} onchange="updateAlertToggle('rules.poor_connection', this.checked)"> Poor connection</label>
-            <span class="helper">Warn when live delivery falls behind or drops frames.</span>
+            <label><input type="checkbox" ${alerts.rules.stream_stopped !== false ? "checked" : ""} onchange="updateAlertToggle('rules.stream_stopped', this.checked)"> Stream stop</label>
+            <span class="helper">Notify when a live stream is stopped or exits.</span>
           </div>
           <div class="automation-toggle">
-            <label><input type="checkbox" ${alerts.rules.scheduler_started ? "checked" : ""} onchange="updateAlertToggle('rules.scheduler_started', this.checked)"> Scheduler started stream</label>
-            <span class="helper">Confirm when a daily schedule starts a channel.</span>
+            <label><input type="checkbox" ${alerts.rules.title_description_updated !== false ? "checked" : ""} onchange="updateAlertToggle('rules.title_description_updated', this.checked)"> Title & description changes</label>
+            <span class="helper">Notify when broadcast title or description is updated.</span>
           </div>
           <div class="automation-toggle">
-            <label><input type="checkbox" ${alerts.rules.scheduler_stopped ? "checked" : ""} onchange="updateAlertToggle('rules.scheduler_stopped', this.checked)"> Scheduler stopped stream</label>
-            <span class="helper">Confirm when a daily schedule ends a channel.</span>
+            <label><input type="checkbox" ${alerts.rules.thumbnail_updated !== false ? "checked" : ""} onchange="updateAlertToggle('rules.thumbnail_updated', this.checked)"> Thumbnail changes</label>
+            <span class="helper">Notify when stream thumbnail is changed or attached.</span>
+          </div>
+          <div class="automation-toggle">
+            <label><input type="checkbox" ${alerts.rules.playlist_updated !== false ? "checked" : ""} onchange="updateAlertToggle('rules.playlist_updated', this.checked)"> Video list / playlist updates</label>
+            <span class="helper">Notify when videos are imported, uploaded, or updated.</span>
+          </div>
+          <div class="automation-toggle">
+            <label><input type="checkbox" ${alerts.rules.scheduler_started !== false ? "checked" : ""} onchange="updateAlertToggle('rules.scheduler_started', this.checked)"> Scheduler start</label>
+            <span class="helper">Notify when a scheduled program starts a channel.</span>
+          </div>
+          <div class="automation-toggle">
+            <label><input type="checkbox" ${alerts.rules.scheduler_stopped !== false ? "checked" : ""} onchange="updateAlertToggle('rules.scheduler_stopped', this.checked)"> Scheduler stop</label>
+            <span class="helper">Notify when a scheduled program ends a channel.</span>
           </div>
         </div>
       </section>
@@ -11260,6 +11307,7 @@ async function renderWorkspaceStreamsTab(channelName, cachedStreamsData = null) 
                   type="${masked ? "password" : "text"}"
                   class="field-input stream-key-field"
                   value="${escapeHtml(keyVal)}"
+                  oninput="updateStreamKeyInline('${escapeJs(channelName)}', '${escapeJs(s.id)}', this.value)"
                   onchange="updateStreamKeyInline('${escapeJs(channelName)}', '${escapeJs(s.id)}', this.value)"
                   placeholder="Paste YouTube Stream Key (e.g. xxxx-xxxx-xxxx-xxxx)"
                 />
@@ -11274,7 +11322,6 @@ async function renderWorkspaceStreamsTab(channelName, cachedStreamsData = null) 
             <div class="field-group youtube-stream-schedule-group">
               <div class="field-label-row">
                 <label class="field-label">Broadcast & Schedule Settings</label>
-                ${s.youtube_studio_url ? `<a href="${escapeHtml(s.youtube_studio_url)}" target="_blank" class="pill ghost small link-out">Studio Control Room ↗</a>` : ""}
               </div>
               <div class="form-grid schedule-form-grid">
                 <label class="field-label-sm">
@@ -11283,7 +11330,8 @@ async function renderWorkspaceStreamsTab(channelName, cachedStreamsData = null) 
                     id="streamTitleInput_${escapeHtml(s.id)}"
                     type="text"
                     class="field-input"
-                    value="${escapeHtml(s.title || s.name || "")}"
+                    value="${escapeHtml(s.title || (s.name && s.name !== "Main Stream Feed" ? s.name : "") || channel.youtube_broadcast_title || channel.live_title || channel.title || channelName || "")}"
+                    oninput="updateStreamDetailInline('${escapeJs(channelName)}', '${escapeJs(s.id)}', 'title', this.value)"
                     onchange="updateStreamDetailInline('${escapeJs(channelName)}', '${escapeJs(s.id)}', 'title', this.value)"
                     placeholder="Broadcast Title (e.g. Live Event #1)"
                   />
@@ -11325,6 +11373,7 @@ async function renderWorkspaceStreamsTab(channelName, cachedStreamsData = null) 
                   id="streamDescInput_${escapeHtml(s.id)}"
                   class="field-input"
                   rows="2"
+                  oninput="updateStreamDetailInline('${escapeJs(channelName)}', '${escapeJs(s.id)}', 'description', this.value)"
                   onchange="updateStreamDetailInline('${escapeJs(channelName)}', '${escapeJs(s.id)}', 'description', this.value)"
                   placeholder="Optional broadcast description..."
                 >${escapeHtml(s.description || "")}</textarea>
@@ -11340,6 +11389,7 @@ async function renderWorkspaceStreamsTab(channelName, cachedStreamsData = null) 
                 type="text"
                 class="field-input"
                 value="${escapeHtml(streamPlaylist)}"
+                oninput="updateStreamPlaylistInline('${escapeJs(channelName)}', '${escapeJs(s.id)}', this.value)"
                 onchange="updateStreamPlaylistInline('${escapeJs(channelName)}', '${escapeJs(s.id)}', this.value)"
                 placeholder="Leave blank for channel default, or select videos via Import button"
               />
@@ -11355,14 +11405,18 @@ async function renderWorkspaceStreamsTab(channelName, cachedStreamsData = null) 
 
 async function updateStreamPlaylistInline(channelName, streamId, rawText) {
   try {
-    const data = await fetchApi(`/api/channel/streams?config=${encodeURIComponent(state.config)}&channel=${encodeURIComponent(channelName)}`);
+    const items = Array.isArray(rawText)
+      ? rawText.map((t) => String(t || "").trim()).filter(Boolean)
+      : String(rawText || "").split(",").map((t) => t.trim()).filter(Boolean);
+    syncStreamToStateConfig(channelName, streamId, (s) => { s.playlist = items; });
+    const cfg = state.config || "config.ready.json";
+    const data = await fetchApi(`/api/channel/streams?config=${encodeURIComponent(cfg)}&channel=${encodeURIComponent(channelName)}`);
     if (!data || !data.ok) return;
     const streams = Array.isArray(data.streams) ? data.streams : [];
     const target = streams.find((s) => String(s.id) === String(streamId));
     if (target) {
-      const items = String(rawText || "").split(",").map((t) => t.trim()).filter(Boolean);
       target.playlist = items;
-      await fetchApi("/api/channel/streams/save", {
+      const savePromise = fetchApi("/api/channel/streams/save", {
         method: "POST",
         body: JSON.stringify({
           config: state.config,
@@ -11370,6 +11424,8 @@ async function updateStreamPlaylistInline(channelName, streamId, rawText) {
           streams: streams
         })
       });
+      state.activeStreamSavePromise = savePromise;
+      await savePromise;
       toast("Stream-specific playlist updated.", "success");
     }
   } catch (err) {
@@ -11379,18 +11435,16 @@ async function updateStreamPlaylistInline(channelName, streamId, rawText) {
 
 async function updateStreamDetailInline(channelName, streamId, field, rawValue) {
   try {
+    const val = field === "scheduled_start_time" ? datetimeLocalToIso(rawValue) : String(rawValue || "").trim();
+    syncStreamToStateConfig(channelName, streamId, (s) => { s[field] = val; });
     const cfg = state.config || "config.ready.json";
     const data = await fetchApi(`/api/channel/streams?config=${encodeURIComponent(cfg)}&channel=${encodeURIComponent(channelName)}`);
     if (!data || !data.ok) return;
     const streams = Array.isArray(data.streams) ? data.streams : [];
     const target = streams.find((s) => String(s.id) === String(streamId));
     if (target) {
-      if (field === "scheduled_start_time") {
-        target[field] = datetimeLocalToIso(rawValue);
-      } else {
-        target[field] = String(rawValue || "").trim();
-      }
-      await fetchApi("/api/channel/streams/save", {
+      target[field] = val;
+      const savePromise = fetchApi("/api/channel/streams/save", {
         method: "POST",
         body: JSON.stringify({
           config: state.config,
@@ -11398,6 +11452,8 @@ async function updateStreamDetailInline(channelName, streamId, field, rawValue) 
           streams: streams,
         }),
       });
+      state.activeStreamSavePromise = savePromise;
+      await savePromise;
       toast(`Stream ${field.replace("_", " ")} updated.`, "success");
     }
   } catch (err) {
@@ -11415,7 +11471,8 @@ async function uploadStreamThumbnailInline(channelName, streamId, file) {
   try {
     const cfg = state.config || "config.ready.json";
     const url = `/api/channel/streams/thumbnail?config=${encodeURIComponent(cfg)}&channel=${encodeURIComponent(channelName)}&stream_id=${encodeURIComponent(streamId)}&filename=${encodeURIComponent(file.name)}`;
-    const res = await fetch(url, {
+    const requestUrl = apiRequestUrl(url);
+    const res = await fetch(requestUrl, {
       method: "POST",
       headers: { "Content-Type": file.type || "application/octet-stream" },
       body: file,
@@ -11428,6 +11485,8 @@ async function uploadStreamThumbnailInline(channelName, streamId, file) {
     if (data.uploaded_to_youtube) {
       toast("Thumbnail also uploaded to YouTube Studio!", "info");
     }
+    await refresh();
+    if (channelName) renderWorkspaceStreamsTab(channelName);
   } catch (err) {
     toast(`Thumbnail upload failed: ${err.message}`, "danger");
   }
@@ -11481,12 +11540,35 @@ async function openStreamVideoPickerModal(channelName, streamId, autoSelectPaths
   try {
     const cfg = state.config || "config.ready.json";
     const data = await fetchApi(`/api/normalized-files?config=${encodeURIComponent(cfg)}&channel=${encodeURIComponent(channelName)}`);
-    const files = Array.isArray(data?.files) ? data.files : [];
+    const backendFiles = Array.isArray(data?.files) ? data.files : [];
+    const stateFiles = state.normalizedFilesByChannel[channelName] || [];
+    const stateRawFiles = state.rawFilesByChannel[channelName] || [];
+    const channelConfig = (state.configData?.channels || []).find((c) => c.name === channelName);
+    const playlistPaths = Array.isArray(channelConfig?.playlist) ? channelConfig.playlist : [];
+    const rawPlaylistPaths = Array.isArray(channelConfig?.raw_playlist) ? channelConfig.raw_playlist : [];
+
+    const fileMap = new Map();
+    const addFileItem = (item) => {
+      if (!item) return;
+      const path = typeof item === "string" ? item : String(item?.path || item?.name || "");
+      const norm = normalizePath(path);
+      if (!norm || fileMap.has(norm)) return;
+      const name = typeof item === "string" ? (path.split(/[/\\]/).pop() || path) : String(item?.name || path.split(/[/\\]/).pop() || path);
+      fileMap.set(norm, { path, name });
+    };
+
+    backendFiles.forEach(addFileItem);
+    stateFiles.forEach(addFileItem);
+    playlistPaths.forEach(addFileItem);
+    rawPlaylistPaths.forEach(addFileItem);
+    stateRawFiles.forEach(addFileItem);
+
+    const files = Array.from(fileMap.values());
     
     const currentInputValue = ($(`streamVideoInput_${streamId}`)?.value || "").trim();
     const currentSelectedList = [
-      ...currentInputValue.split(",").map((s) => s.trim()).filter(Boolean),
-      ...(Array.isArray(autoSelectPaths) ? autoSelectPaths : [])
+      ...currentInputValue.split(",").map((s) => normalizePath(s)).filter(Boolean),
+      ...(Array.isArray(autoSelectPaths) ? autoSelectPaths.map((s) => normalizePath(s)) : [])
     ];
 
     if (!files.length) {
@@ -11502,9 +11584,11 @@ async function openStreamVideoPickerModal(channelName, streamId, autoSelectPaths
     listContainer.innerHTML = `
       <div class="stream-video-picker-grid">
         ${files.map((file, idx) => {
-          const filePath = typeof file === "string" ? file : String(file?.path || file?.name || "");
-          const fileName = typeof file === "string" ? (file.split(/[/\\]/).pop() || file) : String(file?.name || filePath.split(/[/\\]/).pop() || filePath);
-          const isChecked = currentSelectedList.includes(filePath) || currentSelectedList.includes(fileName);
+          const filePath = String(file?.path || file?.name || "");
+          const fileName = String(file?.name || filePath.split(/[/\\]/).pop() || filePath);
+          const normPath = normalizePath(filePath);
+          const normName = normalizePath(fileName);
+          const isChecked = currentSelectedList.some((item) => item === normPath || item === normName);
           return `
             <label class="picker-file-item" for="pickerFile_${idx}">
               <input
@@ -11523,6 +11607,7 @@ async function openStreamVideoPickerModal(channelName, streamId, autoSelectPaths
   } catch (err) {
     listContainer.innerHTML = `<div class="notice danger">Error loading videos: ${escapeHtml(err.message)}</div>`;
   }
+
 }
 
 async function browseStreamVideosFromPc() {
@@ -11579,6 +11664,7 @@ async function browseStreamVideosFromPc() {
     if (input) {
       input.value = combined.join(", ");
     }
+    await updateStreamPlaylistInline(channelName, streamId, combined);
   }
 
   await openStreamVideoPickerModal(channelName, streamId, newlySelectedPaths);
@@ -11666,6 +11752,14 @@ async function startSingleStream(channelName, streamId) {
     cardBtn.textContent = "Starting...";
   }
   try {
+    if (state.activeStreamSavePromise) {
+      try { await state.activeStreamSavePromise; } catch (e) {}
+    }
+    const videoInput = $(`streamVideoInput_${streamId}`);
+    if (videoInput) {
+      const textVal = (videoInput.value || "").trim();
+      await updateStreamPlaylistInline(channelName, streamId, textVal);
+    }
     toast(`Starting stream ${streamId}...`, "info");
     logUiAction("API Outgoing", "POST /api/stream/start", { channel: channelName, stream_id: streamId, config: state.config });
     const response = await fetchApi("/api/stream/start", {
@@ -11949,13 +12043,16 @@ async function deleteStreamFromChannel(channelName, streamId) {
 
 async function updateStreamKeyInline(channelName, streamId, newKey) {
   try {
-    const data = await fetchApi(`/api/channel/streams?config=${encodeURIComponent(state.config)}&channel=${encodeURIComponent(channelName)}`);
+    const keyVal = (newKey || "").trim();
+    syncStreamToStateConfig(channelName, streamId, (s) => { s.stream_key = keyVal; });
+    const cfg = state.config || "config.ready.json";
+    const data = await fetchApi(`/api/channel/streams?config=${encodeURIComponent(cfg)}&channel=${encodeURIComponent(channelName)}`);
     if (!data || !data.ok) return;
     const streams = Array.isArray(data.streams) ? data.streams : [];
     const target = streams.find((s) => String(s.id) === String(streamId));
     if (target) {
-      target.stream_key = (newKey || "").trim();
-      await fetchApi("/api/channel/streams/save", {
+      target.stream_key = keyVal;
+      const savePromise = fetchApi("/api/channel/streams/save", {
         method: "POST",
         body: JSON.stringify({
           config: state.config,
@@ -11963,6 +12060,8 @@ async function updateStreamKeyInline(channelName, streamId, newKey) {
           streams: streams
         })
       });
+      state.activeStreamSavePromise = savePromise;
+      await savePromise;
       toast("Stream key updated.", "success");
     }
   } catch (err) {

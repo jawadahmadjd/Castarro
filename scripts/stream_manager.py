@@ -187,6 +187,16 @@ def write_concat_playlist(
     stream_id = str(stream_item.get("id") or "") if isinstance(stream_item, dict) else ""
     playlist = stream_item.get("playlist") if isinstance(stream_item, dict) and stream_item.get("playlist") else channel.get("playlist")
     network_inputs = False
+
+    if isinstance(playlist, str):
+        if playlist.endswith((".txt", ".ffconcat", ".concat")):
+            playlist_path = resolve_path(config_dir, playlist)
+            if not playlist_path.exists():
+                raise SystemExit(f"Playlist file does not exist: {playlist_path}")
+            return playlist_path, False
+        else:
+            playlist = [p.strip() for p in playlist.split(",") if p.strip()]
+
     if not playlist:
         cloud_sources = cloud_playlist_sources(channel)
         if cloud_sources:

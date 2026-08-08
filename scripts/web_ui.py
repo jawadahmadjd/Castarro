@@ -283,38 +283,22 @@ def stream_delivery_health(
     if average_bitrate_bps is not None and target_bitrate_bps and target_bitrate_bps > 0:
         bitrate_ratio = average_bitrate_bps / target_bitrate_bps
 
-    dropped = int(drop_frames or 0)
-    detail_parts: list[str] = []
-    if speed is not None:
-        detail_parts.append(f"Encoder speed is {speed:.2f}x.")
-    if output_fps is not None and target_fps and target_fps > 0:
-        detail_parts.append(f"Output frame rate is {output_fps:.2f} fps against the {target_fps:.2f} fps target.")
-    elif output_fps is not None:
-        detail_parts.append(f"Output frame rate is {output_fps:.2f} fps.")
-    if average_bitrate_bps is not None and target_bitrate_bps and target_bitrate_bps > 0:
-        detail_parts.append(
-            f"Average bitrate is {average_bitrate_bps / 1_000_000:.2f} Mbps against the {target_bitrate_bps / 1_000_000:.2f} Mbps target."
-        )
-    elif average_bitrate_bps is not None:
-        detail_parts.append(f"Average bitrate is {average_bitrate_bps / 1_000_000:.2f} Mbps.")
-    if dropped > 0:
-        detail_parts.append(f"FFmpeg has reported {dropped} dropped frame{'s' if dropped != 1 else ''}.")
-    detail = " ".join(detail_parts).strip()
+    detail = "FFmpeg stream delivery active." if running else "Offline."
 
     if (
         (speed is not None and speed < 0.9)
         or (fps_ratio is not None and fps_ratio < 0.9)
         or (bitrate_ratio is not None and bitrate_ratio < 0.85)
     ):
-        return "danger", "Poor", detail or "FFmpeg delivery is seriously below the configured stream target."
+        return "danger", "Poor", detail
     if (
         dropped > 0
         or (speed is not None and speed < 0.98)
         or (fps_ratio is not None and fps_ratio < 0.97)
         or (bitrate_ratio is not None and bitrate_ratio < 0.95)
     ):
-        return "warn", "Needs attention", detail or "FFmpeg delivery is slightly below the configured stream target."
-    return "success", "Excellent", detail or "FFmpeg delivery is meeting the configured stream target."
+        return "warn", "Needs attention", detail
+    return "success", "Excellent", detail
 
 
 def parse_stream_stats(
@@ -1218,8 +1202,11 @@ def default_alert_settings() -> dict[str, Any]:
         "mobile_notifications_enabled": True,
         "cooldown_seconds": 300,
         "rules": {
+            "stream_started": True,
             "stream_stopped": True,
-            "poor_connection": True,
+            "title_description_updated": True,
+            "thumbnail_updated": True,
+            "playlist_updated": True,
             "scheduler_started": True,
             "scheduler_stopped": True,
         },
@@ -3203,9 +3190,12 @@ def replace_stale_youtube_broadcast_for_start(
 
     stream_title_source = str(
         (target_stream or {}).get("title")
-        or (target_stream or {}).get("name")
         or (source_broadcast or {}).get("title")
         or channel.get("youtube_broadcast_title")
+        or channel.get("live_title")
+        or channel.get("title")
+        or channel.get("name")
+        or (target_stream or {}).get("name")
         or ""
     ).strip()
     title = stream_live_title({**channel, "youtube_broadcast_title": stream_title_source})
@@ -4341,7 +4331,7 @@ def normalized_video_files(config_name: str, channel_name: str | None) -> list[d
                     if not isinstance(item, str):
                         continue
                     path = resolve_project_path(item)
-                    if normalized_media_is_ready(config, path):
+                    if path.exists() and path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS:
                         files_by_path[relative_or_absolute(path)] = path
             break
 
@@ -5461,8 +5451,13 @@ def start_stream(config_name: str, channel_name: str | None, stream_id: str | No
                 prepared_channel["thumbnail"] = str(s.get("thumbnail"))
             if s.get("tags"):
                 prepared_channel["tags"] = s.get("tags")
-            if s.get("playlist") and isinstance(s.get("playlist"), list) and len(s.get("playlist")) > 0:
-                prepared_channel["playlist"] = s.get("playlist")
+            if s.get("playlist"):
+                if isinstance(s.get("playlist"), str):
+                    s_pl = [p.strip() for p in s.get("playlist").split(",") if p.strip()]
+                    if s_pl:
+                        prepared_channel["playlist"] = s_pl
+                elif isinstance(s.get("playlist"), list) and len(s.get("playlist")) > 0:
+                    prepared_channel["playlist"] = s.get("playlist")
 
             print(f"[{name}] Launching FFmpeg process for stream '{stream_key_id}'...")
             try:
@@ -5509,6 +5504,15 @@ def start_stream(config_name: str, channel_name: str | None, stream_id: str | No
                 "log_file": log_file,
                 "output_url": running.masked_output_url,
             })
+            emit_alert(
+                config,
+                config_name,
+                name,
+                "stream_started",
+                "info",
+                f"Stream started for {name}",
+                f"Live stream launched for '{s.get('name') or sid}' (PID {running.process.pid}).",
+            )
             started.append(stream_key_id)
 
     print(f"[STREAM PIPELINE END] Successfully started {len(started)} stream(s): {started}\n")
@@ -6116,6 +6120,15 @@ def upload_stream_thumbnail_api(handler: BaseHTTPRequestHandler, query: dict[str
             print(f"[{channel_name}] Stream thumbnail upload to YouTube failed: {exc}")
 
     save_config(config_name, config)
+    emit_alert(
+        config,
+        config_name,
+        channel_name,
+        "thumbnail_updated",
+        "info",
+        f"Thumbnail updated for {channel_name}",
+        f"Stream thumbnail attached successfully.",
+    )
     return {
         "ok": True,
         "channel": channel_name,
@@ -6887,15 +6900,6 @@ def evaluate_stream_connection_health() -> None:
             if bad_count >= 2:
                 config, _error = load_config_or_none(state.config_name)
                 if config:
-                    emit_alert(
-                        config,
-                        state.config_name,
-                        channel_name,
-                        "poor_connection",
-                        severity,
-                        f"{channel_name} connection needs attention",
-                        str(stats.get("detail") or "FFmpeg is reporting degraded live delivery."),
-                    )
                     profile = stream_manager.live_profile(config, channel)
                     adaptive = stream_manager.adaptive_profile(profile)
                     if str(profile.get("mode") or "") == "adaptive" and adaptive.get("auto_switch") is not False:
