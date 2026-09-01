@@ -1363,3 +1363,260 @@ def verify_youtube_broadcast_live(
         "message": f"Could not verify live status for broadcast '{broadcast_id}'.",
     }
 
+
+def find_stream_and_broadcast_by_key(
+    access_token: str,
+    stream_key: str,
+) -> dict[str, Any]:
+    """
+    Finds the YouTube liveStream matching the given stream_key (by ingestionInfo.streamName),
+    and finds any upcoming / active broadcast bound to that stream.
+    """
+    clean_key = str(stream_key or "").strip()
+    if not clean_key or not access_token:
+        return {
+            "stream": None,
+            "stream_id": "",
+            "broadcast": None,
+            "broadcast_id": "",
+            "studio_url": "",
+            "auto_start_enabled": False,
+        }
+
+    matched_stream = None
+    matched_stream_id = ""
+    try:
+        mine_streams = list_mine_live_streams(access_token)
+        for s in mine_streams:
+            s_name = stream_name_from_resource(s)
+            if s_name and s_name == clean_key:
+                matched_stream = s
+                matched_stream_id = str(s.get("id") or "").strip()
+                break
+    except Exception as exc:
+        print(f"[youtube_service] Error listing mine streams for key match: {exc}")
+
+    matched_broadcast = None
+    matched_broadcast_id = ""
+    studio_url = ""
+    auto_start_enabled = False
+
+    if matched_stream_id:
+        try:
+            upcoming_broadcasts = list_upcoming_broadcasts(access_token, include_stream_details=False)
+            for b in upcoming_broadcasts:
+                b_bound = str(b.get("bound_stream_id") or "").strip()
+                if b_bound and b_bound == matched_stream_id:
+                    matched_broadcast = b
+                    matched_broadcast_id = str(b.get("id") or "").strip()
+                    break
+        except Exception as exc:
+            print(f"[youtube_service] Error finding upcoming broadcast for stream '{matched_stream_id}': {exc}")
+
+    if matched_broadcast_id:
+        studio_url = f"https://studio.youtube.com/video/{matched_broadcast_id}/livestreaming"
+        auto_start_enabled = bool(matched_broadcast.get("auto_start", False))
+
+    return {
+        "stream": matched_stream,
+        "stream_id": matched_stream_id,
+        "broadcast": matched_broadcast,
+        "broadcast_id": matched_broadcast_id,
+        "studio_url": studio_url,
+        "auto_start_enabled": auto_start_enabled,
+    }
+
+
+def update_broadcast_auto_start(
+    access_token: str,
+    broadcast_id: str,
+    *,
+    auto_start: bool = True,
+    auto_stop: bool = True,
+) -> dict[str, Any]:
+    """
+    Ensures that contentDetails.enableAutoStart and enableAutoStop are set to True
+    on the broadcast so YouTube automatically starts the stream upon detecting video frames.
+    """
+    broadcast_id = str(broadcast_id or "").strip()
+    if not broadcast_id or not access_token:
+        return {}
+
+    # 1. Fetch current broadcast resource
+    payload = youtube_get(
+        access_token,
+        "https://www.googleapis.com/youtube/v3/liveBroadcasts"
+        f"?part=id,snippet,status,contentDetails&id={urllib.parse.quote(broadcast_id)}",
+    )
+    items = payload.get("items")
+    if not isinstance(items, list) or not items:
+        return {}
+
+    raw_broadcast = items[0] if isinstance(items[0], dict) else {}
+    snippet = raw_broadcast.get("snippet", {}) if isinstance(raw_broadcast.get("snippet"), dict) else {}
+    status = raw_broadcast.get("status", {}) if isinstance(raw_broadcast.get("status"), dict) else {}
+    content_details = raw_broadcast.get("contentDetails", {}) if isinstance(raw_broadcast.get("contentDetails"), dict) else {}
+
+    current_auto_start = bool(content_details.get("enableAutoStart", False))
+    current_auto_stop = bool(content_details.get("enableAutoStop", False))
+
+    if current_auto_start == bool(auto_start) and current_auto_stop == bool(auto_stop):
+        return raw_broadcast
+
+    # 2. Update contentDetails
+    content_details["enableAutoStart"] = bool(auto_start)
+    content_details["enableAutoStop"] = bool(auto_stop)
+
+    update_body: dict[str, Any] = {
+        "id": broadcast_id,
+        "snippet": {
+            "title": snippet.get("title") or "Live Stream",
+            "description": snippet.get("description") or "",
+            "scheduledStartTime": snippet.get("scheduledStartTime") or ensure_future_iso_time("", 60),
+        },
+        "status": {
+            "privacyStatus": status.get("privacyStatus") or "public",
+            "selfDeclaredMadeForKids": bool(status.get("selfDeclaredMadeForKids", False)),
+        },
+        "contentDetails": content_details,
+    }
+    if snippet.get("scheduledEndTime"):
+        update_body["snippet"]["scheduledEndTime"] = snippet.get("scheduledEndTime")
+
+    try:
+        updated = request_json(
+            "https://www.googleapis.com/youtube/v3/liveBroadcasts?part=id,snippet,status,contentDetails",
+            method="PUT",
+            headers={"Authorization": f"Bearer {access_token}"},
+            body=update_body,
+        )
+        print(f"[youtube_service] Updated broadcast '{broadcast_id}' enableAutoStart={auto_start}, enableAutoStop={auto_stop}")
+        return updated
+    except Exception as exc:
+        print(f"[youtube_service] Warning: Failed to update broadcast '{broadcast_id}' autoStart: {exc}")
+        return {}
+
+
+def ensure_stream_transition_to_live(
+    access_token: str,
+    *,
+    stream_id: str = "",
+    broadcast_id: str = "",
+    stream_key: str = "",
+    max_wait_seconds: float = 35.0,
+    poll_interval: float = 2.5,
+) -> dict[str, Any]:
+    """
+    Actively monitors YouTube ingestion for a stream and triggers transition to 'live' as soon as
+    RTMP ingestion becomes 'active' on YouTube servers.
+    """
+    if not access_token:
+        return {"is_live": False, "status": "no_token", "message": "No YouTube access token."}
+
+    # If stream_id or broadcast_id is missing, resolve by stream_key
+    if (not stream_id or not broadcast_id) and stream_key:
+        resolved = find_stream_and_broadcast_by_key(access_token, stream_key)
+        if not stream_id and resolved.get("stream_id"):
+            stream_id = resolved["stream_id"]
+        if not broadcast_id and resolved.get("broadcast_id"):
+            broadcast_id = resolved["broadcast_id"]
+
+    if not broadcast_id:
+        return {"is_live": False, "status": "no_broadcast", "message": "No YouTube broadcast found for stream."}
+
+    # 1. Ensure auto-start is enabled on the broadcast
+    try:
+        update_broadcast_auto_start(access_token, broadcast_id, auto_start=True, auto_stop=True)
+    except Exception as u_err:
+        print(f"[YOUTUBE AUTO-LIVE] Note: update_broadcast_auto_start error: {u_err}")
+
+    valid_live_statuses = {"live", "livestarting"}
+
+    start_time = time.time()
+    attempt = 0
+
+    while time.time() - start_time < max_wait_seconds:
+        attempt += 1
+        elapsed = round(time.time() - start_time, 1)
+
+        try:
+            b_info = broadcast_chat_details_by_id(access_token, broadcast_id)
+            if b_info:
+                lifecycle = str(b_info.get("life_cycle_status") or "").strip().lower()
+                print(f"[YOUTUBE AUTO-LIVE] Broadcast '{broadcast_id}' status='{lifecycle}' (elapsed {elapsed}s, attempt {attempt})")
+                if lifecycle in valid_live_statuses:
+                    return {
+                        "is_live": True,
+                        "status": lifecycle,
+                        "message": f"Broadcast is verified LIVE on YouTube ({lifecycle}).",
+                        "broadcast_id": broadcast_id,
+                        "stream_id": stream_id,
+                    }
+
+                # Check if stream ingestion is active
+                stream_active = False
+                if stream_id:
+                    try:
+                        st_res = live_stream_by_id(access_token, stream_id)
+                        if st_res and isinstance(st_res.get("status"), dict):
+                            stream_status = str(st_res["status"].get("streamStatus") or "").strip().lower()
+                            print(f"[YOUTUBE AUTO-LIVE] Stream '{stream_id}' ingestion status='{stream_status}'")
+                            if stream_status == "active":
+                                stream_active = True
+                    except Exception as st_err:
+                        print(f"[YOUTUBE AUTO-LIVE] Error querying stream status: {st_err}")
+
+                # If stream is active or broadcast is in ready/created/testing, attempt to transition to live!
+                if lifecycle in {"ready", "created", "testing", "teststarting"} and (stream_active or attempt >= 2):
+                    try:
+                        print(f"[YOUTUBE AUTO-LIVE] Triggering transition to 'live' for broadcast '{broadcast_id}'...")
+                        t_res = transition_broadcast_status(access_token, broadcast_id, "live")
+                        t_status = str(t_res.get("status", {}).get("lifeCycleStatus") or "").strip().lower()
+                        if t_status in valid_live_statuses:
+                            return {
+                                "is_live": True,
+                                "status": t_status,
+                                "message": f"Successfully transitioned broadcast to LIVE ({t_status}).",
+                                "broadcast_id": broadcast_id,
+                                "stream_id": stream_id,
+                            }
+                    except Exception as t_err:
+                        print(f"[YOUTUBE AUTO-LIVE] Transition to live returned: {t_err}")
+
+        except Exception as exc:
+            print(f"[YOUTUBE AUTO-LIVE] Loop exception: {exc}")
+
+        time.sleep(poll_interval)
+
+    # Final check
+    try:
+        b_info = broadcast_chat_details_by_id(access_token, broadcast_id)
+        if b_info:
+            lifecycle = str(b_info.get("life_cycle_status") or "").strip().lower()
+            if lifecycle in valid_live_statuses:
+                return {
+                    "is_live": True,
+                    "status": lifecycle,
+                    "message": f"Broadcast verified LIVE on YouTube ({lifecycle}).",
+                    "broadcast_id": broadcast_id,
+                    "stream_id": stream_id,
+                }
+            return {
+                "is_live": False,
+                "status": lifecycle,
+                "message": f"Broadcast is '{lifecycle}' on YouTube. (Expected live)",
+                "broadcast_id": broadcast_id,
+                "stream_id": stream_id,
+            }
+    except Exception:
+        pass
+
+    return {
+        "is_live": False,
+        "status": "timeout",
+        "message": f"Stream ingestion timed out or broadcast '{broadcast_id}' did not enter live state within {int(max_wait_seconds)}s.",
+        "broadcast_id": broadcast_id,
+        "stream_id": stream_id,
+    }
+
+

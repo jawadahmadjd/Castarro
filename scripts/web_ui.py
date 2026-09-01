@@ -3109,18 +3109,34 @@ def replace_stale_youtube_broadcast_for_start(
     if not account:
         return False
 
-    stream_broadcast_id = str((target_stream or {}).get("youtube_broadcast_id") or "").strip()
-    broadcast_id = stream_broadcast_id or str(channel.get("youtube_broadcast_id") or "").strip()
-    last_broadcast_id = str(channel.get("youtube_last_broadcast_id") or "").strip()
-    if not broadcast_id:
-        broadcast_id = last_broadcast_id
-
     try:
         scoped_config = account_config_view(config, account)
         access_token, _tokens = youtube_service.valid_access_token(ROOT, scoped_config)
     except Exception as token_err:
         print(f"[{channel_name}] Failed to get YouTube access token: {token_err}")
         return False
+
+    effective_key = str((target_stream or {}).get("stream_key") or (target_stream or {}).get("stream_key_env") or "").strip()
+    if not effective_key:
+        effective_key, _key_source = channel_effective_stream_key(channel)
+
+    # 1. Query YouTube by stream key to resolve existing stream and upcoming broadcast
+    found_info = None
+    if effective_key:
+        try:
+            found_info = youtube_service.find_stream_and_broadcast_by_key(access_token, effective_key)
+        except Exception as f_err:
+            print(f"[{channel_name}] Warning querying stream key '{mask_secret_str(effective_key)}': {f_err}")
+
+    matched_broadcast_id = str((found_info or {}).get("broadcast_id") or "").strip()
+    matched_stream_id = str((found_info or {}).get("stream_id") or "").strip()
+    matched_studio_url = str((found_info or {}).get("studio_url") or "").strip()
+
+    stream_broadcast_id = str((target_stream or {}).get("youtube_broadcast_id") or "").strip()
+    broadcast_id = matched_broadcast_id or stream_broadcast_id or str(channel.get("youtube_broadcast_id") or "").strip()
+    last_broadcast_id = str(channel.get("youtube_last_broadcast_id") or "").strip()
+    if not broadcast_id:
+        broadcast_id = last_broadcast_id
 
     broadcast = None
     if broadcast_id:
@@ -3147,17 +3163,37 @@ def replace_stale_youtube_broadcast_for_start(
     if not is_stale and auto_stop and lifecycle in {"live", "testing", "livestarting", "teststarting"}:
         is_stale = True
 
+    # If broadcast exists and is NOT stale (e.g. upcoming/ready):
+    # Ensure auto_start is active on YouTube and update stream fields!
     if not is_stale and broadcast_id:
-        return False
+        try:
+            youtube_service.update_broadcast_auto_start(access_token, broadcast_id, auto_start=True, auto_stop=auto_stop)
+        except Exception as a_err:
+            print(f"[{channel_name}] Warning updating auto_start on broadcast '{broadcast_id}': {a_err}")
 
-    # Prioritize searching for an upcoming broadcast currently bound to our stream key on YouTube
-    # (This represents the live settings the user configured in the YouTube Studio Live Control Room)
-    upcoming_broadcast = None
-    stream_id = str((target_stream or {}).get("youtube_stream_id") or channel.get("youtube_stream_id") or "").strip()
-    if stream_id:
-        upcoming_broadcast = youtube_service.find_upcoming_broadcast_for_stream(access_token, stream_id)
+        b_studio_url = matched_studio_url or f"https://studio.youtube.com/video/{broadcast_id}/livestreaming"
+        if target_stream and isinstance(target_stream, dict):
+            target_stream["youtube_broadcast_id"] = broadcast_id
+            if matched_stream_id:
+                target_stream["youtube_stream_id"] = matched_stream_id
+            target_stream["youtube_studio_url"] = b_studio_url
+        if str((target_stream or {}).get("id") or "stream_1") == "stream_1":
+            channel["youtube_broadcast_id"] = broadcast_id
+            if matched_stream_id:
+                channel["youtube_stream_id"] = matched_stream_id
+            channel["youtube_studio_url"] = b_studio_url
+        save_config(config_name, config)
+        return True
 
-    source_broadcast = upcoming_broadcast if upcoming_broadcast else broadcast
+    # Otherwise, schedule a fresh broadcast for this stream key
+    source_broadcast = broadcast
+    source_id = source_broadcast.get("id") if source_broadcast else None
+    old_details = None
+    if source_id:
+        try:
+            old_details = youtube_service.video_details(access_token, source_id)
+        except Exception:
+            old_details = None
 
     privacy_status = str(
         (target_stream or {}).get("privacy_status")
@@ -3169,14 +3205,6 @@ def replace_stale_youtube_broadcast_for_start(
         privacy_status = "public"
     if privacy_status == "unlisted":
         privacy_status = "public"
-
-    source_id = source_broadcast.get("id") if source_broadcast else None
-    old_details = None
-    if source_id:
-        try:
-            old_details = youtube_service.video_details(access_token, source_id)
-        except Exception:
-            old_details = None
 
     description = str(
         (target_stream or {}).get("description")
@@ -3207,10 +3235,6 @@ def replace_stale_youtube_broadcast_for_start(
         or ""
     ).strip()
     title = stream_live_title({**channel, "youtube_broadcast_title": stream_title_source})
-
-    effective_key = str((target_stream or {}).get("stream_key") or (target_stream or {}).get("stream_key_env") or "").strip()
-    if not effective_key:
-        effective_key, _key_source = channel_effective_stream_key(channel)
 
     created = youtube_service.schedule_broadcast(
         access_token,
@@ -3324,10 +3348,6 @@ def ensure_youtube_broadcasts_ready_for_start(
         for s in streams:
             sid = str(s.get("id") or "")
             if target_stream_id and sid != target_stream_id:
-                continue
-            if not target_stream_id and len(streams) > 1 and sid != "stream_1":
-                # When no specific stream_id is requested, do not auto-replace broadcasts for non-primary streams
-                # to prevent bulk creation of scheduled streams on YouTube.
                 continue
             if not s.get("enabled", True):
                 continue
@@ -5397,6 +5417,63 @@ def mask_secret_str(val: Any) -> str:
     return f"****{s[-4:]}"
 
 
+def auto_golive_transition_worker(
+    config_name: str,
+    channel_name: str,
+    stream_id: str,
+    stream_key: str,
+    broadcast_id: str,
+    yt_stream_id: str,
+    state_obj: StreamState,
+) -> None:
+    """
+    Background worker that monitors stream ingestion and transitions broadcast to 'live'
+    without blocking UI or stream launch.
+    """
+    try:
+        config, error = load_config_or_none(config_name)
+        if not config:
+            return
+        channel = next((c for c in config.get("channels", []) if str(c.get("name") or "") == channel_name), None)
+        if not channel:
+            return
+        account_id = channel_account_id(config, channel)
+        account = find_youtube_account(config, account_id)
+        if not account:
+            return
+        scoped_config = account_config_view(config, account)
+        access_token, _ = youtube_service.valid_access_token(ROOT, scoped_config)
+
+        print(f"[{channel_name}:{stream_id}] [AUTO-GOLIVE WORKER] Monitoring stream ingestion & transitioning to LIVE on YouTube...")
+        res = youtube_service.ensure_stream_transition_to_live(
+            access_token,
+            stream_id=yt_stream_id,
+            broadcast_id=broadcast_id,
+            stream_key=stream_key,
+            max_wait_seconds=35.0,
+            poll_interval=2.5,
+        )
+        print(f"[{channel_name}:{stream_id}] [AUTO-GOLIVE WORKER] Result: {res}")
+        state_obj.verification = res
+        if res.get("is_live"):
+            app_db.record_event(
+                "youtube_broadcast_live_success",
+                config_name,
+                channel_name,
+                {"stream_id": stream_id, "broadcast_id": res.get("broadcast_id"), "status": res.get("status")},
+            )
+        else:
+            app_db.record_event(
+                "youtube_broadcast_live_warning",
+                config_name,
+                channel_name,
+                {"stream_id": stream_id, "broadcast_id": res.get("broadcast_id"), "message": res.get("message")},
+            )
+    except Exception as exc:
+        print(f"[{channel_name}:{stream_id}] [AUTO-GOLIVE WORKER] Error: {exc}")
+        state_obj.verification = {"is_live": False, "status": "error", "message": str(exc)}
+
+
 def start_stream(config_name: str, channel_name: str | None, stream_id: str | None = None) -> list[str]:
     print(f"\n==========================================================================")
     print(f"[STREAM PIPELINE REQ] start_stream(config='{config_name}', channel='{channel_name}', stream_id='{stream_id}')")
@@ -5438,45 +5515,15 @@ def start_stream(config_name: str, channel_name: str | None, stream_id: str | No
             if existing and (existing.running.process.poll() is None or existing.recovering):
                 pid = existing.running.process.pid if existing.running.process else "N/A"
                 print(f"[{name}] Stream '{stream_key_id}' is ALREADY RUNNING (PID={pid}). Skipping duplicate start.")
-                if stream_id and sid == stream_id:
-                    raise ValueError(f"Stream '{sid}' is already running (PID={pid}).")
+                started.append(stream_key_id)
                 continue
 
-            try:
-                target_url = stream_manager.output_url(channel, config.get("defaults", {}), stream_item=s)
-                key_ref = stream_manager.stream_key_reference(name)
-                masked_target = stream_manager.mask_url(target_url, key_ref)
-                print(f"[{name}] Resolved output RTMP URL for stream '{sid}': {masked_target}")
-            except Exception as url_err:
-                target_url = ""
-                masked_target = "UNRESOLVED"
-                print(f"[{name}] Failed to resolve output RTMP URL for stream '{sid}': {url_err}")
-                if stream_id and sid == stream_id:
-                    raise ValueError(f"Stream '{sid}' stream key is missing or invalid: {url_err}")
-
-            if target_url:
-                with STATE.lock:
-                    busy_stream_id = None
-                    busy_pid = None
-                    for st_key, st in STATE.streams.items():
-                        if (st.running.process.poll() is None or st.recovering) and getattr(st.running, "output_url", None) == target_url:
-                            busy_stream_id = st_key
-                            busy_pid = st.running.process.pid if st.running.process else "N/A"
-                            break
-                    url_busy = busy_stream_id is not None
-
-                if url_busy:
-                    err_msg = f"Stream '{sid}' shares an RTMP output URL or stream key with active stream '{busy_stream_id}' (PID={busy_pid})."
-                    print(f"[{name}] [REJECTED] {err_msg}")
-                    if stream_id:
-                        raise ValueError(err_msg)
-                    continue
-
-                # Terminate any stale/orphan background FFmpeg processes matching target RTMP URL
+            # Kill any orphaned ffmpeg process using the exact stream key if applicable
+            stream_key_val = str(s.get("stream_key") or "").strip()
+            if stream_key_val and len(stream_key_val) >= 8:
                 try:
-                    key_part = target_url.rstrip("/").split("/")[-1]
-                    if key_part and len(key_part) >= 5 and os.name != "nt":
-                        import subprocess
+                    key_part = stream_key_val[-8:]
+                    if os.name != "nt":
                         subprocess.run(f"pkill -9 -f '{key_part}'", shell=True, capture_output=True)
                 except Exception as k_err:
                     print(f"[{name}] Warning during orphan process cleanup: {k_err}")
@@ -5519,33 +5566,29 @@ def start_stream(config_name: str, channel_name: str | None, stream_id: str | No
             state_obj = StreamState(config_name, running, cloud_asset_ids=cloud_asset_ids)
             state_obj.stream_id = sid
 
-            # Wait 6 seconds to allow FFmpeg to push initial RTMP video frames to YouTube
-            print(f"[{name}] Waiting 6 seconds for RTMP stream ingest to reach YouTube...")
-            time.sleep(6.0)
+            broadcast_id = str(s.get("youtube_broadcast_id") or prepared_channel.get("youtube_broadcast_id") or channel.get("youtube_broadcast_id") or "").strip()
+            yt_stream_id = str(s.get("youtube_stream_id") or prepared_channel.get("youtube_stream_id") or channel.get("youtube_stream_id") or "").strip()
+            effective_stream_key = str(s.get("stream_key") or s.get("stream_key_env") or "").strip()
+            if not effective_stream_key:
+                effective_stream_key, _ = channel_effective_stream_key(channel)
 
-            # Verify with YouTube API if broadcast is live / testing
-            broadcast_id = str(prepared_channel.get("youtube_broadcast_id") or s.get("youtube_broadcast_id") or channel.get("youtube_broadcast_id") or "").strip()
-            verification_result = {"is_live": True, "status": "local_only", "message": "No YouTube broadcast bound."}
-            if broadcast_id:
-                try:
-                    account_id = channel_account_id(config, channel)
-                    account = find_youtube_account(config, account_id)
-                    if account:
-                        scoped_config = account_config_view(config, account)
-                        access_token, _ = youtube_service.valid_access_token(ROOT, scoped_config)
-                        print(f"[{name}] Verifying broadcast '{broadcast_id}' live status with YouTube API...")
-                        verification_result = youtube_service.verify_youtube_broadcast_live(
-                            access_token,
-                            broadcast_id,
-                            poll_attempts=3,
-                            delay_between_attempts=2.0,
-                        )
-                        print(f"[{name}] YouTube verification result: {verification_result}")
-                except Exception as v_err:
-                    print(f"[{name}] YouTube live verification warning: {v_err}")
-                    verification_result = {"is_live": False, "status": "error", "message": str(v_err)}
-
-            state_obj.verification = verification_result
+            if broadcast_id or effective_stream_key:
+                state_obj.verification = {
+                    "is_live": False,
+                    "status": "ingesting",
+                    "message": "Stream started, waiting for YouTube ingestion...",
+                    "broadcast_id": broadcast_id,
+                    "stream_id": yt_stream_id,
+                }
+                # Spawn background auto-golive worker to poll streamStatus and transition to live
+                worker_t = threading.Thread(
+                    target=auto_golive_transition_worker,
+                    args=(config_name, name, sid, effective_stream_key, broadcast_id, yt_stream_id, state_obj),
+                    daemon=True,
+                )
+                worker_t.start()
+            else:
+                state_obj.verification = {"is_live": True, "status": "local_only", "message": "No YouTube broadcast bound."}
 
             with STATE.lock:
                 STATE.streams[stream_key_id] = state_obj
@@ -5961,6 +6004,65 @@ def format_duration_hhmmss(seconds: int) -> str:
 STREAM_STATS_CACHE: dict[str, dict[str, Any]] = {}
 
 
+def trigger_stream_golive_api(config_name: str, channel_name: str, stream_id: str) -> dict[str, Any]:
+    config, error = load_config_or_none(config_name)
+    if not config:
+        raise ValueError(error or "Config not found.")
+    channel = find_channel_by_name(config, channel_name)
+    if not channel:
+        raise ValueError(f"Channel '{channel_name}' not found.")
+
+    streams = ensure_channel_streams(channel)
+    target_stream = next((s for s in streams if str(s.get("id")) == stream_id), None)
+    if not target_stream and streams:
+        target_stream = streams[0]
+
+    account_id = channel_account_id(config, channel)
+    account = find_youtube_account(config, account_id)
+    if not account:
+        raise ValueError(f"No YouTube account linked for '{channel_name}'.")
+
+    scoped_config = account_config_view(config, account)
+    access_token, _ = youtube_service.valid_access_token(ROOT, scoped_config)
+
+    effective_stream_key = str((target_stream or {}).get("stream_key") or (target_stream or {}).get("stream_key_env") or "").strip()
+    if not effective_stream_key:
+        effective_stream_key, _ = channel_effective_stream_key(channel)
+
+    broadcast_id = str((target_stream or {}).get("youtube_broadcast_id") or channel.get("youtube_broadcast_id") or "").strip()
+    yt_stream_id = str((target_stream or {}).get("youtube_stream_id") or channel.get("youtube_stream_id") or "").strip()
+
+    print(f"[{channel_name}:{stream_id}] [API TRIGGER GO-LIVE] Triggering go-live for broadcast '{broadcast_id}'...")
+    res = youtube_service.ensure_stream_transition_to_live(
+        access_token,
+        stream_id=yt_stream_id,
+        broadcast_id=broadcast_id,
+        stream_key=effective_stream_key,
+        max_wait_seconds=25.0,
+        poll_interval=2.0,
+    )
+
+    stream_key_id = f"{channel_name}:{stream_id}"
+    with STATE.lock:
+        st_obj = STATE.streams.get(stream_key_id) or (STATE.streams.get(channel_name) if stream_id == "stream_1" else None)
+        if st_obj:
+            st_obj.verification = res
+
+    if res.get("is_live"):
+        app_db.record_event(
+            "youtube_broadcast_live_success",
+            config_name,
+            channel_name,
+            {"stream_id": stream_id, "broadcast_id": res.get("broadcast_id"), "status": res.get("status")},
+        )
+    return {
+        "ok": True,
+        "channel": channel_name,
+        "stream_id": stream_id,
+        "verification": res,
+    }
+
+
 def get_channel_streams_api(config_name: str, channel_name: str, fetch_stats: bool = False) -> dict[str, Any]:
     config, error = load_config_or_none(config_name)
     if not config:
@@ -5972,18 +6074,27 @@ def get_channel_streams_api(config_name: str, channel_name: str, fetch_stats: bo
     streams = ensure_channel_streams(channel)
     results: list[dict[str, Any]] = []
     
-    video_stats: dict[str, dict[str, Any]] = {}
-    broadcast_id = str(channel.get("youtube_broadcast_id") or "").strip()
-    if fetch_stats and broadcast_id:
+    broadcast_ids: list[str] = []
+    ch_broadcast_id = str(channel.get("youtube_broadcast_id") or "").strip()
+    if ch_broadcast_id:
+        broadcast_ids.append(ch_broadcast_id)
+    for s_entry in streams:
+        s_b_id = str(s_entry.get("youtube_broadcast_id") or "").strip()
+        if s_b_id and s_b_id not in broadcast_ids:
+            broadcast_ids.append(s_b_id)
+
+    if fetch_stats and broadcast_ids:
         account = find_reusable_youtube_account_for_channel(config, channel_name)
         if account:
             try:
                 scoped_config = account_config_view(config, account)
                 access_token, _ = youtube_service.valid_access_token(ROOT, scoped_config)
-                video_stats = youtube_service.get_video_stats_batch(access_token, [broadcast_id])
-                if broadcast_id in video_stats and video_stats[broadcast_id]:
-                    STREAM_STATS_CACHE[broadcast_id] = video_stats[broadcast_id]
-                    STREAM_STATS_CACHE[channel_name] = video_stats[broadcast_id]
+                video_stats = youtube_service.get_video_stats_batch(access_token, broadcast_ids)
+                for b_id, stat_val in video_stats.items():
+                    if stat_val:
+                        STREAM_STATS_CACHE[b_id] = stat_val
+                if ch_broadcast_id in video_stats and video_stats[ch_broadcast_id]:
+                    STREAM_STATS_CACHE[channel_name] = video_stats[ch_broadcast_id]
             except Exception:
                 pass
 
@@ -6000,7 +6111,8 @@ def get_channel_streams_api(config_name: str, channel_name: str, fetch_stats: bo
             if candidate and getattr(candidate, "stream_id", "stream_1") == "stream_1":
                 state = candidate
         
-        stat_item = STREAM_STATS_CACHE.get(broadcast_id) or STREAM_STATS_CACHE.get(channel_name) or {}
+        s_broadcast_id = str(s.get("youtube_broadcast_id") or channel.get("youtube_broadcast_id") or "").strip()
+        stat_item = STREAM_STATS_CACHE.get(s_broadcast_id) or STREAM_STATS_CACHE.get(ch_broadcast_id) or STREAM_STATS_CACHE.get(channel_name) or {}
         concurrent_viewers = stat_item.get("concurrent_viewers")
         total_views = stat_item.get("total_views")
         avg_view_duration = stat_item.get("avg_view_duration")
@@ -6020,6 +6132,14 @@ def get_channel_streams_api(config_name: str, channel_name: str, fetch_stats: bo
 
         status_text = "running" if is_running else "recovering" if is_recovering else "stopped"
 
+        verification = getattr(state, "verification", None) if state else None
+        if not verification:
+            verification = {
+                "is_live": is_running,
+                "status": "running" if is_running else "stopped",
+                "message": "Stream active" if is_running else "Stream stopped",
+            }
+
         thumb_path = str(s.get("thumbnail_path") or "").strip()
         thumb_url = str(s.get("thumbnail_url") or "").strip()
         if thumb_path and not thumb_url:
@@ -6035,7 +6155,7 @@ def get_channel_streams_api(config_name: str, channel_name: str, fetch_stats: bo
             "scheduled_start_time": str(s.get("scheduled_start_time") or ""),
             "thumbnail_path": thumb_path,
             "thumbnail_url": thumb_url,
-            "youtube_broadcast_id": str(s.get("youtube_broadcast_id") or channel.get("youtube_broadcast_id") or ""),
+            "youtube_broadcast_id": s_broadcast_id,
             "youtube_studio_url": str(s.get("youtube_studio_url") or channel.get("youtube_studio_url") or ""),
             "stream_key": skey,
             "stream_key_env": key_env,
@@ -6047,6 +6167,7 @@ def get_channel_streams_api(config_name: str, channel_name: str, fetch_stats: bo
             "started_at": started_at,
             "uptime_seconds": uptime_seconds,
             "duration_formatted": format_duration_hhmmss(uptime_seconds) if (is_running or is_recovering) else "Stopped",
+            "verification": verification,
             "concurrent_viewers": concurrent_viewers,
             "total_views": total_views,
             "avg_view_duration": avg_view_duration,
@@ -8262,6 +8383,15 @@ class Handler(BaseHTTPRequestHandler):
                             verifications[st_key] = st_obj.verification
                 last_verif = list(verifications.values())[-1] if verifications else {"is_live": True, "status": "started", "message": "Stream started"}
                 json_response(self, {"ok": True, "started": started, "verification": last_verif, "verifications": verifications})
+                return
+
+            if parsed.path == "/api/stream/go-live-now":
+                channel_name = str(body.get("channel") or "").strip()
+                stream_id = str(body.get("stream_id") or "stream_1").strip()
+                print(f"[API SERVER] REQ POST /api/stream/go-live-now -> channel='{channel_name}', stream_id='{stream_id}', config='{config_name}'")
+                update_request_trace(self, channel_name=channel_name)
+                result = trigger_stream_golive_api(config_name, channel_name, stream_id)
+                json_response(self, result)
                 return
 
             if parsed.path == "/api/stream/schedule":

@@ -11311,9 +11311,28 @@ async function renderWorkspaceStreamsTab(channelName, cachedStreamsData = null) 
         ? apiRequestUrl(`/api/stream-thumbnail?config=${encodeURIComponent(state.config || "config.ready.json")}&channel=${encodeURIComponent(channelName)}&stream_id=${encodeURIComponent(s.id)}`)
         : "";
 
+      const verif = s.verification || {};
+      const ytStatus = String(verif.status || "").toLowerCase();
+      const isYtLive = Boolean(verif.is_live && (ytStatus === "live" || ytStatus === "livestarting"));
+      const isYtIngesting = Boolean(isRunning && (ytStatus === "ingesting" || ytStatus === "testing" || ytStatus === "ready" || ytStatus === "created" || ytStatus === "starting"));
+
+      let ytBadge = "";
+      if (isYtLive) {
+        ytBadge = `<span class="badge live pulse" title="Verified LIVE on YouTube">🔴 YouTube: LIVE</span>`;
+      } else if (isYtIngesting) {
+        ytBadge = `<span class="badge warn pulse" title="Ingesting stream to YouTube & transitioning to Live...">⏳ YouTube: Going Live...</span>`;
+      } else if (s.youtube_broadcast_id) {
+        const studioUrl = s.youtube_studio_url || `https://studio.youtube.com/video/${s.youtube_broadcast_id}/livestreaming`;
+        ytBadge = `<a href="${escapeAttr(studioUrl)}" target="_blank" class="badge" title="Open YouTube Studio for this broadcast" onclick="event.stopPropagation()">📺 Studio Link</a>`;
+      }
+
       const actionBtn = (isRunning || isRecovering)
         ? `<button class="pill danger" id="streamCardBtn_${escapeHtml(s.id)}" type="button" onclick="stopSingleStream('${escapeJs(channelName)}', '${escapeJs(s.id)}')">Stop Stream</button>`
         : `<button class="pill success" id="streamCardBtn_${escapeHtml(s.id)}" type="button" onclick="startSingleStream('${escapeJs(channelName)}', '${escapeJs(s.id)}')">Start Stream</button>`;
+
+      const goLiveBtn = (isRunning && !isYtLive && s.youtube_broadcast_id)
+        ? `<button class="pill primary small pulse" id="goLiveBtn_${escapeHtml(s.id)}" type="button" onclick="triggerGoLiveNow('${escapeJs(channelName)}', '${escapeJs(s.id)}')" title="Force immediate transition to YouTube Live">⚡ Go Live</button>`
+        : '';
 
       const scheduleBtn = `<button class="pill ghost primary" id="streamScheduleBtn_${escapeHtml(s.id)}" type="button" onclick="scheduleSingleStream('${escapeJs(channelName)}', '${escapeJs(s.id)}')">Schedule Stream</button>`;
 
@@ -11337,6 +11356,7 @@ async function renderWorkspaceStreamsTab(channelName, cachedStreamsData = null) 
                 </div>
                 <div class="stream-badges">
                   ${statusBadge}
+                  ${ytBadge}
                   ${durationBadge}
                   ${viewerBadge}
                   ${totalViewsBadge}
@@ -11345,6 +11365,7 @@ async function renderWorkspaceStreamsTab(channelName, cachedStreamsData = null) 
               </div>
             </div>
             <div class="stream-card-actions" onclick="event.stopPropagation()">
+              ${goLiveBtn}
               ${scheduleBtn}
               ${actionBtn}
               <button class="pill ghost icon-only danger" type="button" onclick="deleteStreamFromChannel('${escapeJs(channelName)}', '${escapeJs(s.id)}')" title="Delete Stream">🗑</button>
@@ -11505,6 +11526,38 @@ async function updateStreamPlaylistInline(channelName, streamId, rawText) {
     toast("Failed to update stream playlist: " + err.message, "danger");
   }
 }
+
+async function triggerGoLiveNow(channelName, streamId) {
+  try {
+    toast(`Connecting to YouTube and transitioning '${streamId}' to LIVE...`, "info");
+    const data = await fetchApi("/api/stream/go-live-now", {
+      method: "POST",
+      body: JSON.stringify({
+        config: state.config || "config.ready.json",
+        channel: channelName,
+        stream_id: streamId,
+      }),
+    });
+    if (data && data.ok && data.verification && data.verification.is_live) {
+      toast(`Broadcast is now verified LIVE on YouTube!`, "success");
+    } else if (data && data.ok && data.verification) {
+      toast(data.verification.message || "Go Live request processed.", "info");
+    } else {
+      toast(`Go Live response: ${(data && (data.message || data.error)) || "Failed"}`, "danger");
+    }
+    const streamsListEl = document.getElementById(`channelStreamsList_${channelName}`);
+    if (streamsListEl && !streamsListEl.classList.contains("hidden")) {
+      const cfg = state.config || "config.ready.json";
+      const updated = await fetchApi(`/api/channel/streams?config=${encodeURIComponent(cfg)}&channel=${encodeURIComponent(channelName)}`);
+      if (updated && updated.ok) {
+        renderChannelStreams(channelName, updated.streams || []);
+      }
+    }
+  } catch (err) {
+    toast(`Go Live error: ${err.message}`, "danger");
+  }
+}
+window.triggerGoLiveNow = triggerGoLiveNow;
 
 async function promptRenameStream(channelName, streamId, currentName) {
   const newName = prompt("Enter new stream name:", currentName || "");
