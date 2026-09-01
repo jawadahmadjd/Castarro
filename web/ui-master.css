@@ -6379,3 +6379,7 @@ select option {
   overflow: hidden;
   white-space: nowrap;
 }
+
+.stream-dual-toggle-wrap {
+  margin-top: 8px;
+}

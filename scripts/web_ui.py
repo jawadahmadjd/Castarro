@@ -1670,6 +1670,8 @@ def ensure_channel_streams(channel: dict[str, Any]) -> list[dict[str, Any]]:
                     s["enabled"] = True
                 if "playlist" not in s:
                     s["playlist"] = []
+                if "youtube_dual_stream" not in s or not isinstance(s.get("youtube_dual_stream"), bool):
+                    s["youtube_dual_stream"] = True
         channel["streams"] = filtered_streams
     return channel["streams"]
 
@@ -3182,8 +3184,7 @@ def replace_stale_youtube_broadcast_for_start(
             if matched_stream_id:
                 channel["youtube_stream_id"] = matched_stream_id
             channel["youtube_studio_url"] = b_studio_url
-        save_config(config_name, config)
-        return True
+        return False
 
     # Otherwise, schedule a fresh broadcast for this stream key
     source_broadcast = broadcast
@@ -3202,8 +3203,6 @@ def replace_stale_youtube_broadcast_for_start(
         or "public"
     ).strip().lower()
     if privacy_status not in {"private", "unlisted", "public"}:
-        privacy_status = "public"
-    if privacy_status == "unlisted":
         privacy_status = "public"
 
     description = str(
@@ -6171,6 +6170,7 @@ def get_channel_streams_api(config_name: str, channel_name: str, fetch_stats: bo
             "concurrent_viewers": concurrent_viewers,
             "total_views": total_views,
             "avg_view_duration": avg_view_duration,
+            "youtube_dual_stream": bool(s.get("youtube_dual_stream", True)),
         })
     return {"ok": True, "channel": channel_name, "streams": results, "stats_refreshed": fetch_stats}
 
@@ -6203,6 +6203,7 @@ def add_channel_stream_api(config_name: str, body: dict[str, Any]) -> dict[str, 
         "stream_key": skey,
         "stream_key_env": "",
         "enabled": True,
+        "youtube_dual_stream": True,
     }
     streams.append(new_stream)
     channel["streams"] = streams
@@ -6376,6 +6377,11 @@ def save_channel_streams_api(config_name: str, body: dict[str, Any]) -> dict[str
             if sid in existing_map:
                 if not rs.get("thumbnail_path") and existing_map[sid].get("thumbnail_path"):
                     rs["thumbnail_path"] = existing_map[sid]["thumbnail_path"]
+                if "youtube_dual_stream" not in rs:
+                    rs["youtube_dual_stream"] = bool(existing_map[sid].get("youtube_dual_stream", True))
+            else:
+                if "youtube_dual_stream" not in rs:
+                    rs["youtube_dual_stream"] = True
     
     channel["streams"] = raw_streams
     save_config(config_name, config)

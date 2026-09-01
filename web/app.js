@@ -11336,6 +11336,9 @@ async function renderWorkspaceStreamsTab(channelName, cachedStreamsData = null) 
 
       const scheduleBtn = `<button class="pill ghost primary" id="streamScheduleBtn_${escapeHtml(s.id)}" type="button" onclick="scheduleSingleStream('${escapeJs(channelName)}', '${escapeJs(s.id)}')">Schedule Stream</button>`;
 
+      const isDualOn = s.youtube_dual_stream !== false;
+      const dualBadge = `<span class="badge ${isDualOn ? "live" : "warn"}" title="Dual Stream (Horizontal 16:9 + Vertical Shorts) ${isDualOn ? "Enabled" : "Disabled"}">📱 Shorts Dual: ${isDualOn ? "ON" : "OFF"}</span>`;
+
       return `
         <div class="stream-card ${isRunning ? "active-stream" : ""}" id="streamCard_${escapeHtml(s.id)}">
           <div class="stream-card-header" onclick="toggleStreamCardExpand('${escapeJs(s.id)}')">
@@ -11357,6 +11360,7 @@ async function renderWorkspaceStreamsTab(channelName, cachedStreamsData = null) 
                 <div class="stream-badges">
                   ${statusBadge}
                   ${ytBadge}
+                  ${dualBadge}
                   ${durationBadge}
                   ${viewerBadge}
                   ${totalViewsBadge}
@@ -11472,6 +11476,17 @@ async function renderWorkspaceStreamsTab(channelName, cachedStreamsData = null) 
                   placeholder="Optional broadcast description..."
                 >${escapeHtml(s.description || "")}</textarea>
               </label>
+              <div class="stream-dual-toggle-wrap">
+                <label class="switch stream-dual-switch" title="When enabled, YouTube automatically broadcasts this stream to the vertical Shorts feed along with the standard horizontal feed with zero server CPU load.">
+                  <input
+                    type="checkbox"
+                    id="streamDualSwitch_${escapeHtml(s.id)}"
+                    ${isDualOn ? "checked" : ""}
+                    onchange="updateStreamDetailInline('${escapeJs(channelName)}', '${escapeJs(s.id)}', 'youtube_dual_stream', this.checked)"
+                  />
+                  <span>📱 Dual Stream (YouTube Shorts Auto-Crop) Enabled</span>
+                </label>
+              </div>
             </div>
             <div class="field-group stream-video-field-group">
               <div class="field-label-row">
@@ -11573,7 +11588,11 @@ window.promptRenameStream = promptRenameStream;
 
 async function updateStreamDetailInline(channelName, streamId, field, rawValue) {
   try {
-    const val = field === "scheduled_start_time" ? datetimeLocalToIso(rawValue) : String(rawValue || "").trim();
+    const val = (field === "youtube_dual_stream" || field === "enabled")
+      ? Boolean(rawValue)
+      : field === "scheduled_start_time"
+      ? datetimeLocalToIso(rawValue)
+      : String(rawValue || "").trim();
     syncStreamToStateConfig(channelName, streamId, (s) => { s[field] = val; });
     const cfg = state.config || "config.ready.json";
     const data = await fetchApi(`/api/channel/streams?config=${encodeURIComponent(cfg)}&channel=${encodeURIComponent(channelName)}`);
