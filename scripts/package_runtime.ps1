@@ -2,7 +2,7 @@ param(
     [string]$PythonVersion = "3.13.7",
     [string]$PythonUrl = "",
     [string]$FFmpegUrl = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
-    [string]$ExpectedFFmpegVersion = "8.1.2",
+    [string]$ExpectedFFmpegVersion = "",
     [string]$ExpectedFFmpegSha256 = "",
     [switch]$SkipDownload
 )
@@ -46,16 +46,17 @@ function Clear-Directory {
 function Assert-FFmpegVersion {
     param([Parameter(Mandatory = $true)][string]$ExePath)
 
-    if (-not $ExpectedFFmpegVersion) {
-        return
-    }
     if (-not (Test-Path -LiteralPath $ExePath)) {
         throw "FFmpeg executable not found: $ExePath"
     }
     $VersionLine = (& $ExePath -hide_banner -version | Select-Object -First 1)
-    if ($VersionLine -notmatch [regex]::Escape($ExpectedFFmpegVersion)) {
+    if ($ExpectedFFmpegVersion -and ($VersionLine -notmatch [regex]::Escape($ExpectedFFmpegVersion))) {
         throw "Unexpected FFmpeg version. Expected $ExpectedFFmpegVersion, got: $VersionLine"
     }
+    if ($VersionLine -notmatch 'ffmpeg version') {
+        throw "Invalid FFmpeg binary output: $VersionLine"
+    }
+    Write-Host "FFmpeg verified: $VersionLine"
 }
 
 function Assert-FileSha256 {
