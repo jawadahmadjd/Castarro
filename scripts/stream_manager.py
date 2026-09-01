@@ -227,6 +227,7 @@ def write_concat_playlist(
 
     lines: list[str] = []
     missing: list[Path] = []
+    valid_items: list[Path] = []
     for item in playlist:
         text = str(item)
         if source_url(text):
@@ -236,11 +237,22 @@ def write_concat_playlist(
         media_path = resolve_path(config_dir, text)
         if not media_path.exists():
             missing.append(media_path)
-        lines.append(concat_escape_source(media_path))
+        else:
+            valid_items.append(media_path)
+            lines.append(concat_escape_source(media_path))
 
     if missing:
-        formatted = "\n".join(f"  - {path}" for path in missing)
-        raise SystemExit(f"Missing media files for '{channel.get('name')}':\n{formatted}")
+        # If some items are missing, attempt fallback to available discovered channel files or valid playlist files
+        fallback_files = valid_items or [resolve_path(config_dir, str(p)) for p in (channel.get("playlist") or []) if resolve_path(config_dir, str(p)).exists()]
+        if not fallback_files:
+            discovered = discover_go_live_files(config_dir, defaults, channel)
+            fallback_files = [path for path in discovered if path.exists()]
+
+        if fallback_files:
+            lines = [concat_escape_source(p) for p in fallback_files]
+        else:
+            formatted = "\n".join(f"  - {path}" for path in missing)
+            raise SystemExit(f"Missing media files for '{channel.get('name')}':\n{formatted}")
 
     playlist_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return playlist_path, network_inputs
@@ -336,11 +348,16 @@ def write_log_line(log_handle: Any, line: str) -> None:
     text = str(line)
     if not text.endswith("\n"):
         text += "\n"
+    if getattr(log_handle, "closed", False):
+        return
     try:
-        log_handle.write(text)
-    except TypeError:
-        log_handle.write(text.encode("utf-8", errors="replace"))
-    log_handle.flush()
+        try:
+            log_handle.write(text)
+        except TypeError:
+            log_handle.write(text.encode("utf-8", errors="replace"))
+        log_handle.flush()
+    except (ValueError, OSError):
+        pass
 
 
 def write_timestamped_log_line(log_handle: Any, message: str) -> None:
@@ -476,9 +493,12 @@ def close_stream_log(stream: RunningStream) -> None:
     if stream.monitor_thread and stream.monitor_thread.is_alive():
         stream.monitor_thread.join(timeout=3)
     if stream.log_thread and stream.log_thread.is_alive():
-        stream.log_thread.join(timeout=1)
+        stream.log_thread.join(timeout=2)
     if not getattr(stream.log_handle, "closed", False):
-        stream.log_handle.close()
+        try:
+            stream.log_handle.close()
+        except Exception:
+            pass
 
 
 def infer_inline_key_from_env_field(value: str | None) -> str | None:
@@ -1149,7 +1169,7 @@ def stop_stream(stream: RunningStream) -> None:
             if os.name == "nt":
                 stream.process.send_signal(signal.CTRL_BREAK_EVENT)
                 try:
-                    stream.process.wait(timeout=8)
+                    stream.process.wait(timeout=1.5)
                 except subprocess.TimeoutExpired:
                     stream.process.terminate()
             else:
@@ -1158,7 +1178,7 @@ def stop_stream(stream: RunningStream) -> None:
             stream.process.terminate()
 
         try:
-            stream.process.wait(timeout=8)
+            stream.process.wait(timeout=1.5)
         except subprocess.TimeoutExpired:
             stream.process.kill()
 

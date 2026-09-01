@@ -5,9 +5,10 @@ from __future__ import annotations
 import json
 import sqlite3
 import hashlib
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Generator
 
 import runtime_paths
 
@@ -29,9 +30,22 @@ def connect() -> sqlite3.Connection:
     return connection
 
 
+@contextmanager
+def db_session() -> Generator[sqlite3.Connection, None, None]:
+    db = connect()
+    try:
+        yield db
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
 def init_db() -> None:
     runtime_paths.ensure_data_root()
-    with connect() as db:
+    with db_session() as db:
         db.executescript(
             """
             CREATE TABLE IF NOT EXISTS schema_meta (
@@ -216,6 +230,18 @@ def init_db() -> None:
             db.execute("ALTER TABLE channels ADD COLUMN cloud_playlist_json TEXT")
         if "youtube_dual_stream" not in channel_columns:
             db.execute("ALTER TABLE channels ADD COLUMN youtube_dual_stream INTEGER NOT NULL DEFAULT 1")
+        db.execute(
+            """
+            DELETE FROM app_events
+            WHERE event_type = 'alert_raised'
+              AND id NOT IN (
+                SELECT id FROM app_events
+                WHERE event_type = 'alert_raised'
+                ORDER BY id DESC
+                LIMIT 50
+              )
+            """
+        )
 
 
 def relative_or_absolute(path: Path) -> str:
@@ -240,6 +266,25 @@ def file_info(path_text: str) -> tuple[int | None, str | None]:
     return stat.st_size, datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(timespec="seconds")
 
 
+def prune_alert_events(max_keep: int = 50) -> int:
+    init_db()
+    with db_session() as db:
+        cursor = db.execute(
+            """
+            DELETE FROM app_events
+            WHERE event_type = 'alert_raised'
+              AND id NOT IN (
+                SELECT id FROM app_events
+                WHERE event_type = 'alert_raised'
+                ORDER BY id DESC
+                LIMIT ?
+              )
+            """,
+            (max(1, int(max_keep)),),
+        )
+        return int(cursor.rowcount or 0)
+
+
 def record_event(
     event_type: str,
     config_name: str | None = None,
@@ -247,7 +292,7 @@ def record_event(
     details: dict[str, Any] | None = None,
 ) -> None:
     init_db()
-    with connect() as db:
+    with db_session() as db:
         db.execute(
             """
             INSERT INTO app_events(event_type, config_name, channel_name, details_json, created_at)
@@ -255,6 +300,19 @@ def record_event(
             """,
             (event_type, config_name, channel_name, json.dumps(details or {}, sort_keys=True), now()),
         )
+        if event_type == "alert_raised":
+            db.execute(
+                """
+                DELETE FROM app_events
+                WHERE event_type = 'alert_raised'
+                  AND id NOT IN (
+                    SELECT id FROM app_events
+                    WHERE event_type = 'alert_raised'
+                    ORDER BY id DESC
+                    LIMIT 50
+                  )
+                """
+            )
 
 
 def insert_settings_snapshot(db: sqlite3.Connection, config_name: str, config: dict[str, Any], reason: str) -> None:
@@ -269,7 +327,7 @@ def insert_settings_snapshot(db: sqlite3.Connection, config_name: str, config: d
 
 def snapshot_settings(config_name: str, config: dict[str, Any], reason: str) -> None:
     init_db()
-    with connect() as db:
+    with db_session() as db:
         insert_settings_snapshot(db, config_name, config, reason)
 
 
@@ -486,7 +544,7 @@ def upsert_cloud_video(
 
 def sync_config(config_name: str, config: dict[str, Any], reason: str | None = None) -> None:
     init_db()
-    with connect() as db:
+    with db_session() as db:
         if reason:
             insert_settings_snapshot(db, config_name, config, reason)
 
@@ -585,7 +643,7 @@ def record_task_start(
     command: str,
 ) -> int:
     init_db()
-    with connect() as db:
+    with db_session() as db:
         cursor = db.execute(
             """
             INSERT INTO tasks(task_uid, action, config_name, channel_name, command, status, started_at)
@@ -598,7 +656,7 @@ def record_task_start(
 
 def record_task_finish(task_uid: str, returncode: int | None, output_tail: str) -> None:
     init_db()
-    with connect() as db:
+    with db_session() as db:
         db.execute(
             """
             UPDATE tasks
@@ -620,7 +678,7 @@ def record_stream_start(
     live_chat_id: str | None = None,
 ) -> int:
     init_db()
-    with connect() as db:
+    with db_session() as db:
         cursor = db.execute(
             """
             INSERT INTO stream_sessions(
@@ -745,7 +803,7 @@ def record_live_chat_messages(
     if not broadcast_id or not chat_id:
         return
     timestamp = now()
-    with connect() as db:
+    with db_session() as db:
         session_id = find_live_chat_stream_session_id(db, config_name, channel_name, broadcast_id)
         for message in messages:
             if not isinstance(message, dict):
@@ -817,7 +875,7 @@ def record_stream_stop(
 ) -> None:
     init_db()
     safe_bytes = max(0, int(transferred_bytes or 0))
-    with connect() as db:
+    with db_session() as db:
         db.execute(
             """
             UPDATE stream_sessions
@@ -842,7 +900,7 @@ def stream_transfer_today_bytes(config_name: str | None = None) -> int:
     if config_name:
         where.append("config_name = ?")
         params.append(config_name)
-    with connect() as db:
+    with db_session() as db:
         row = db.execute(
             f"""
             SELECT COALESCE(SUM(transferred_bytes), 0) AS total
@@ -863,7 +921,7 @@ def stream_transfer_month_bytes(config_name: str | None = None) -> int:
     if config_name:
         where.append("config_name = ?")
         params.append(config_name)
-    with connect() as db:
+    with db_session() as db:
         row = db.execute(
             f"""
             SELECT COALESCE(SUM(transferred_bytes), 0) AS total
@@ -918,7 +976,7 @@ def stream_transfer_range_details(
 
     where_clause = f"WHERE {' AND '.join(where)}" if where else ""
 
-    with connect() as db:
+    with db_session() as db:
         summary_row = db.execute(
             f"""
             SELECT COALESCE(SUM(transferred_bytes), 0) AS total_bytes,
@@ -1073,7 +1131,7 @@ def stream_sessions(
     limit_clause = "LIMIT ?" if safe_limit is not None else ""
     if safe_limit is not None:
         params.append(safe_limit)
-    with connect() as db:
+    with db_session() as db:
         rows = db.execute(
             f"""
             SELECT
@@ -1106,7 +1164,7 @@ def stream_sessions(
                 "stopped_at": str(row["stopped_at"] or ""),
             }
         )
-    with connect() as db:
+    with db_session() as db:
         for session in sessions:
             session.update(live_chat_messages_for_session(db, session))
     return sessions
@@ -1134,7 +1192,7 @@ def stats() -> dict[str, Any]:
         "logs",
         "app_events",
     ]
-    with connect() as db:
+    with db_session() as db:
         return {
             "path": str(DB_PATH),
             **{table: db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in tables},
@@ -1162,7 +1220,7 @@ def recent_app_events(
         params.append(event_type)
     where_clause = f"WHERE {' AND '.join(where)}" if where else ""
     params.append(safe_limit)
-    with connect() as db:
+    with db_session() as db:
         rows = db.execute(
             f"""
             SELECT id, event_type, config_name, channel_name, details_json, created_at
@@ -1218,7 +1276,7 @@ def clear_app_events(
         where.append("event_type = ?")
         params.append(event_type)
     where_clause = f" WHERE {' AND '.join(where)}" if where else ""
-    with connect() as db:
+    with db_session() as db:
         cursor = db.execute(f"DELETE FROM app_events{where_clause}", params)
     return int(cursor.rowcount or 0)
 

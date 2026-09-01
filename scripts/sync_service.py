@@ -120,8 +120,10 @@ def create_account(username: Any, password_value: Any, display_name: Any = None)
 
 
 def verify_account(username: Any, password_value: Any) -> dict[str, Any]:
-    if not str(username or "").strip() and not str(password_value or ""):
-        return ensure_local_account()
+    username_str = str(username or "").strip()
+    password_str = str(password_value or "")
+    if not username_str or not password_str:
+        raise ValueError("Username and password are required for Castarro login.")
     username = normalize_username(username)
     password = validate_password(password_value)
     store = _load_store()

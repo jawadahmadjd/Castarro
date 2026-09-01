@@ -6321,6 +6321,61 @@ select option {
   border-bottom: none;
 }
 
+.stream-thumb-mini {
+  width: 56px;
+  height: 32px;
+  object-fit: cover;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+}
 
+.stream-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
 
+.stream-card-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
 
+.stream-thumb-preview-card {
+  margin-top: 8px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--surface-2);
+  padding: 8px 10px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-subtle);
+}
+
+.stream-thumb-preview-img {
+  width: 72px;
+  height: 40px;
+  object-fit: cover;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+}
+
+.stream-thumb-preview-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.stream-thumb-status {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--tone-success);
+}
+
+.stream-thumb-path {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-overflow: ellipsis;
+  overflow: hidden;
+  white-space: nowrap;
+}

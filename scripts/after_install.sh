@@ -52,10 +52,40 @@ ensure_package python3 python3
 # ffmpeg — media encoding
 ensure_package ffmpeg  ffmpeg
 
-# --- 3. Polkit policy for headless / no-desktop-agent environments ---------
-# Without a polkit authentication agent (e.g. on a server or minimal desktop),
-# pkexec refuses to run. A polkit .policy file lets pkexec authorise the
-# specific Castarro update action without a GUI agent.
+# --- 3. Polkit policy for headless / RDP / no-desktop-agent environments ----
+# Without a polkit authentication agent (e.g. on RDP, VNC, server or minimal desktop),
+# pkexec refuses to run and exits with code 127.
+# We deploy both PKLA (older/standard Debian/Ubuntu) and JS rules (newer Polkit)
+# so electron-updater can execute non-interactively across all Linux environments.
+
+# 3a. Polkit Local Authority (.pkla)
+PKLA_DIR="/etc/polkit-1/localauthority/50-local.d"
+if [ -d "$(dirname "$PKLA_DIR")" ]; then
+  mkdir -p "$PKLA_DIR" 2>/dev/null || true
+  cat > "$PKLA_DIR/50-castarro-autoupdate.pkla" <<'PKLA_POLICY'
+[Castarro Auto Updater Policy]
+Identity=unix-group:sudo;unix-group:wheel;unix-user:*
+Action=org.freedesktop.policykit.exec
+ResultAny=yes
+ResultInactive=yes
+ResultActive=yes
+PKLA_POLICY
+  chmod 644 "$PKLA_DIR/50-castarro-autoupdate.pkla" 2>/dev/null || true
+fi
+
+# 3b. Polkit JavaScript rules (.rules)
+RULES_DIR="/etc/polkit-1/rules.d"
+if [ -d "$(dirname "$RULES_DIR")" ]; then
+  mkdir -p "$RULES_DIR" 2>/dev/null || true
+  cat > "$RULES_DIR/50-castarro-autoupdate.rules" <<'JS_POLICY'
+polkit.addRule(function(action, subject) {
+    if (action.id == "org.freedesktop.policykit.exec" && (subject.isInGroup("sudo") || subject.isInGroup("wheel"))) {
+        return polkit.Result.YES;
+    }
+});
+JS_POLICY
+  chmod 644 "$RULES_DIR/50-castarro-autoupdate.rules" 2>/dev/null || true
+fi
 
 POLKIT_DIR="/usr/share/polkit-1/actions"
 POLKIT_FILE="$POLKIT_DIR/com.jawadahmad.castarro.update.policy"
@@ -70,9 +100,9 @@ if [ -d "$POLKIT_DIR" ] && [ ! -f "$POLKIT_FILE" ]; then
     <description>Install Castarro update</description>
     <message>Authentication is required to install a Castarro update</message>
     <defaults>
-      <allow_any>auth_admin</allow_any>
-      <allow_inactive>auth_admin</allow_inactive>
-      <allow_active>auth_admin_keep</allow_active>
+      <allow_any>yes</allow_any>
+      <allow_inactive>yes</allow_inactive>
+      <allow_active>yes</allow_active>
     </defaults>
   </action>
 </policyconfig>

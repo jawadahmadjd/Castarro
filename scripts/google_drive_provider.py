@@ -87,7 +87,15 @@ def load_tokens(root: Path, provider: dict[str, Any]) -> dict[str, Any] | None:
     if not path.exists():
         return None
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        raw_text = path.read_text(encoding="utf-8")
+        data = json.loads(raw_text)
+        if isinstance(data, dict) and "encrypted_payload" in data:
+            decrypted_bytes = _decrypt_str(str(data["encrypted_payload"]))
+            return json.loads(decrypted_bytes.decode("utf-8"))
+        if isinstance(data, dict) and ("access_token" in data or "refresh_token" in data):
+            save_tokens(root, provider, data)
+            return data
+        return data
     except Exception as exc:
         raise ValueError(f"Could not read Google Drive token file: {exc}") from exc
 
@@ -100,7 +108,24 @@ def save_tokens(root: Path, provider: dict[str, Any], tokens: dict[str, Any]) ->
     expires_in = int(float(prepared.get("expires_in") or 0))
     if expires_in > 0:
         prepared["expires_at"] = prepared["obtained_at"] + expires_in
-    path.write_text(json.dumps(prepared, indent=2) + "\n", encoding="utf-8")
+
+    token_bytes = json.dumps(prepared, indent=2).encode("utf-8")
+    encrypted = _encrypt_bytes(token_bytes)
+    wrapper = {
+        "encrypted_payload": encrypted,
+        "updated_at": now,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_suffix(f".tmp.{os.getpid()}_{secrets.token_hex(4)}")
+    try:
+        temp_path.write_text(json.dumps(wrapper, indent=2) + "\n", encoding="utf-8")
+        temp_path.replace(path)
+    finally:
+        if temp_path.exists():
+            try:
+                temp_path.unlink()
+            except Exception:
+                pass
     return prepared
 
 

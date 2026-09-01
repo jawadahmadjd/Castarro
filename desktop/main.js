@@ -1146,7 +1146,7 @@ function createMainWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
-      webSecurity: !app.isPackaged,
+      webSecurity: true,
       preload: path.join(appRoot(), "desktop", "preload.js")
     }
   });
@@ -1184,14 +1184,22 @@ function createMainWindow() {
   });
 }
 
+function safeOpenFolder(targetPath) {
+  if (!targetPath) return;
+  const resolved = path.resolve(targetPath);
+  if (fs.existsSync(resolved)) {
+    shell.openPath(resolved);
+  }
+}
+
 function createMenu() {
   const template = [
     {
       label: "App",
       submenu: [
         { label: "Reload UI", click: () => backendUrl && mainWindow && loadApplicationUi().catch((error) => showError(error)) },
-        { label: "Open Data Folder", click: () => shell.openPath(dataRoot()) },
-        { label: "Open Logs Folder", click: () => shell.openPath(logRoot()) },
+        { label: "Open Data Folder", click: () => safeOpenFolder(dataRoot()) },
+        { label: "Open Logs Folder", click: () => safeOpenFolder(logRoot()) },
         { type: "separator" },
         { label: "Close UI (Keep Stream Running)", click: () => requestQuit("menu", "ui-only").catch((error) => diagnosticLog("menu close ui failed", error)) },
         { label: "Stop Streams and Exit", click: () => requestQuit("menu", "stop-streams-and-exit").catch((error) => diagnosticLog("menu full stop failed", error)) }
@@ -1254,8 +1262,8 @@ function buildTrayMenu(streamCount) {
       mainWindow.focus();
     } },
     { label: trayStatusMenuLabel(streamCount), enabled: false },
-    { label: "Open Data Folder", click: () => shell.openPath(dataRoot()) },
-    { label: "Open Logs Folder", click: () => shell.openPath(logRoot()) },
+    { label: "Open Data Folder", click: () => safeOpenFolder(dataRoot()) },
+    { label: "Open Logs Folder", click: () => safeOpenFolder(logRoot()) },
     { type: "separator" },
     { label: "Close UI (Keep Stream Running)", click: () => requestQuit("tray", "ui-only").catch((error) => diagnosticLog("tray close ui failed", error)) },
     { label: "Stop Streams and Exit", click: () => requestQuit("tray", "stop-streams-and-exit").catch((error) => diagnosticLog("tray full stop failed", error)) }

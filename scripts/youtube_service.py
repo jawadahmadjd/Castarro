@@ -14,6 +14,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
+from datetime import datetime, timezone, timedelta
 from typing import Any
 
 
@@ -95,7 +96,7 @@ def default_settings(redirect_uri: str | None = None) -> dict[str, Any]:
         "tokens_file": ".runtime/youtube_tokens.json",
         "scopes": list(YOUTUBE_DEFAULT_SCOPES),
         "default_privacy_status": "public",
-        "default_auto_start": False,
+        "default_auto_start": True,
         "default_auto_stop": False,
     }
 
@@ -157,7 +158,7 @@ def merge_settings(config: dict[str, Any], redirect_uri: str | None = None) -> d
     oauth_client_type = str(merged.get("oauth_client_type") or "desktop").strip().lower()
     merged["oauth_client_type"] = "web" if oauth_client_type == "web" else "desktop"
     merged["use_pkce"] = bool(merged.get("use_pkce", True))
-    merged["default_auto_start"] = bool(merged.get("default_auto_start", False))
+    merged["default_auto_start"] = bool(merged.get("default_auto_start", True))
     merged["default_auto_stop"] = bool(merged.get("default_auto_stop", False))
     return merged
 
@@ -310,9 +311,17 @@ def save_tokens(config_dir: Path, config: dict[str, Any], tokens: dict[str, Any]
     now = int(time.time())
     prepared["obtained_at"] = int(prepared.get("obtained_at") or now)
     expires_in = int(float(prepared.get("expires_in") or 0))
-    if expires_in > 0:
-        prepared["expires_at"] = prepared["obtained_at"] + expires_in
-    path.write_text(json.dumps(prepared, indent=2) + "\n", encoding="utf-8")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_suffix(f".tmp.{os.getpid()}_{secrets.token_hex(4)}")
+    try:
+        temp_path.write_text(json.dumps(prepared, indent=2) + "\n", encoding="utf-8")
+        temp_path.replace(path)
+    finally:
+        if temp_path.exists():
+            try:
+                temp_path.unlink()
+            except Exception:
+                pass
     return prepared
 
 
@@ -919,6 +928,22 @@ def list_mine_live_streams(access_token: str, max_pages: int = 5) -> list[dict[s
     return streams
 
 
+def ensure_future_iso_time(iso_str: str, min_lead_seconds: int = 60) -> str:
+    now_utc = datetime.now(timezone.utc)
+    fallback_utc = now_utc + timedelta(seconds=min_lead_seconds)
+    if not iso_str or not isinstance(iso_str, str):
+        return fallback_utc.isoformat(timespec="seconds").replace("+00:00", "Z")
+    try:
+        dt = datetime.fromisoformat(iso_str.strip().replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        if dt <= now_utc + timedelta(seconds=30):
+            return fallback_utc.isoformat(timespec="seconds").replace("+00:00", "Z")
+        return dt.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    except Exception:
+        return fallback_utc.isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
 def schedule_broadcast(
     access_token: str,
     *,
@@ -931,6 +956,17 @@ def schedule_broadcast(
     auto_stop: bool,
     stream_key: str | None = None,
 ) -> dict[str, Any]:
+    scheduled_start_time = ensure_future_iso_time(scheduled_start_time, min_lead_seconds=60)
+    try:
+        st_dt = datetime.fromisoformat(scheduled_start_time.replace("Z", "+00:00"))
+        et_dt = datetime.fromisoformat(scheduled_end_time.replace("Z", "+00:00")) if scheduled_end_time else None
+        if not et_dt or et_dt <= st_dt:
+            scheduled_end_time = (st_dt + timedelta(hours=12)).isoformat(timespec="seconds").replace("+00:00", "Z")
+    except Exception:
+        st_dt = datetime.now(timezone.utc) + timedelta(minutes=1)
+        scheduled_start_time = st_dt.isoformat(timespec="seconds").replace("+00:00", "Z")
+        scheduled_end_time = (st_dt + timedelta(hours=12)).isoformat(timespec="seconds").replace("+00:00", "Z")
+
     broadcast = youtube_post(
         access_token,
         "https://www.googleapis.com/youtube/v3/liveBroadcasts?part=id,snippet,status,contentDetails",
@@ -1235,3 +1271,95 @@ def get_video_stats_batch(access_token: str, video_ids: list[str]) -> dict[str, 
 def get_concurrent_viewers_batch(access_token: str, video_ids: list[str]) -> dict[str, int]:
     stats = get_video_stats_batch(access_token, video_ids)
     return {vid: data.get("concurrent_viewers", 0) for vid, data in stats.items()}
+
+
+def transition_broadcast_status(access_token: str, broadcast_id: str, status: str) -> dict[str, Any]:
+    broadcast_id = str(broadcast_id or "").strip()
+    status = str(status or "").strip()
+    if not broadcast_id or not status:
+        return {}
+    url = (
+        "https://www.googleapis.com/youtube/v3/liveBroadcasts/transition"
+        f"?broadcastStatus={urllib.parse.quote(status)}"
+        f"&id={urllib.parse.quote(broadcast_id)}"
+        "&part=id,status"
+    )
+    return youtube_post(access_token, url, body={})
+
+
+def verify_youtube_broadcast_live(
+    access_token: str,
+    broadcast_id: str,
+    *,
+    poll_attempts: int = 4,
+    delay_between_attempts: float = 2.0,
+) -> dict[str, Any]:
+    """
+    Verifies with YouTube API whether the broadcast has entered a live / testing state.
+    If state is still 'ready' or 'created', attempts to trigger transition to 'live'.
+    Returns a dict with 'is_live': bool, 'status': str, and 'message': str.
+    """
+    broadcast_id = str(broadcast_id or "").strip()
+    if not broadcast_id or not access_token:
+        return {"is_live": False, "status": "unknown", "message": "No broadcast ID or access token provided."}
+
+    valid_live_statuses = {"live", "testing", "livestarting", "teststarting"}
+
+    for attempt in range(1, poll_attempts + 1):
+        try:
+            b_info = broadcast_chat_details_by_id(access_token, broadcast_id)
+            if b_info:
+                lifecycle = str(b_info.get("life_cycle_status") or "").strip().lower()
+                print(f"[YOUTUBE VERIFY] Attempt {attempt}/{poll_attempts} for broadcast '{broadcast_id}': status='{lifecycle}'")
+                if lifecycle in valid_live_statuses:
+                    return {
+                        "is_live": True,
+                        "status": lifecycle,
+                        "message": f"Verified live state '{lifecycle}' on YouTube.",
+                    }
+
+                if lifecycle in {"ready", "created"} and attempt >= 2:
+                    try:
+                        print(f"[YOUTUBE VERIFY] Attempting manual transition to 'live' for broadcast '{broadcast_id}'...")
+                        t_res = transition_broadcast_status(access_token, broadcast_id, "live")
+                        t_status = str(t_res.get("status", {}).get("lifeCycleStatus") or "").strip().lower()
+                        if t_status in valid_live_statuses:
+                            return {
+                                "is_live": True,
+                                "status": t_status,
+                                "message": f"Successfully transitioned broadcast '{broadcast_id}' to '{t_status}'.",
+                            }
+                    except Exception as t_err:
+                        print(f"[YOUTUBE VERIFY] Transition to live returned: {t_err}")
+
+        except Exception as exc:
+            print(f"[YOUTUBE VERIFY] Query attempt {attempt} failed: {exc}")
+
+        if attempt < poll_attempts:
+            time.sleep(delay_between_attempts)
+
+    # Final check
+    try:
+        b_info = broadcast_chat_details_by_id(access_token, broadcast_id)
+        if b_info:
+            lifecycle = str(b_info.get("life_cycle_status") or "").strip().lower()
+            if lifecycle in valid_live_statuses:
+                return {
+                    "is_live": True,
+                    "status": lifecycle,
+                    "message": f"Verified live state '{lifecycle}' on YouTube.",
+                }
+            return {
+                "is_live": False,
+                "status": lifecycle,
+                "message": f"YouTube broadcast '{broadcast_id}' status is '{lifecycle}'. (Expected live/testing)",
+            }
+    except Exception:
+        pass
+
+    return {
+        "is_live": False,
+        "status": "unverified",
+        "message": f"Could not verify live status for broadcast '{broadcast_id}'.",
+    }
+

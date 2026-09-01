@@ -120,6 +120,7 @@ const state = {
   activityRenderedItems: [],
   activityExportedSignature: "",
   deliveredAlertIds: [],
+  deliveredAlertsInitialized: false,
   settingsLiveHistory: {
     sessions: [],
     filter: "last_28",
@@ -1207,7 +1208,7 @@ function workspaceRecentAlerts(payload = state.status) {
   return [...(state.localNotifications || []), ...backendAlerts]
     .map(normalizeWorkspaceAlert)
     .sort((a, b) => new Date(b?.created_at || 0).getTime() - new Date(a?.created_at || 0).getTime())
-    .slice(0, 20);
+    .slice(0, 50);
 }
 
 function normalizeWorkspaceAlert(item = {}) {
@@ -1688,10 +1689,13 @@ async function refresh() {
   const hadStatus = Boolean(state.status);
   state.status = visiblePayload;
   state.storageStatus = visiblePayload.storage || state.storageStatus;
-  if (hadStatus) {
+  const recentAlerts = Array.isArray(visiblePayload?.alerts?.recent) ? visiblePayload.alerts.recent : [];
+  const recentAlertIds = recentAlerts.map((item) => Number(item?.id || 0)).filter((n) => Number.isFinite(n) && n > 0);
+  if (!state.deliveredAlertsInitialized) {
+    state.deliveredAlertsInitialized = true;
+    rememberDeliveredAlertIds(recentAlertIds);
+  } else if (hadStatus) {
     deliverDesktopAlerts(visiblePayload);
-  } else {
-    rememberDeliveredAlertIds((visiblePayload?.alerts?.recent || []).map((item) => Number(item?.id || 0)));
   }
 
   const previousConfig = state.config;
@@ -9290,6 +9294,7 @@ function collectSettingsData() {
   const existingChannels = Array.isArray(config.channels) ? config.channels : [];
   const nextChannels = existingChannels.map((existingChannel) => ({
     ...existingChannel,
+    streams: Array.isArray(existingChannel.streams) ? structuredClone(existingChannel.streams) : [],
     live_profile: {
       ...defaultLiveProfile(),
       ...(existingChannel.live_profile || {}),
@@ -9307,7 +9312,10 @@ function collectSettingsData() {
     const cardChannelName = String(card.dataset.channelName || "").trim();
     const existingChannelName = String(existingChannel?.name || "").trim();
     if (!existingChannelName || (cardChannelName && cardChannelName !== existingChannelName)) return;
-    const channel = { ...existingChannel };
+    const channel = {
+      ...existingChannel,
+      streams: Array.isArray(existingChannel.streams) ? structuredClone(existingChannel.streams) : [],
+    };
     card.querySelectorAll("[data-channel-field]").forEach((input) => {
       const field = input.dataset.channelField;
       if (input.type === "checkbox") {
@@ -9516,6 +9524,10 @@ async function autosaveSettings() {
     return;
   }
   const data = collectSettingsData();
+  if (state.status?.config_data?.youtube?.accounts && Array.isArray(state.status.config_data.youtube.accounts)) {
+    data.youtube = data.youtube || {};
+    data.youtube.accounts = state.status.config_data.youtube.accounts;
+  }
   const signature = JSON.stringify(data);
   if (signature === state.settingsAutosaveLastSignature) return;
 
@@ -9808,7 +9820,7 @@ async function startStream(channel = null) {
     toast(`Wait for video import to finish for ${busyChannel}.`);
     return;
   }
-  toast(channel ? `Starting streams for ${channel}...` : `Starting all streams...`, "info");
+  toast(channel ? `Scheduling & initializing stream for ${channel} (verifying with YouTube)...` : `Starting all streams (verifying with YouTube)...`, "info");
   try {
     await flushSettingsAutosave();
     const payload = await api("/api/stream/start", {
@@ -9817,7 +9829,12 @@ async function startStream(channel = null) {
       action: channel ? "stream.start.channel" : "stream.start.all",
     });
     if (payload?.started?.length) {
-      toast(`Started ${payload.started.length} stream(s) successfully!`, "success");
+      const verif = payload.verification;
+      if (verif && verif.is_live === false) {
+        toast(`Stream process launched (${payload.started.length} stream), but YouTube status check note: ${verif.message}`, "warning");
+      } else {
+        toast(`Started ${payload.started.length} stream(s) successfully & verified LIVE on YouTube!`, "success");
+      }
     } else {
       toast("Stream start request sent.", "info");
     }
@@ -10302,18 +10319,38 @@ function alertAllowedByNotificationMode(mode, alert) {
   return true;
 }
 
+function readDeliveredAlertIds() {
+  try {
+    const raw = localStorage.getItem("castarro_delivered_alert_ids");
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed.map((id) => Number(id)).filter((n) => Number.isFinite(n) && n > 0) : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeDeliveredAlertIds(ids) {
+  try {
+    localStorage.setItem("castarro_delivered_alert_ids", JSON.stringify(ids));
+  } catch {}
+}
+
 function rememberDeliveredAlertIds(nextIds) {
-  state.deliveredAlertIds = Array.from(new Set([...(state.deliveredAlertIds || []), ...nextIds])).slice(-40);
+  const current = (state.deliveredAlertIds && state.deliveredAlertIds.length) ? state.deliveredAlertIds : readDeliveredAlertIds();
+  const cleaned = (nextIds || []).map((id) => Number(id)).filter((n) => Number.isFinite(n) && n > 0);
+  state.deliveredAlertIds = Array.from(new Set([...current, ...cleaned])).slice(-500);
+  writeDeliveredAlertIds(state.deliveredAlertIds);
 }
 
 function deliverDesktopAlerts(payload = state.status) {
   if (state.transferBusy) return;
+  if (!state.deliveredAlertsInitialized) return;
   const alerts = payload?.alerts || {};
   const recent = Array.isArray(alerts.recent) ? alerts.recent : [];
   const enabled = alerts.desktop_notifications_enabled !== false;
   if (!enabled || !recent.length) return;
   const notificationMode = normalizeNotificationMode(alerts.notification_mode);
-  const seen = new Set(state.deliveredAlertIds || []);
+  const seen = new Set([...(state.deliveredAlertIds || []), ...readDeliveredAlertIds()]);
   const fresh = recent
     .filter((item) => item?.desktop_enabled !== false && alertAllowedByNotificationMode(notificationMode, item) && !seen.has(Number(item?.id || 0)))
     .sort((a, b) => Number(a?.id || 0) - Number(b?.id || 0));
@@ -10741,7 +10778,7 @@ function toast(message) {
       local: true,
     },
     ...(state.localNotifications || []),
-  ].slice(0, 20);
+  ].slice(0, 50);
   rerenderWorkspaceHeader();
 }
 
@@ -11267,6 +11304,13 @@ async function renderWorkspaceStreamsTab(channelName, cachedStreamsData = null) 
       const keyVal = s.stream_key || s.stream_key_env || "";
       const streamPlaylist = Array.isArray(s.playlist) ? s.playlist.join(", ") : "";
 
+      const hasThumb = Boolean(s.thumbnail_path || s.thumbnail_url);
+      const thumbSrc = s.thumbnail_url
+        ? apiRequestUrl(s.thumbnail_url)
+        : s.thumbnail_path
+        ? apiRequestUrl(`/api/stream-thumbnail?config=${encodeURIComponent(state.config || "config.ready.json")}&channel=${encodeURIComponent(channelName)}&stream_id=${encodeURIComponent(s.id)}`)
+        : "";
+
       const actionBtn = (isRunning || isRecovering)
         ? `<button class="pill danger" id="streamCardBtn_${escapeHtml(s.id)}" type="button" onclick="stopSingleStream('${escapeJs(channelName)}', '${escapeJs(s.id)}')">Stop Stream</button>`
         : `<button class="pill success" id="streamCardBtn_${escapeHtml(s.id)}" type="button" onclick="startSingleStream('${escapeJs(channelName)}', '${escapeJs(s.id)}')">Start Stream</button>`;
@@ -11285,8 +11329,12 @@ async function renderWorkspaceStreamsTab(channelName, cachedStreamsData = null) 
               >
                 <svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6z"/></svg>
               </button>
+              ${hasThumb ? `<img src="${escapeAttr(thumbSrc)}" alt="Thumbnail" class="stream-thumb-mini" title="Thumbnail Attached">` : ''}
               <div class="stream-card-info">
-                <h3 class="stream-title">${escapeHtml(s.name || "Stream")}</h3>
+                <div class="stream-title-row">
+                  <h3 class="stream-title" id="streamTitleText_${escapeHtml(s.id)}">${escapeHtml(s.name || "Stream")}</h3>
+                  <button class="pill ghost icon-only small" type="button" onclick="event.stopPropagation(); promptRenameStream('${escapeJs(channelName)}', '${escapeJs(s.id)}', '${escapeJs(s.name || "")}')" title="Rename Stream Name">✏️</button>
+                </div>
                 <div class="stream-badges">
                   ${statusBadge}
                   ${durationBadge}
@@ -11329,6 +11377,18 @@ async function renderWorkspaceStreamsTab(channelName, cachedStreamsData = null) 
               </div>
               <div class="form-grid schedule-form-grid">
                 <label class="field-label-sm">
+                  Stream Name
+                  <input
+                    id="streamNameInput_${escapeHtml(s.id)}"
+                    type="text"
+                    class="field-input"
+                    value="${escapeHtml(s.name || "")}"
+                    oninput="updateStreamDetailInline('${escapeJs(channelName)}', '${escapeJs(s.id)}', 'name', this.value)"
+                    onchange="updateStreamDetailInline('${escapeJs(channelName)}', '${escapeJs(s.id)}', 'name', this.value)"
+                    placeholder="Stream Name (e.g. Diseases)"
+                  />
+                </label>
+                <label class="field-label-sm">
                   Broadcast Title
                   <input
                     id="streamTitleInput_${escapeHtml(s.id)}"
@@ -11369,6 +11429,15 @@ async function renderWorkspaceStreamsTab(channelName, cachedStreamsData = null) 
                     class="field-input"
                     onchange="uploadStreamThumbnailInline('${escapeJs(channelName)}', '${escapeJs(s.id)}', this.files[0])"
                   />
+                  ${hasThumb ? `
+                    <div class="stream-thumb-preview-card">
+                      <img src="${escapeAttr(thumbSrc)}" alt="Thumbnail Preview" class="stream-thumb-preview-img">
+                      <div class="stream-thumb-preview-body">
+                        <div class="stream-thumb-status">✓ Thumbnail Attached</div>
+                        <div class="stream-thumb-path" title="${escapeAttr(s.thumbnail_path)}">${escapeHtml((s.thumbnail_path || "").split(/[/\\]/).pop() || "Thumbnail Image")}</div>
+                      </div>
+                    </div>
+                  ` : ''}
                 </label>
               </div>
               <label class="field-label-sm description-label">
@@ -11437,6 +11506,18 @@ async function updateStreamPlaylistInline(channelName, streamId, rawText) {
   }
 }
 
+async function promptRenameStream(channelName, streamId, currentName) {
+  const newName = prompt("Enter new stream name:", currentName || "");
+  if (newName === null) return;
+  const trimmed = newName.trim();
+  if (!trimmed) {
+    toast("Stream name cannot be empty.", "warn");
+    return;
+  }
+  await updateStreamDetailInline(channelName, streamId, "name", trimmed);
+}
+window.promptRenameStream = promptRenameStream;
+
 async function updateStreamDetailInline(channelName, streamId, field, rawValue) {
   try {
     const val = field === "scheduled_start_time" ? datetimeLocalToIso(rawValue) : String(rawValue || "").trim();
@@ -11458,6 +11539,12 @@ async function updateStreamDetailInline(channelName, streamId, field, rawValue) 
       });
       state.activeStreamSavePromise = savePromise;
       await savePromise;
+      if (field === "name") {
+        const titleEl = document.getElementById(`streamTitleText_${streamId}`);
+        if (titleEl) titleEl.textContent = val || "Stream";
+        const inputEl = document.getElementById(`streamNameInput_${streamId}`);
+        if (inputEl && inputEl.value !== val) inputEl.value = val;
+      }
       toast(`Stream ${field.replace("_", " ")} updated.`, "success");
     }
   } catch (err) {
@@ -11764,7 +11851,7 @@ async function startSingleStream(channelName, streamId) {
       const textVal = (videoInput.value || "").trim();
       await updateStreamPlaylistInline(channelName, streamId, textVal);
     }
-    toast(`Starting stream ${streamId}...`, "info");
+    toast(`Scheduling & starting stream ${streamId} (verifying with YouTube)...`, "info");
     logUiAction("API Outgoing", "POST /api/stream/start", { channel: channelName, stream_id: streamId, config: state.config });
     const response = await fetchApi("/api/stream/start", {
       method: "POST",
@@ -11783,7 +11870,12 @@ async function startSingleStream(channelName, streamId) {
       toast("Could not start stream. Ensure a valid stream key is configured.", "danger");
     } else {
       logUiAction("Stream Success", "Stream started successfully", response.started);
-      toast(`Stream ${streamId} started successfully!`, "success");
+      const verif = response.verification;
+      if (verif && verif.is_live === false) {
+        toast(`Stream ${streamId} process started, but YouTube check note: ${verif.message}`, "warning");
+      } else {
+        toast(`Stream ${streamId} started & verified LIVE on YouTube!`, "success");
+      }
     }
   } catch (err) {
     logUiAction("Stream Exception", "Error starting stream", err.message);
@@ -11847,8 +11939,13 @@ async function startAllChannelStreams(channelName = null) {
       logUiAction("Stream Error", "Failed to start all streams", response.error);
       toast("Failed to start streams: " + response.error, "danger");
     } else {
-      logUiAction("Stream Success", "Started streams count=" + (response.started ? response.started.length : 0), response.started);
-      toast("All streams started successfully!", "success");
+      const startedCount = Array.isArray(response?.started) ? response.started.length : 0;
+      logUiAction("Stream Success", "Started streams count=" + startedCount, response?.started);
+      if (startedCount > 0) {
+        toast(`Started ${startedCount} stream(s) successfully!`, "success");
+      } else {
+        toast("No streams were started. Check stream configuration or status.", "warning");
+      }
       await refresh();
       if (targetChannel) renderWorkspaceStreamsTab(targetChannel);
     }
@@ -12004,6 +12101,7 @@ async function submitAddStreamModal() {
     } else {
       toast(`Stream "${streamName}" added!`, "success");
       closeAddStreamModal();
+      await syncConfigDataAfterStreamChange();
       await refresh();
       renderWorkspaceStreamsTab(targetChannel);
     }
@@ -12014,6 +12112,19 @@ async function submitAddStreamModal() {
       confirmBtn.disabled = false;
       confirmBtn.textContent = "Add Stream";
     }
+  }
+}
+
+async function syncConfigDataAfterStreamChange() {
+  try {
+    const res = await api(`/api/config/load?config=${encodeURIComponent(state.config)}`);
+    if (res?.config) {
+      state.configData = res.config;
+      normalizeConfigShape();
+      state.settingsAutosaveLastSignature = JSON.stringify(state.configData);
+    }
+  } catch (err) {
+    console.error("Failed to sync config data after stream change:", err);
   }
 }
 
@@ -12037,6 +12148,7 @@ async function deleteStreamFromChannel(channelName, streamId) {
       toast("Failed to delete stream: " + response.error, "danger");
     } else {
       toast("Stream deleted.", "info");
+      await syncConfigDataAfterStreamChange();
       await refresh();
       renderWorkspaceStreamsTab(channelName);
     }

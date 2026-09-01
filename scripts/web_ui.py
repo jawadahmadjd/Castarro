@@ -292,7 +292,7 @@ def stream_delivery_health(
     ):
         return "danger", "Poor", detail
     if (
-        dropped > 0
+        (drop_frames is not None and drop_frames > 0)
         or (speed is not None and speed < 0.98)
         or (fps_ratio is not None and fps_ratio < 0.97)
         or (bitrate_ratio is not None and bitrate_ratio < 0.95)
@@ -694,6 +694,7 @@ class StreamState:
         self.last_adaptive_switch_at = 0.0
         self.playwright_dismissed = False
         self.stream_id: str | None = None
+        self.verification: dict[str, Any] = {}
 
     @property
     def channel_name(self) -> str:
@@ -1171,6 +1172,13 @@ def save_config(config_name: str, config: dict[str, Any]) -> None:
     validate_stream_key_fields(config)
     target = ROOT / config_name
     target.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+    alt_name = "config.json" if config_name == "config.ready.json" else "config.ready.json"
+    alt_target = ROOT / alt_name
+    if alt_target.exists():
+        try:
+            alt_target.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+        except Exception:
+            pass
     ensure_media_folders(config)
     storage_providers.ensure_storage_dirs(config, ROOT)
     app_db.sync_config(config_name, config, "save")
@@ -3107,11 +3115,16 @@ def replace_stale_youtube_broadcast_for_start(
     if not broadcast_id:
         broadcast_id = last_broadcast_id
 
+    try:
+        scoped_config = account_config_view(config, account)
+        access_token, _tokens = youtube_service.valid_access_token(ROOT, scoped_config)
+    except Exception as token_err:
+        print(f"[{channel_name}] Failed to get YouTube access token: {token_err}")
+        return False
+
     broadcast = None
     if broadcast_id:
         try:
-            scoped_config = account_config_view(config, account)
-            access_token, _tokens = youtube_service.valid_access_token(ROOT, scoped_config)
             profile = cached_connected_account_profile(config_name, account, access_token)
             mismatch_message = youtube_profile_mismatch_message(channel_name or youtube_account_expected_channel_name(config, account), profile)
             if mismatch_message:
@@ -3125,12 +3138,6 @@ def replace_stale_youtube_broadcast_for_start(
                 {"broadcast_id": broadcast_id, "message": str(exc)},
             )
             broadcast = None
-    else:
-        try:
-            scoped_config = account_config_view(config, account)
-            access_token, _tokens = youtube_service.valid_access_token(ROOT, scoped_config)
-        except Exception:
-            return False
 
     lifecycle = "missing" if not broadcast else str(broadcast.get("life_cycle_status") or "").strip().lower()
     is_stale = lifecycle in YOUTUBE_STALE_LIFECYCLE_STATUSES
@@ -3181,11 +3188,12 @@ def replace_stale_youtube_broadcast_for_start(
         or ""
     ).strip()
 
-    auto_start = bool(channel.get("youtube_auto_start", settings.get("default_auto_start", False)))
+    auto_start = bool(channel.get("youtube_auto_start", True))
     auto_stop = bool(channel.get("youtube_auto_stop", settings.get("default_auto_stop", False)))
     
     start_replacement, end_replacement = youtube_start_replacement_times()
-    scheduled_start_time = str((target_stream or {}).get("scheduled_start_time") or "").strip() or start_replacement
+    raw_scheduled_start = str((target_stream or {}).get("scheduled_start_time") or "").strip() or start_replacement
+    scheduled_start_time = youtube_service.ensure_future_iso_time(raw_scheduled_start, min_lead_seconds=60)
     scheduled_end_time = end_replacement
 
     stream_title_source = str(
@@ -3317,10 +3325,23 @@ def ensure_youtube_broadcasts_ready_for_start(
             sid = str(s.get("id") or "")
             if target_stream_id and sid != target_stream_id:
                 continue
+            if not target_stream_id and len(streams) > 1 and sid != "stream_1":
+                # When no specific stream_id is requested, do not auto-replace broadcasts for non-primary streams
+                # to prevent bulk creation of scheduled streams on YouTube.
+                continue
             if not s.get("enabled", True):
                 continue
-            if replace_stale_youtube_broadcast_for_start(config_name, config, channel, target_stream=s):
-                channel_replaced = True
+            try:
+                if replace_stale_youtube_broadcast_for_start(config_name, config, channel, target_stream=s):
+                    channel_replaced = True
+            except Exception as exc:
+                print(f"[YOUTUBE PRESTART WARNING] Broadcast pre-start check for channel '{channel.get('name')}' stream '{sid}' warning: {exc}")
+                app_db.record_event(
+                    "youtube_prestart_check_warning",
+                    config_name,
+                    str(channel.get("name") or ""),
+                    {"stream_id": sid, "error": str(exc)},
+                )
         if channel_replaced:
             replaced.append(str(channel.get("name") or ""))
     return replaced
@@ -4139,8 +4160,18 @@ def use_existing_youtube_broadcast(config_name: str, body: dict[str, Any]) -> di
 def resolve_project_path(value: str) -> Path:
     path = Path(value)
     if path.is_absolute():
-        return path
+        return path.resolve()
     return (ROOT / path).resolve()
+
+
+def assert_safe_project_path(path: Path, allowed_roots: list[Path] | None = None) -> Path:
+    resolved = path.resolve()
+    roots = [ROOT.resolve()]
+    if allowed_roots:
+        roots.extend([r.resolve() for r in allowed_roots if r])
+    if not any(resolved == r or resolved.is_relative_to(r) for r in roots):
+        raise ValueError("Access denied: path is outside allowed project directories.")
+    return resolved
 
 
 def ensure_media_folders(config: dict[str, Any]) -> None:
@@ -5270,13 +5301,14 @@ def recent_alert_events(
     config_name: str | None,
     channel_name: str | None = None,
     *,
-    limit: int = 200,
+    limit: int = 50,
 ) -> list[dict[str, Any]]:
+    safe_limit = max(1, min(int(limit), 50))
     events = app_db.recent_app_events(
         config_name,
         channel_name=channel_name,
         event_type="alert_raised",
-        limit=limit,
+        limit=safe_limit,
     )
     alerts: list[dict[str, Any]] = []
     for event in events:
@@ -5297,7 +5329,7 @@ def recent_alert_events(
                 "mobile_enabled": bool(details.get("mobile_enabled", True)),
             }
         )
-        if len(alerts) >= limit:
+        if len(alerts) >= safe_limit:
             break
     return alerts
 
@@ -5305,7 +5337,7 @@ def recent_alert_events(
 def alerts_status(config_name: str, config: dict[str, Any] | None = None) -> dict[str, Any]:
     config = config or load_config_or_none(config_name)[0] or {}
     settings = normalize_alert_settings(config)
-    recent = recent_alert_events(config_name, limit=200)
+    recent = recent_alert_events(config_name, limit=50)
     for item in recent:
         allowed = alert_notification_allowed(settings, str(item.get("severity") or ""))
         item["desktop_enabled"] = bool(item.get("desktop_enabled")) and bool(settings.get("desktop_notifications_enabled")) and allowed
@@ -5372,7 +5404,7 @@ def start_stream(config_name: str, channel_name: str | None, stream_id: str | No
 
     config, config_dir = stream_manager.load_config((ROOT / config_name).resolve())
     normalize_scheduler_settings(config)
-    ensure_youtube_broadcasts_ready_for_start(config_name, config, channel_name)
+    ensure_youtube_broadcasts_ready_for_start(config_name, config, channel_name, target_stream_id=stream_id)
     channels = stream_manager.enabled_channels(config, channel_name)
     print(f"[STREAM PIPELINE] Enabled channels matching request: {[c.get('name') for c in channels]}")
 
@@ -5440,6 +5472,15 @@ def start_stream(config_name: str, channel_name: str | None, stream_id: str | No
                         raise ValueError(err_msg)
                     continue
 
+                # Terminate any stale/orphan background FFmpeg processes matching target RTMP URL
+                try:
+                    key_part = target_url.rstrip("/").split("/")[-1]
+                    if key_part and len(key_part) >= 5 and os.name != "nt":
+                        import subprocess
+                        subprocess.run(f"pkill -9 -f '{key_part}'", shell=True, capture_output=True)
+                except Exception as k_err:
+                    print(f"[{name}] Warning during orphan process cleanup: {k_err}")
+
             prepared_channel, cloud_asset_ids = prepare_channel_cloud_playlist(config, channel)
             prepared_channel = dict(prepared_channel)
             if s.get("name"):
@@ -5477,6 +5518,35 @@ def start_stream(config_name: str, channel_name: str | None, stream_id: str | No
 
             state_obj = StreamState(config_name, running, cloud_asset_ids=cloud_asset_ids)
             state_obj.stream_id = sid
+
+            # Wait 6 seconds to allow FFmpeg to push initial RTMP video frames to YouTube
+            print(f"[{name}] Waiting 6 seconds for RTMP stream ingest to reach YouTube...")
+            time.sleep(6.0)
+
+            # Verify with YouTube API if broadcast is live / testing
+            broadcast_id = str(prepared_channel.get("youtube_broadcast_id") or s.get("youtube_broadcast_id") or channel.get("youtube_broadcast_id") or "").strip()
+            verification_result = {"is_live": True, "status": "local_only", "message": "No YouTube broadcast bound."}
+            if broadcast_id:
+                try:
+                    account_id = channel_account_id(config, channel)
+                    account = find_youtube_account(config, account_id)
+                    if account:
+                        scoped_config = account_config_view(config, account)
+                        access_token, _ = youtube_service.valid_access_token(ROOT, scoped_config)
+                        print(f"[{name}] Verifying broadcast '{broadcast_id}' live status with YouTube API...")
+                        verification_result = youtube_service.verify_youtube_broadcast_live(
+                            access_token,
+                            broadcast_id,
+                            poll_attempts=3,
+                            delay_between_attempts=2.0,
+                        )
+                        print(f"[{name}] YouTube verification result: {verification_result}")
+                except Exception as v_err:
+                    print(f"[{name}] YouTube live verification warning: {v_err}")
+                    verification_result = {"is_live": False, "status": "error", "message": str(v_err)}
+
+            state_obj.verification = verification_result
+
             with STATE.lock:
                 STATE.streams[stream_key_id] = state_obj
                 if sid == "stream_1" or name not in STATE.streams:
@@ -5950,6 +6020,11 @@ def get_channel_streams_api(config_name: str, channel_name: str, fetch_stats: bo
 
         status_text = "running" if is_running else "recovering" if is_recovering else "stopped"
 
+        thumb_path = str(s.get("thumbnail_path") or "").strip()
+        thumb_url = str(s.get("thumbnail_url") or "").strip()
+        if thumb_path and not thumb_url:
+            thumb_url = f"/api/stream-thumbnail?config={quote(config_name)}&channel={quote(channel_name)}&stream_id={quote(sid)}"
+
         results.append({
             "id": sid,
             "channel": channel_name,
@@ -5958,8 +6033,8 @@ def get_channel_streams_api(config_name: str, channel_name: str, fetch_stats: bo
             "description": str(s.get("description") or ""),
             "privacy_status": str(s.get("privacy_status") or "public"),
             "scheduled_start_time": str(s.get("scheduled_start_time") or ""),
-            "thumbnail_path": str(s.get("thumbnail_path") or ""),
-            "thumbnail_url": str(s.get("thumbnail_url") or ""),
+            "thumbnail_path": thumb_path,
+            "thumbnail_url": thumb_url,
             "youtube_broadcast_id": str(s.get("youtube_broadcast_id") or channel.get("youtube_broadcast_id") or ""),
             "youtube_studio_url": str(s.get("youtube_studio_url") or channel.get("youtube_studio_url") or ""),
             "stream_key": skey,
@@ -6138,6 +6213,28 @@ def upload_stream_thumbnail_api(handler: BaseHTTPRequestHandler, query: dict[str
     }
 
 
+def stream_thumbnail_api(config_name: str, channel_name: str, stream_id: str) -> tuple[bytes, str]:
+    config, error = load_config_or_none(config_name)
+    if not config:
+        raise ValueError(error or "Config not found.")
+    channel = find_channel_by_name(config, channel_name)
+    if not channel:
+        raise ValueError(f"Channel '{channel_name}' not found.")
+    streams = ensure_channel_streams(channel)
+    target = next((s for s in streams if str(s.get("id")) == str(stream_id)), None)
+    if not target:
+        raise ValueError(f"Stream '{stream_id}' not found.")
+    thumb_path_str = str(target.get("thumbnail_path") or "").strip()
+    if not thumb_path_str:
+        raise ValueError("No thumbnail attached to stream.")
+    p = Path(thumb_path_str)
+    if not p.is_file():
+        raise ValueError(f"Thumbnail file not found: {thumb_path_str}")
+    ext = p.suffix.lower()
+    c_type = "image/png" if ext == ".png" else "image/gif" if ext == ".gif" else "image/jpeg"
+    return p.read_bytes(), c_type
+
+
 def save_channel_streams_api(config_name: str, body: dict[str, Any]) -> dict[str, Any]:
     config, error = load_config_or_none(config_name)
     if not config:
@@ -6149,6 +6246,15 @@ def save_channel_streams_api(config_name: str, body: dict[str, Any]) -> dict[str
     channel = find_channel_by_name(config, channel_name)
     if not channel:
         raise ValueError(f"Channel '{channel_name}' not found.")
+    
+    existing_streams = ensure_channel_streams(channel)
+    existing_map = {str(s.get("id")): s for s in existing_streams}
+    for rs in raw_streams:
+        if isinstance(rs, dict):
+            sid = str(rs.get("id"))
+            if sid in existing_map:
+                if not rs.get("thumbnail_path") and existing_map[sid].get("thumbnail_path"):
+                    rs["thumbnail_path"] = existing_map[sid]["thumbnail_path"]
     
     channel["streams"] = raw_streams
     save_config(config_name, config)
@@ -7911,6 +8017,21 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 return
 
+            if parsed.path == "/api/stream-thumbnail":
+                config_name = safe_config_name(query.get("config", [DEFAULT_CONFIG])[0])
+                channel = query.get("channel", [""])[0] or ""
+                stream_id = query.get("stream_id", [""])[0] or ""
+                update_request_trace(self, config_name=config_name, channel_name=channel)
+                data, c_type = stream_thumbnail_api(config_name, channel, stream_id)
+                write_response(
+                    self,
+                    200,
+                    data,
+                    c_type,
+                    {"Cache-Control": "no-cache, no-store, must-revalidate"},
+                )
+                return
+
             path = WEB_ROOT / ("index.html" if parsed.path == "/" else parsed.path.lstrip("/"))
             path = path.resolve()
             if not str(path).startswith(str(WEB_ROOT.resolve())) or not path.exists():
@@ -7950,6 +8071,10 @@ class Handler(BaseHTTPRequestHandler):
 
             if parsed.path == "/api/youtube/thumbnail":
                 json_response(self, upload_youtube_thumbnail(self, query))
+                return
+
+            if parsed.path == "/api/channel/streams/thumbnail":
+                json_response(self, upload_stream_thumbnail_api(self, query))
                 return
 
             body = read_body(self)
@@ -8129,7 +8254,14 @@ class Handler(BaseHTTPRequestHandler):
                 assert_youtube_channel_keys_match(config_name, channel_name)
                 started = start_stream(config_name, channel_name, stream_id=stream_id)
                 print(f"[API SERVER] RES POST /api/stream/start -> started={started}")
-                json_response(self, {"ok": True, "started": started})
+                verifications = {}
+                with STATE.lock:
+                    for st_key in started:
+                        st_obj = STATE.streams.get(st_key)
+                        if st_obj and hasattr(st_obj, "verification"):
+                            verifications[st_key] = st_obj.verification
+                last_verif = list(verifications.values())[-1] if verifications else {"is_live": True, "status": "started", "message": "Stream started"}
+                json_response(self, {"ok": True, "started": started, "verification": last_verif, "verifications": verifications})
                 return
 
             if parsed.path == "/api/stream/schedule":
@@ -8141,10 +8273,6 @@ class Handler(BaseHTTPRequestHandler):
                 result = schedule_stream_only_api(config_name, body)
                 print(f"[API SERVER] RES POST /api/stream/schedule -> result={result}")
                 json_response(self, result)
-                return
-
-            if parsed.path == "/api/channel/streams/thumbnail":
-                json_response(self, upload_stream_thumbnail_api(self, query))
                 return
 
             if parsed.path == "/api/stream/stop":

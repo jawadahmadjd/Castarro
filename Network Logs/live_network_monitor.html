@@ -1,0 +1,911 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Castarro RDP Network Speed & Congestion Analyzer</title>
+    <style>
+        * { box-sizing: border-box; }
+        body { font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; background-color: #0b0f19; color: #f8fafc; margin: 0; padding: 24px; min-height: 100vh; }
+        .container { max-width: 1250px; margin: 0 auto; }
+        
+        /* Top Navigation Header */
+        .header { display: flex; justify-content: space-between; align-items: center; background: #131c2e; padding: 20px 28px; border-radius: 16px; border: 1px solid #1e293b; margin-bottom: 24px; box-shadow: 0 10px 30px rgba(0,0,0,0.4); }
+        .title-group h1 { font-size: 22px; margin: 0 0 6px 0; color: #38bdf8; display: flex; align-items: center; gap: 10px; }
+        .title-group p { margin: 0; color: #64748b; font-size: 13px; }
+        .live-tag { background: #22c55e; color: white; font-size: 11px; padding: 3px 8px; border-radius: 12px; font-weight: 700; letter-spacing: 0.5px; animation: pulse 1.5s infinite; }
+        @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.4; } 100% { opacity: 1; } }
+        
+        /* Top Metric Cards */
+        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 18px; margin-bottom: 24px; }
+        .card { background: #131c2e; padding: 20px; border-radius: 14px; border: 1px solid #1e293b; box-shadow: 0 4px 15px rgba(0,0,0,0.2); }
+        .card-label { color: #94a3b8; font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; }
+        .card-val { font-size: 28px; font-weight: 800; color: #f8fafc; }
+        .card-sub { font-size: 12px; color: #64748b; margin-top: 4px; }
+
+        .card.upload { border-top: 4px solid #38bdf8; }
+        .card.download { border-top: 4px solid #818cf8; }
+        .card.ping { border-top: 4px solid #34d399; }
+        .card.offpeak { border-top: 4px solid #4ade80; }
+        .card.peak { border-top: 4px solid #f87171; }
+
+        /* Interactive Filter Control Panel */
+        .filter-panel { background: #131c2e; padding: 20px 24px; border-radius: 16px; border: 1px solid #1e293b; margin-bottom: 24px; display: flex; flex-wrap: wrap; gap: 20px; align-items: center; justify-content: space-between; }
+        .filter-group { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+        .filter-group label { color: #94a3b8; font-size: 13px; font-weight: 600; }
+        select, input { background: #0f172a; color: #f8fafc; border: 1px solid #334155; padding: 8px 12px; border-radius: 8px; font-size: 13px; outline: none; }
+        select:focus, input:focus { border-color: #38bdf8; }
+        .btn { background: #38bdf8; color: #0f172a; border: none; padding: 8px 16px; border-radius: 8px; font-size: 13px; font-weight: 700; cursor: pointer; transition: background 0.2s; }
+        .btn:hover { background: #0284c7; color: white; }
+        
+        .section-box { background: #131c2e; padding: 24px; border-radius: 16px; border: 1px solid #1e293b; margin-bottom: 24px; }
+        .section-title { font-size: 16px; font-weight: 700; color: #f8fafc; margin: 0 0 16px 0; display: flex; justify-content: space-between; align-items: center; }
+
+        .dynamic-banner { background: #1e293b; border-left: 4px solid #38bdf8; padding: 14px 18px; border-radius: 8px; font-size: 14px; color: #cbd5e1; margin-bottom: 20px; display:flex; justify-content:space-between; align-items:center; }
+
+        table { width: 100%; border-collapse: collapse; text-align: left; }
+        th { background: #0f172a; padding: 12px 16px; color: #38bdf8; font-size: 12px; font-weight: 600; text-transform: uppercase; border-bottom: 1px solid #1e293b; }
+        td { padding: 12px 16px; border-bottom: 1px solid #1e293b; font-size: 14px; }
+        tr:hover { background: #1a2436; }
+        
+        .badge { padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+        .badge-peak { background: rgba(248, 113, 113, 0.2); color: #f87171; border: 1px solid rgba(248, 113, 113, 0.3); }
+        .badge-off { background: rgba(74, 222, 128, 0.2); color: #4ade80; border: 1px solid rgba(74, 222, 128, 0.3); }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <div class="header">
+            <div class="title-group">
+                <h1>📡 Castarro RDP Live Network Monitor <span class="live-tag">LIVE</span></h1>
+                <p>Output Log Directory: <code>D:\Tools of Jawad\17- Live Streaming via FFMPEG\Network Logs</code> | Last Refreshed: 2026-08-09 12:06:13</p>
+            </div>
+            <div>
+                <label style="color:#94a3b8; font-size:13px; font-weight:600; cursor:pointer;">
+                    <input type="checkbox" id="autoRefreshToggle" checked onchange="toggleAutoRefresh(this.checked)"> Auto-Refresh (5s)
+                </label>
+            </div>
+        </div>
+
+        <!-- Latest Actual Speed Test Metrics -->
+        <div class="grid">
+            <div class="card upload">
+                <div class="card-label">Latest Upload Speed</div>
+                <div class="card-val" id="cardUlVal">9.32 <span style="font-size:16px; color:#64748b;">Mbps</span></div>
+                <div class="card-sub">Tested at: 2026-08-09 12:06:12 | Avg: 9.66 Mbps</div>
+            </div>
+            <div class="card download">
+                <div class="card-label">Latest Download Speed</div>
+                <div class="card-val" id="cardDlVal">10.41 <span style="font-size:16px; color:#64748b;">Mbps</span></div>
+                <div class="card-sub">Tested at: 2026-08-09 12:06:12 | Avg: 7.82 Mbps</div>
+            </div>
+            <div class="card ping">
+                <div class="card-label">Current Latency (Ping)</div>
+                <div class="card-val">374.0 <span style="font-size:16px; color:#64748b;">ms</span></div>
+                <div class="card-sub">Overall Avg Latency: 466.0 ms</div>
+            </div>
+            <div class="card offpeak">
+                <div class="card-label">Off-Peak Max Upload</div>
+                <div class="card-val">10.10 <span style="font-size:16px; color:#64748b;">Mbps</span></div>
+                <div class="card-sub">Highest Recorded Upload</div>
+            </div>
+            <div class="card peak">
+                <div class="card-label">Peak Congestion Min Upload</div>
+                <div class="card-val">9.32 <span style="font-size:16px; color:#64748b;">Mbps</span></div>
+                <div class="card-sub">Worst Bottleneck Point</div>
+            </div>
+        </div>
+
+        <div class="dynamic-banner">
+            <div><strong>🧠 Dynamically Detected Peak Congestion Hours:</strong> <span style="color:#f87171; font-weight:700;">12:00</span></div>
+            <div style="font-size:12px; color:#94a3b8;">Total Speed Test Samples: <strong>4</strong></div>
+        </div>
+
+        <!-- Interactive Custom Reporting Filter Panel -->
+        <div class="filter-panel">
+            <div class="filter-group">
+                <label>Filter Preset:</label>
+                <select id="presetSelect" onchange="applyPresetFilter(this.value)">
+                    <option value="ALL">Full 24 Hours Analysis</option>
+                    <option value="PEAK">Peak Congestion Hours Only</option>
+                    <option value="OFFPEAK">Off-Peak / Free Hours Only</option>
+                    <option value="CUSTOM">Custom Hour Range</option>
+                </select>
+
+                <label>From Hour:</label>
+                <select id="fromHourSelect" onchange="applyCustomFilter()">
+                    <option value="0">00:00</option><option value="1">01:00</option><option value="2">02:00</option><option value="3">03:00</option><option value="4">04:00</option><option value="5">05:00</option><option value="6">06:00</option><option value="7">07:00</option><option value="8">08:00</option><option value="9">09:00</option><option value="10">10:00</option><option value="11">11:00</option><option value="12">12:00</option><option value="13">13:00</option><option value="14">14:00</option><option value="15">15:00</option><option value="16">16:00</option><option value="17">17:00</option><option value="18">18:00</option><option value="19">19:00</option><option value="20">20:00</option><option value="21">21:00</option><option value="22">22:00</option><option value="23">23:00</option>
+                </select>
+
+                <label>To Hour:</label>
+                <select id="toHourSelect" onchange="applyCustomFilter()">
+                    <option value="0" >00:59</option><option value="1" >01:59</option><option value="2" >02:59</option><option value="3" >03:59</option><option value="4" >04:59</option><option value="5" >05:59</option><option value="6" >06:59</option><option value="7" >07:59</option><option value="8" >08:59</option><option value="9" >09:59</option><option value="10" >10:59</option><option value="11" >11:59</option><option value="12" >12:59</option><option value="13" >13:59</option><option value="14" >14:59</option><option value="15" >15:59</option><option value="16" >16:59</option><option value="17" >17:59</option><option value="18" >18:59</option><option value="19" >19:59</option><option value="20" >20:59</option><option value="21" >21:59</option><option value="22" >22:59</option><option value="23" selected>23:59</option>
+                </select>
+            </div>
+
+            <div class="filter-group">
+                <button class="btn" onclick="resetFilters()">Reset Filters</button>
+            </div>
+        </div>
+
+        <!-- Custom Hour Range Performance Summary Box -->
+        <div class="section-box" style="background:#0f172a; border-color:#38bdf844;">
+            <div class="section-title">
+                <span id="customPerfTitle">📊 Selected Filter Performance Summary (Full 24 Hours)</span>
+            </div>
+            <div class="grid" style="margin-bottom:0;">
+                <div class="card" style="background:#1e293b;">
+                    <div class="card-label">Average Upload</div>
+                    <div class="card-val" id="filterAvgUl">9.66 <span style="font-size:14px; color:#64748b;">Mbps</span></div>
+                </div>
+                <div class="card" style="background:#1e293b;">
+                    <div class="card-label">Min Upload (Bottleneck)</div>
+                    <div class="card-val" id="filterMinUl">9.32 <span style="font-size:14px; color:#64748b;">Mbps</span></div>
+                </div>
+                <div class="card" style="background:#1e293b;">
+                    <div class="card-label">Max Upload</div>
+                    <div class="card-val" id="filterMaxUl">10.10 <span style="font-size:14px; color:#64748b;">Mbps</span></div>
+                </div>
+                <div class="card" style="background:#1e293b;">
+                    <div class="card-label">10-Stream Stability</div>
+                    <div class="card-val" id="filterVerdict" style="font-size:16px; font-weight:700;">Evaluating...</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 24-Hour Hourly Summary Matrix Table -->
+        <div class="section-box">
+            <div class="section-title">
+                <span>🕒 Complete 24-Hour Hourly Performance Matrix</span>
+            </div>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Hour of Day</th>
+                        <th>Congestion Type</th>
+                        <th>Avg Upload Speed</th>
+                        <th>Min Upload</th>
+                        <th>Max Upload</th>
+                        <th>Avg Download Speed</th>
+                        <th>Avg Ping</th>
+                        <th>Samples</th>
+                    </tr>
+                </thead>
+                <tbody id="matrixTableBody">
+
+                    <tr data-hour="0" data-ispeak="0">
+                        <td><strong>00:00</strong></td>
+                        <td><span class="badge badge-off">OFF-PEAK</span></td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td>0</td>
+                    </tr>
+
+                    <tr data-hour="1" data-ispeak="0">
+                        <td><strong>01:00</strong></td>
+                        <td><span class="badge badge-off">OFF-PEAK</span></td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td>0</td>
+                    </tr>
+
+                    <tr data-hour="2" data-ispeak="0">
+                        <td><strong>02:00</strong></td>
+                        <td><span class="badge badge-off">OFF-PEAK</span></td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td>0</td>
+                    </tr>
+
+                    <tr data-hour="3" data-ispeak="0">
+                        <td><strong>03:00</strong></td>
+                        <td><span class="badge badge-off">OFF-PEAK</span></td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td>0</td>
+                    </tr>
+
+                    <tr data-hour="4" data-ispeak="0">
+                        <td><strong>04:00</strong></td>
+                        <td><span class="badge badge-off">OFF-PEAK</span></td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td>0</td>
+                    </tr>
+
+                    <tr data-hour="5" data-ispeak="0">
+                        <td><strong>05:00</strong></td>
+                        <td><span class="badge badge-off">OFF-PEAK</span></td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td>0</td>
+                    </tr>
+
+                    <tr data-hour="6" data-ispeak="0">
+                        <td><strong>06:00</strong></td>
+                        <td><span class="badge badge-off">OFF-PEAK</span></td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td>0</td>
+                    </tr>
+
+                    <tr data-hour="7" data-ispeak="0">
+                        <td><strong>07:00</strong></td>
+                        <td><span class="badge badge-off">OFF-PEAK</span></td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td>0</td>
+                    </tr>
+
+                    <tr data-hour="8" data-ispeak="0">
+                        <td><strong>08:00</strong></td>
+                        <td><span class="badge badge-off">OFF-PEAK</span></td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td>0</td>
+                    </tr>
+
+                    <tr data-hour="9" data-ispeak="0">
+                        <td><strong>09:00</strong></td>
+                        <td><span class="badge badge-off">OFF-PEAK</span></td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td>0</td>
+                    </tr>
+
+                    <tr data-hour="10" data-ispeak="0">
+                        <td><strong>10:00</strong></td>
+                        <td><span class="badge badge-off">OFF-PEAK</span></td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td>0</td>
+                    </tr>
+
+                    <tr data-hour="11" data-ispeak="0">
+                        <td><strong>11:00</strong></td>
+                        <td><span class="badge badge-off">OFF-PEAK</span></td>
+                        <td><strong style="color:#38bdf8;">9.78 Mbps</strong></td>
+                        <td>9.59 Mbps</td>
+                        <td>10.10 Mbps</td>
+                        <td>6.96 Mbps</td>
+                        <td>468.7 ms</td>
+                        <td>3</td>
+                    </tr>
+
+                    <tr data-hour="12" data-ispeak="1">
+                        <td><strong>12:00</strong></td>
+                        <td><span class="badge badge-peak">PEAK CONGESTION</span></td>
+                        <td><strong style="color:#38bdf8;">9.32 Mbps</strong></td>
+                        <td>9.32 Mbps</td>
+                        <td>9.32 Mbps</td>
+                        <td>10.41 Mbps</td>
+                        <td>374.0 ms</td>
+                        <td>1</td>
+                    </tr>
+
+                    <tr data-hour="13" data-ispeak="0">
+                        <td><strong>13:00</strong></td>
+                        <td><span class="badge badge-off">OFF-PEAK</span></td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td>0</td>
+                    </tr>
+
+                    <tr data-hour="14" data-ispeak="0">
+                        <td><strong>14:00</strong></td>
+                        <td><span class="badge badge-off">OFF-PEAK</span></td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td>0</td>
+                    </tr>
+
+                    <tr data-hour="15" data-ispeak="0">
+                        <td><strong>15:00</strong></td>
+                        <td><span class="badge badge-off">OFF-PEAK</span></td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td>0</td>
+                    </tr>
+
+                    <tr data-hour="16" data-ispeak="0">
+                        <td><strong>16:00</strong></td>
+                        <td><span class="badge badge-off">OFF-PEAK</span></td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td>0</td>
+                    </tr>
+
+                    <tr data-hour="17" data-ispeak="0">
+                        <td><strong>17:00</strong></td>
+                        <td><span class="badge badge-off">OFF-PEAK</span></td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td>0</td>
+                    </tr>
+
+                    <tr data-hour="18" data-ispeak="0">
+                        <td><strong>18:00</strong></td>
+                        <td><span class="badge badge-off">OFF-PEAK</span></td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td>0</td>
+                    </tr>
+
+                    <tr data-hour="19" data-ispeak="0">
+                        <td><strong>19:00</strong></td>
+                        <td><span class="badge badge-off">OFF-PEAK</span></td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td>0</td>
+                    </tr>
+
+                    <tr data-hour="20" data-ispeak="0">
+                        <td><strong>20:00</strong></td>
+                        <td><span class="badge badge-off">OFF-PEAK</span></td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td>0</td>
+                    </tr>
+
+                    <tr data-hour="21" data-ispeak="0">
+                        <td><strong>21:00</strong></td>
+                        <td><span class="badge badge-off">OFF-PEAK</span></td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td>0</td>
+                    </tr>
+
+                    <tr data-hour="22" data-ispeak="0">
+                        <td><strong>22:00</strong></td>
+                        <td><span class="badge badge-off">OFF-PEAK</span></td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td>0</td>
+                    </tr>
+
+                    <tr data-hour="23" data-ispeak="0">
+                        <td><strong>23:00</strong></td>
+                        <td><span class="badge badge-off">OFF-PEAK</span></td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td style="color:#64748b;">-</td>
+                        <td>0</td>
+                    </tr>
+
+                </tbody>
+            </table>
+        </div>
+
+        <!-- Day-by-Day Historical & Weekly Comparison Table -->
+        <div class="section-box">
+            <div class="section-title">
+                <span>📅 Day-by-Day Historical & Weekly Comparison Matrix</span>
+            </div>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Date</th>
+                        <th>Day of Week</th>
+                        <th>Avg Upload Speed</th>
+                        <th>Min Upload (Bottleneck)</th>
+                        <th>Max Upload</th>
+                        <th>Avg Download</th>
+                        <th>Total Tests</th>
+                        <th>Day Stability Verdict</th>
+                    </tr>
+                </thead>
+                <tbody>
+<tr><td><strong>2026-08-09</strong></td><td>Sunday</td><td><strong style="color:#38bdf8;">9.66 Mbps</strong></td><td>9.32 Mbps</td><td>10.10 Mbps</td><td>7.82 Mbps</td><td>4</td><td><span class="badge badge-peak">HIGH RISK</span></td></tr>
+                </tbody>
+            </table>
+        </div>
+
+        <!-- Live Raw Event Log Feed -->
+        <div class="section-box">
+            <div class="section-title">
+                <span>📋 Live Raw Activity Feed (Recent Events)</span>
+            </div>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Timestamp</th>
+                        <th>Event Type</th>
+                        <th>Upload Speed</th>
+                        <th>Download Speed</th>
+                        <th>Ping</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody id="rawTableBody">
+
+                    <tr>
+                        <td style="color:#94a3b8; font-size:13px;">2026-08-09 12:06:12</td>
+                        <td><span style="background:#38bdf822; color:#38bdf8; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600;">SPEED</span></td>
+                        <td><strong>9.32 Mbps</strong></td>
+                        <td>10.41 Mbps</td>
+                        <td>374.0 ms</td>
+                        <td><span style="color:#f87171; font-weight:600;">● CRITICAL</span></td>
+                    </tr>
+
+                    <tr>
+                        <td style="color:#94a3b8; font-size:13px;">2026-08-09 11:58:26</td>
+                        <td><span style="background:#94a3b822; color:#94a3b8; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600;">PING</span></td>
+                        <td><strong>-</strong></td>
+                        <td>-</td>
+                        <td>335.8 ms</td>
+                        <td><span style="color:#4ade80; font-weight:600;">● OK</span></td>
+                    </tr>
+
+                    <tr>
+                        <td style="color:#94a3b8; font-size:13px;">2026-08-09 11:58:20</td>
+                        <td><span style="background:#94a3b822; color:#94a3b8; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600;">PING</span></td>
+                        <td><strong>-</strong></td>
+                        <td>-</td>
+                        <td>355.8 ms</td>
+                        <td><span style="color:#4ade80; font-weight:600;">● OK</span></td>
+                    </tr>
+
+                    <tr>
+                        <td style="color:#94a3b8; font-size:13px;">2026-08-09 11:58:14</td>
+                        <td><span style="background:#94a3b822; color:#94a3b8; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600;">PING</span></td>
+                        <td><strong>-</strong></td>
+                        <td>-</td>
+                        <td>343.7 ms</td>
+                        <td><span style="color:#4ade80; font-weight:600;">● OK</span></td>
+                    </tr>
+
+                    <tr>
+                        <td style="color:#94a3b8; font-size:13px;">2026-08-09 11:58:08</td>
+                        <td><span style="background:#94a3b822; color:#94a3b8; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600;">PING</span></td>
+                        <td><strong>-</strong></td>
+                        <td>-</td>
+                        <td>351.8 ms</td>
+                        <td><span style="color:#4ade80; font-weight:600;">● OK</span></td>
+                    </tr>
+
+                    <tr>
+                        <td style="color:#94a3b8; font-size:13px;">2026-08-09 11:58:02</td>
+                        <td><span style="background:#94a3b822; color:#94a3b8; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600;">PING</span></td>
+                        <td><strong>-</strong></td>
+                        <td>-</td>
+                        <td>336.6 ms</td>
+                        <td><span style="color:#4ade80; font-weight:600;">● OK</span></td>
+                    </tr>
+
+                    <tr>
+                        <td style="color:#94a3b8; font-size:13px;">2026-08-09 11:57:56</td>
+                        <td><span style="background:#94a3b822; color:#94a3b8; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600;">PING</span></td>
+                        <td><strong>-</strong></td>
+                        <td>-</td>
+                        <td>326.8 ms</td>
+                        <td><span style="color:#4ade80; font-weight:600;">● OK</span></td>
+                    </tr>
+
+                    <tr>
+                        <td style="color:#94a3b8; font-size:13px;">2026-08-09 11:57:51</td>
+                        <td><span style="background:#38bdf822; color:#38bdf8; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600;">SPEED</span></td>
+                        <td><strong>10.10 Mbps</strong></td>
+                        <td>10.12 Mbps</td>
+                        <td>1002.3 ms</td>
+                        <td><span style="color:#f87171; font-weight:600;">● CRITICAL</span></td>
+                    </tr>
+
+                    <tr>
+                        <td style="color:#94a3b8; font-size:13px;">2026-08-09 11:57:42</td>
+                        <td><span style="background:#94a3b822; color:#94a3b8; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600;">PING</span></td>
+                        <td><strong>-</strong></td>
+                        <td>-</td>
+                        <td>349.1 ms</td>
+                        <td><span style="color:#4ade80; font-weight:600;">● OK</span></td>
+                    </tr>
+
+                    <tr>
+                        <td style="color:#94a3b8; font-size:13px;">2026-08-09 11:57:37</td>
+                        <td><span style="background:#94a3b822; color:#94a3b8; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600;">PING</span></td>
+                        <td><strong>-</strong></td>
+                        <td>-</td>
+                        <td>340.7 ms</td>
+                        <td><span style="color:#4ade80; font-weight:600;">● OK</span></td>
+                    </tr>
+
+                    <tr>
+                        <td style="color:#94a3b8; font-size:13px;">2026-08-09 11:57:31</td>
+                        <td><span style="background:#94a3b822; color:#94a3b8; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600;">PING</span></td>
+                        <td><strong>-</strong></td>
+                        <td>-</td>
+                        <td>328.6 ms</td>
+                        <td><span style="color:#4ade80; font-weight:600;">● OK</span></td>
+                    </tr>
+
+                    <tr>
+                        <td style="color:#94a3b8; font-size:13px;">2026-08-09 11:57:25</td>
+                        <td><span style="background:#94a3b822; color:#94a3b8; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600;">PING</span></td>
+                        <td><strong>-</strong></td>
+                        <td>-</td>
+                        <td>323.6 ms</td>
+                        <td><span style="color:#4ade80; font-weight:600;">● OK</span></td>
+                    </tr>
+
+                    <tr>
+                        <td style="color:#94a3b8; font-size:13px;">2026-08-09 11:57:19</td>
+                        <td><span style="background:#94a3b822; color:#94a3b8; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600;">PING</span></td>
+                        <td><strong>-</strong></td>
+                        <td>-</td>
+                        <td>744.1 ms</td>
+                        <td><span style="color:#4ade80; font-weight:600;">● OK</span></td>
+                    </tr>
+
+                    <tr>
+                        <td style="color:#94a3b8; font-size:13px;">2026-08-09 11:57:13</td>
+                        <td><span style="background:#94a3b822; color:#94a3b8; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600;">PING</span></td>
+                        <td><strong>-</strong></td>
+                        <td>-</td>
+                        <td>322.4 ms</td>
+                        <td><span style="color:#4ade80; font-weight:600;">● OK</span></td>
+                    </tr>
+
+                    <tr>
+                        <td style="color:#94a3b8; font-size:13px;">2026-08-09 11:57:07</td>
+                        <td><span style="background:#94a3b822; color:#94a3b8; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600;">PING</span></td>
+                        <td><strong>-</strong></td>
+                        <td>-</td>
+                        <td>318.1 ms</td>
+                        <td><span style="color:#4ade80; font-weight:600;">● OK</span></td>
+                    </tr>
+
+                    <tr>
+                        <td style="color:#94a3b8; font-size:13px;">2026-08-09 11:57:01</td>
+                        <td><span style="background:#38bdf822; color:#38bdf8; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600;">SPEED</span></td>
+                        <td><strong>9.59 Mbps</strong></td>
+                        <td>0.65 Mbps</td>
+                        <td>344.9 ms</td>
+                        <td><span style="color:#f87171; font-weight:600;">● CRITICAL</span></td>
+                    </tr>
+
+                    <tr>
+                        <td style="color:#94a3b8; font-size:13px;">2026-08-09 11:56:41</td>
+                        <td><span style="background:#94a3b822; color:#94a3b8; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600;">PING</span></td>
+                        <td><strong>-</strong></td>
+                        <td>-</td>
+                        <td>325.2 ms</td>
+                        <td><span style="color:#4ade80; font-weight:600;">● OK</span></td>
+                    </tr>
+
+                    <tr>
+                        <td style="color:#94a3b8; font-size:13px;">2026-08-09 11:56:35</td>
+                        <td><span style="background:#94a3b822; color:#94a3b8; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600;">PING</span></td>
+                        <td><strong>-</strong></td>
+                        <td>-</td>
+                        <td>344.9 ms</td>
+                        <td><span style="color:#4ade80; font-weight:600;">● OK</span></td>
+                    </tr>
+
+                    <tr>
+                        <td style="color:#94a3b8; font-size:13px;">2026-08-09 11:56:30</td>
+                        <td><span style="background:#94a3b822; color:#94a3b8; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600;">PING</span></td>
+                        <td><strong>-</strong></td>
+                        <td>-</td>
+                        <td>343.4 ms</td>
+                        <td><span style="color:#4ade80; font-weight:600;">● OK</span></td>
+                    </tr>
+
+                    <tr>
+                        <td style="color:#94a3b8; font-size:13px;">2026-08-09 11:56:24</td>
+                        <td><span style="background:#94a3b822; color:#94a3b8; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600;">PING</span></td>
+                        <td><strong>-</strong></td>
+                        <td>-</td>
+                        <td>331.4 ms</td>
+                        <td><span style="color:#4ade80; font-weight:600;">● OK</span></td>
+                    </tr>
+
+                    <tr>
+                        <td style="color:#94a3b8; font-size:13px;">2026-08-09 11:56:18</td>
+                        <td><span style="background:#94a3b822; color:#94a3b8; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600;">PING</span></td>
+                        <td><strong>-</strong></td>
+                        <td>-</td>
+                        <td>398.2 ms</td>
+                        <td><span style="color:#4ade80; font-weight:600;">● OK</span></td>
+                    </tr>
+
+                    <tr>
+                        <td style="color:#94a3b8; font-size:13px;">2026-08-09 11:56:12</td>
+                        <td><span style="background:#94a3b822; color:#94a3b8; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600;">PING</span></td>
+                        <td><strong>-</strong></td>
+                        <td>-</td>
+                        <td>348.3 ms</td>
+                        <td><span style="color:#4ade80; font-weight:600;">● OK</span></td>
+                    </tr>
+
+                    <tr>
+                        <td style="color:#94a3b8; font-size:13px;">2026-08-09 11:56:07</td>
+                        <td><span style="background:#94a3b822; color:#94a3b8; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600;">PING</span></td>
+                        <td><strong>-</strong></td>
+                        <td>-</td>
+                        <td>315.8 ms</td>
+                        <td><span style="color:#4ade80; font-weight:600;">● OK</span></td>
+                    </tr>
+
+                    <tr>
+                        <td style="color:#94a3b8; font-size:13px;">2026-08-09 11:56:01</td>
+                        <td><span style="background:#94a3b822; color:#94a3b8; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600;">PING</span></td>
+                        <td><strong>-</strong></td>
+                        <td>-</td>
+                        <td>411.6 ms</td>
+                        <td><span style="color:#4ade80; font-weight:600;">● OK</span></td>
+                    </tr>
+
+                    <tr>
+                        <td style="color:#94a3b8; font-size:13px;">2026-08-09 11:55:56</td>
+                        <td><span style="background:#94a3b822; color:#94a3b8; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600;">PING</span></td>
+                        <td><strong>-</strong></td>
+                        <td>-</td>
+                        <td>330.3 ms</td>
+                        <td><span style="color:#4ade80; font-weight:600;">● OK</span></td>
+                    </tr>
+
+                    <tr>
+                        <td style="color:#94a3b8; font-size:13px;">2026-08-09 11:55:50</td>
+                        <td><span style="background:#94a3b822; color:#94a3b8; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600;">PING</span></td>
+                        <td><strong>-</strong></td>
+                        <td>-</td>
+                        <td>362.2 ms</td>
+                        <td><span style="color:#4ade80; font-weight:600;">● OK</span></td>
+                    </tr>
+
+                    <tr>
+                        <td style="color:#94a3b8; font-size:13px;">2026-08-09 11:55:44</td>
+                        <td><span style="background:#38bdf822; color:#38bdf8; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600;">SPEED</span></td>
+                        <td><strong>9.64 Mbps</strong></td>
+                        <td>10.10 Mbps</td>
+                        <td>330.4 ms</td>
+                        <td><span style="color:#f87171; font-weight:600;">● CRITICAL</span></td>
+                    </tr>
+
+                    <tr>
+                        <td style="color:#94a3b8; font-size:13px;">2026-08-09 11:55:36</td>
+                        <td><span style="background:#94a3b822; color:#94a3b8; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600;">PING</span></td>
+                        <td><strong>-</strong></td>
+                        <td>-</td>
+                        <td>315.4 ms</td>
+                        <td><span style="color:#4ade80; font-weight:600;">● OK</span></td>
+                    </tr>
+
+                    <tr>
+                        <td style="color:#94a3b8; font-size:13px;">2026-08-09 11:55:30</td>
+                        <td><span style="background:#94a3b822; color:#94a3b8; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600;">PING</span></td>
+                        <td><strong>-</strong></td>
+                        <td>-</td>
+                        <td>317.2 ms</td>
+                        <td><span style="color:#4ade80; font-weight:600;">● OK</span></td>
+                    </tr>
+
+                    <tr>
+                        <td style="color:#94a3b8; font-size:13px;">2026-08-09 11:55:25</td>
+                        <td><span style="background:#94a3b822; color:#94a3b8; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600;">PING</span></td>
+                        <td><strong>-</strong></td>
+                        <td>-</td>
+                        <td>348.4 ms</td>
+                        <td><span style="color:#4ade80; font-weight:600;">● OK</span></td>
+                    </tr>
+
+                    <tr>
+                        <td style="color:#94a3b8; font-size:13px;">2026-08-09 11:55:19</td>
+                        <td><span style="background:#94a3b822; color:#94a3b8; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600;">PING</span></td>
+                        <td><strong>-</strong></td>
+                        <td>-</td>
+                        <td>3168.8 ms</td>
+                        <td><span style="color:#4ade80; font-weight:600;">● OK</span></td>
+                    </tr>
+
+                    <tr>
+                        <td style="color:#94a3b8; font-size:13px;">2026-08-09 11:55:10</td>
+                        <td><span style="background:#94a3b822; color:#94a3b8; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600;">PING</span></td>
+                        <td><strong>-</strong></td>
+                        <td>-</td>
+                        <td>852.1 ms</td>
+                        <td><span style="color:#4ade80; font-weight:600;">● OK</span></td>
+                    </tr>
+
+                    <tr>
+                        <td style="color:#94a3b8; font-size:13px;">2026-08-09 11:55:04</td>
+                        <td><span style="background:#94a3b822; color:#94a3b8; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600;">PING</span></td>
+                        <td><strong>-</strong></td>
+                        <td>-</td>
+                        <td>322.7 ms</td>
+                        <td><span style="color:#4ade80; font-weight:600;">● OK</span></td>
+                    </tr>
+
+                    <tr>
+                        <td style="color:#94a3b8; font-size:13px;">2026-08-09 11:54:58</td>
+                        <td><span style="background:#94a3b822; color:#94a3b8; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600;">PING</span></td>
+                        <td><strong>-</strong></td>
+                        <td>-</td>
+                        <td>313.3 ms</td>
+                        <td><span style="color:#4ade80; font-weight:600;">● OK</span></td>
+                    </tr>
+
+                    <tr>
+                        <td style="color:#94a3b8; font-size:13px;">2026-08-09 11:54:52</td>
+                        <td><span style="background:#94a3b822; color:#94a3b8; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600;">PING</span></td>
+                        <td><strong>-</strong></td>
+                        <td>-</td>
+                        <td>332.6 ms</td>
+                        <td><span style="color:#4ade80; font-weight:600;">● OK</span></td>
+                    </tr>
+
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- Client-Side Interactive JavaScript Engine -->
+    <script>
+        const MATRIX_DATA = {"0": {"count": 0, "avg_ul": 0.0, "min_ul": 0.0, "max_ul": 0.0, "avg_dl": 0.0, "avg_ping": 0.0, "is_peak": false}, "1": {"count": 0, "avg_ul": 0.0, "min_ul": 0.0, "max_ul": 0.0, "avg_dl": 0.0, "avg_ping": 0.0, "is_peak": false}, "2": {"count": 0, "avg_ul": 0.0, "min_ul": 0.0, "max_ul": 0.0, "avg_dl": 0.0, "avg_ping": 0.0, "is_peak": false}, "3": {"count": 0, "avg_ul": 0.0, "min_ul": 0.0, "max_ul": 0.0, "avg_dl": 0.0, "avg_ping": 0.0, "is_peak": false}, "4": {"count": 0, "avg_ul": 0.0, "min_ul": 0.0, "max_ul": 0.0, "avg_dl": 0.0, "avg_ping": 0.0, "is_peak": false}, "5": {"count": 0, "avg_ul": 0.0, "min_ul": 0.0, "max_ul": 0.0, "avg_dl": 0.0, "avg_ping": 0.0, "is_peak": false}, "6": {"count": 0, "avg_ul": 0.0, "min_ul": 0.0, "max_ul": 0.0, "avg_dl": 0.0, "avg_ping": 0.0, "is_peak": false}, "7": {"count": 0, "avg_ul": 0.0, "min_ul": 0.0, "max_ul": 0.0, "avg_dl": 0.0, "avg_ping": 0.0, "is_peak": false}, "8": {"count": 0, "avg_ul": 0.0, "min_ul": 0.0, "max_ul": 0.0, "avg_dl": 0.0, "avg_ping": 0.0, "is_peak": false}, "9": {"count": 0, "avg_ul": 0.0, "min_ul": 0.0, "max_ul": 0.0, "avg_dl": 0.0, "avg_ping": 0.0, "is_peak": false}, "10": {"count": 0, "avg_ul": 0.0, "min_ul": 0.0, "max_ul": 0.0, "avg_dl": 0.0, "avg_ping": 0.0, "is_peak": false}, "11": {"count": 3, "avg_ul": 9.776666666666666, "min_ul": 9.59, "max_ul": 10.1, "avg_dl": 6.956666666666666, "avg_ping": 468.72205882352944, "is_peak": false}, "12": {"count": 1, "avg_ul": 9.32, "min_ul": 9.32, "max_ul": 9.32, "avg_dl": 10.41, "avg_ping": 373.99, "is_peak": true}, "13": {"count": 0, "avg_ul": 0.0, "min_ul": 0.0, "max_ul": 0.0, "avg_dl": 0.0, "avg_ping": 0.0, "is_peak": false}, "14": {"count": 0, "avg_ul": 0.0, "min_ul": 0.0, "max_ul": 0.0, "avg_dl": 0.0, "avg_ping": 0.0, "is_peak": false}, "15": {"count": 0, "avg_ul": 0.0, "min_ul": 0.0, "max_ul": 0.0, "avg_dl": 0.0, "avg_ping": 0.0, "is_peak": false}, "16": {"count": 0, "avg_ul": 0.0, "min_ul": 0.0, "max_ul": 0.0, "avg_dl": 0.0, "avg_ping": 0.0, "is_peak": false}, "17": {"count": 0, "avg_ul": 0.0, "min_ul": 0.0, "max_ul": 0.0, "avg_dl": 0.0, "avg_ping": 0.0, "is_peak": false}, "18": {"count": 0, "avg_ul": 0.0, "min_ul": 0.0, "max_ul": 0.0, "avg_dl": 0.0, "avg_ping": 0.0, "is_peak": false}, "19": {"count": 0, "avg_ul": 0.0, "min_ul": 0.0, "max_ul": 0.0, "avg_dl": 0.0, "avg_ping": 0.0, "is_peak": false}, "20": {"count": 0, "avg_ul": 0.0, "min_ul": 0.0, "max_ul": 0.0, "avg_dl": 0.0, "avg_ping": 0.0, "is_peak": false}, "21": {"count": 0, "avg_ul": 0.0, "min_ul": 0.0, "max_ul": 0.0, "avg_dl": 0.0, "avg_ping": 0.0, "is_peak": false}, "22": {"count": 0, "avg_ul": 0.0, "min_ul": 0.0, "max_ul": 0.0, "avg_dl": 0.0, "avg_ping": 0.0, "is_peak": false}, "23": {"count": 0, "avg_ul": 0.0, "min_ul": 0.0, "max_ul": 0.0, "avg_dl": 0.0, "avg_ping": 0.0, "is_peak": false}};
+        const PEAK_HOURS = [12];
+        let autoRefreshTimer = null;
+
+        function toggleAutoRefresh(enabled) {
+            if (enabled) {
+                autoRefreshTimer = setTimeout(() => location.reload(), 5000);
+            } else {
+                if (autoRefreshTimer) clearTimeout(autoRefreshTimer);
+            }
+        }
+
+        function applyPresetFilter(preset) {
+            const fromSelect = document.getElementById('fromHourSelect');
+            const toSelect = document.getElementById('toHourSelect');
+
+            if (preset === 'ALL') {
+                fromSelect.value = 0;
+                toSelect.value = 23;
+            }
+            applyCustomFilter();
+        }
+
+        function applyCustomFilter() {
+            const preset = document.getElementById('presetSelect').value;
+            const fromHour = parseInt(document.getElementById('fromHourSelect').value);
+            const toHour = parseInt(document.getElementById('toHourSelect').value);
+
+            let selectedHours = [];
+            if (preset === 'PEAK') {
+                selectedHours = PEAK_HOURS;
+            } else if (preset === 'OFFPEAK') {
+                selectedHours = Array.from({length: 24}, (_, i) => i).filter(h => !PEAK_HOURS.includes(h));
+            } else {
+                if (fromHour <= toHour) {
+                    for (let h = fromHour; h <= toHour; h++) selectedHours.push(h);
+                } else {
+                    for (let h = fromHour; h < 24; h++) selectedHours.push(h);
+                    for (let h = 0; h <= toHour; h++) selectedHours.push(h);
+                }
+            }
+
+            // Highlight & filter hourly matrix rows
+            const rows = document.querySelectorAll('#matrixTableBody tr');
+            let ulList = [];
+            rows.forEach(r => {
+                const h = parseInt(r.getAttribute('data-hour'));
+                if (selectedHours.includes(h)) {
+                    r.style.display = '';
+                    const data = MATRIX_DATA[h];
+                    if (data && data.count > 0 && data.avg_ul > 0) {
+                        ulList.push(data.avg_ul);
+                    }
+                } else {
+                    r.style.display = 'none';
+                }
+            });
+
+            // Update Summary Card for selected filter
+            const titleEl = document.getElementById('customPerfTitle');
+            const avgEl = document.getElementById('filterAvgUl');
+            const minEl = document.getElementById('filterMinUl');
+            const maxEl = document.getElementById('filterMaxUl');
+            const verdictEl = document.getElementById('filterVerdict');
+
+            titleEl.innerText = '📊 Performance Summary for Selected Hours (' + selectedHours.map(h => String(h).padStart(2,'0') + ':00').join(', ') + ')';
+
+            if (ulList.length > 0) {
+                const avgUl = ulList.reduce((a,b) => a+b, 0) / ulList.length;
+                const minUl = Math.min(...ulList);
+                const maxUl = Math.max(...ulList);
+
+                avgEl.innerHTML = `${avgUl.toFixed(2)} <span style="font-size:14px; color:#64748b;">Mbps</span>`;
+                minEl.innerHTML = `${minUl.toFixed(2)} <span style="font-size:14px; color:#64748b;">Mbps</span>`;
+                maxEl.innerHTML = `${maxUl.toFixed(2)} <span style="font-size:14px; color:#64748b;">Mbps</span>`;
+
+                if (minUl >= 65) {
+                    verdictEl.innerHTML = '<span style="color:#4ade80;">✅ SAFE — 10x 5.5M Ready</span>';
+                } else if (minUl >= 40) {
+                    verdictEl.innerHTML = '<span style="color:#fbbf24;">⚠️ MODERATE — Lower to 3.5M</span>';
+                } else {
+                    verdictEl.innerHTML = '<span style="color:#f87171;">🚨 HIGH RISK — Will Disconnect</span>';
+                }
+            } else {
+                avgEl.innerHTML = `-`;
+                minEl.innerHTML = `-`;
+                maxEl.innerHTML = `-`;
+                verdictEl.innerHTML = `<span style="color:#94a3b8;">No data for selected hours</span>`;
+            }
+        }
+
+        function resetFilters() {
+            document.getElementById('presetSelect').value = 'ALL';
+            document.getElementById('fromHourSelect').value = 0;
+            document.getElementById('toHourSelect').value = 23;
+            applyCustomFilter();
+        }
+
+        // Initialize auto refresh
+        toggleAutoRefresh(true);
+        applyCustomFilter();
+    </script>
+</body>
+</html>
