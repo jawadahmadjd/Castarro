@@ -435,6 +435,13 @@
             Channel name
             <input id="workspaceChannelEditName" type="text" autocomplete="off" spellcheck="false" oninput="syncWorkspaceChannelEditPreview()" onkeydown="handleWorkspaceChannelEditKey(event)">
           </label>
+          <label>
+            Chrome Profile
+            <select id="workspaceChannelEditChromeProfile">
+              <option value="">Auto-Detect Profile</option>
+            </select>
+            <span class="setting-note">Select the Chrome profile for Studio automations.</span>
+          </label>
         </div>
         <div class="modal-actions channel-edit-actions">
           <button class="pill ghost icon-only channel-delete-icon hidden" id="deleteWorkspaceChannelButton" type="button" title="Delete channel" aria-label="Delete channel">

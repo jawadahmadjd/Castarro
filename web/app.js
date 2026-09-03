@@ -2564,9 +2564,29 @@ function openWorkspaceChannelEdit(channelName) {
   }
   if (nameInput) nameInput.value = targetName;
   if (fileInput) fileInput.value = "";
+  populateChromeProfilesSelect(channel.chrome_profile || "");
   syncWorkspaceChannelEditPreview();
   $("workspaceChannelEditDialog")?.classList.remove("hidden");
   window.setTimeout(() => $("workspaceChannelEditName")?.focus(), 0);
+}
+
+async function populateChromeProfilesSelect(selectedProfileId = "") {
+  const select = $("workspaceChannelEditChromeProfile");
+  if (!select) return;
+  try {
+    const res = await fetchApi("/api/system/chrome-profiles");
+    const profiles = Array.isArray(res?.profiles) ? res.profiles : [];
+    let html = `<option value="">Auto-Detect Profile</option>`;
+    for (const p of profiles) {
+      const label = `${p.id}${p.name && p.name !== p.id ? ` — ${p.name}` : ""}${p.user_name ? ` (${p.user_name})` : ""}`;
+      const isSel = String(selectedProfileId || "").trim() === String(p.id).trim();
+      html += `<option value="${escapeAttr(p.id)}" ${isSel ? "selected" : ""}>${escapeHtml(label)}</option>`;
+    }
+    select.innerHTML = html;
+    select.value = selectedProfileId || "";
+  } catch (err) {
+    console.warn("Could not load Chrome profiles:", err);
+  }
 }
 
 function openWorkspaceChannelCreate() {
@@ -2591,6 +2611,7 @@ function openWorkspaceChannelCreate() {
   }
   if (nameInput) nameInput.value = nextName;
   if (fileInput) fileInput.value = "";
+  populateChromeProfilesSelect("");
   syncWorkspaceChannelEditPreview();
   $("workspaceChannelEditDialog")?.classList.remove("hidden");
   window.setTimeout(() => {
@@ -2818,12 +2839,18 @@ async function saveWorkspaceChannelEdit(channelName = "") {
   ));
   if (duplicate) throw new Error(`A channel named "${nextName}" already exists.`);
 
+  const chromeProfileSelect = $("workspaceChannelEditChromeProfile");
+  const nextChromeProfile = String(chromeProfileSelect?.value || "").trim();
+
   if (isCreateMode) {
     const channel = defaultChannel(channels.length + 1);
     channel.name = nextName;
     channel.raw_playlist = [`Raw Videos/${nextName}/video-001.mp4`];
     if (nextPicture) {
       channel.picture = nextPicture;
+    }
+    if (nextChromeProfile) {
+      channel.chrome_profile = nextChromeProfile;
     }
     channels.push(channel);
     state.activeSettingsChannelIndex = channels.length - 1;
@@ -2835,6 +2862,11 @@ async function saveWorkspaceChannelEdit(channelName = "") {
     } else {
       delete channels[channelIndex].picture;
       delete channels[channelIndex].picture_data_url;
+    }
+    if (nextChromeProfile) {
+      channels[channelIndex].chrome_profile = nextChromeProfile;
+    } else {
+      delete channels[channelIndex].chrome_profile;
     }
     if (state.workspace.selectedChannelName === oldName) {
       setWorkspaceSelectedChannel(nextName);

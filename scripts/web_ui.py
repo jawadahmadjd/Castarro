@@ -1013,17 +1013,25 @@ def record_request_trace(handler: BaseHTTPRequestHandler, status_code: int, outc
 
     path = str(trace.get("path") or "")
     client_action = str(trace.get("client_action") or "")
-    if path.startswith("/api/video-thumbnail"):
+    if (
+        path.startswith("/preview/")
+        or path.startswith("/api/video-thumbnail")
+        or path.startswith("/api/stream-thumbnail")
+        or path.startswith("/api/status")
+        or path.startswith("/api/health")
+        or path.startswith("/api/sync/status")
+        or path.startswith("/api/storage/status")
+        or path.startswith("/api/youtube/status")
+        or path.startswith("/api/channel/streams")
+        or path.startswith("/api/data-usage")
+        or path.startswith("/vendor/")
+        or path == "/api/activity/clear"
+    ) and not client_action:
         trace["logged"] = True
         return
-    if path == "/api/activity/clear":
-        trace["logged"] = True
-        return
+
     if status_code < 400:
         if not path.startswith("/api/"):
-            trace["logged"] = True
-            return
-        if path.startswith("/api/status") and not client_action:
             trace["logged"] = True
             return
 
@@ -8103,6 +8111,9 @@ class Handler(BaseHTTPRequestHandler):
                 channel_name = str(query.get("channel", [""])[0] or "").strip() or None
                 update_request_trace(self, config_name=config_name, channel_name=channel_name)
                 json_response(self, verify_youtube_channel_keys(config_name, channel_name))
+            if parsed.path == "/api/system/chrome-profiles":
+                from youtube_studio_automator import get_available_chrome_profiles
+                json_response(self, {"ok": True, "profiles": get_available_chrome_profiles()})
                 return
 
             if parsed.path == "/api/config":
@@ -8330,6 +8341,8 @@ class Handler(BaseHTTPRequestHandler):
                             channel["youtube_dual_stream"] = bool(body.get("dual_stream", True))
                         if "studio_url" in body:
                             channel["youtube_studio_url"] = str(body.get("studio_url") or "")
+                        if "chrome_profile" in body:
+                            channel["chrome_profile"] = str(body.get("chrome_profile") or "").strip()
                         updated = True
                         break
                 if not updated:

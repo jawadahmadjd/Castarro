@@ -27,6 +27,7 @@ def connect() -> sqlite3.Connection:
     connection.execute("PRAGMA busy_timeout = 30000")
     connection.execute("PRAGMA foreign_keys = ON")
     connection.execute("PRAGMA journal_mode = WAL")
+    connection.execute("PRAGMA synchronous = NORMAL")
     return connection
 
 
@@ -72,6 +73,7 @@ def init_db() -> None:
               youtube_auto_stop INTEGER NOT NULL DEFAULT 0,
               youtube_dual_stream INTEGER NOT NULL DEFAULT 1,
               youtube_studio_url TEXT,
+              chrome_profile TEXT,
               normalize_profile_json TEXT,
               raw_playlist_json TEXT,
               playlist_json TEXT,
@@ -207,6 +209,21 @@ def init_db() -> None:
               created_at TEXT NOT NULL
             );
 
+            CREATE INDEX IF NOT EXISTS idx_app_events_type_id
+            ON app_events(event_type, id DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_app_events_config_id
+            ON app_events(config_name, id DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_app_events_channel_id
+            ON app_events(channel_name, id DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_app_events_created
+            ON app_events(created_at DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_stream_sessions_config_id
+            ON stream_sessions(config_name, id DESC);
+
             INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('version', '1');
             """
         )
@@ -230,6 +247,8 @@ def init_db() -> None:
             db.execute("ALTER TABLE channels ADD COLUMN cloud_playlist_json TEXT")
         if "youtube_dual_stream" not in channel_columns:
             db.execute("ALTER TABLE channels ADD COLUMN youtube_dual_stream INTEGER NOT NULL DEFAULT 1")
+        if "chrome_profile" not in channel_columns:
+            db.execute("ALTER TABLE channels ADD COLUMN chrome_profile TEXT")
         db.execute(
             """
             DELETE FROM app_events
@@ -240,6 +259,28 @@ def init_db() -> None:
                 ORDER BY id DESC
                 LIMIT 50
               )
+            """
+        )
+        db.execute(
+            """
+            DELETE FROM app_events
+            WHERE event_type = 'api_request'
+              AND id NOT IN (
+                SELECT id FROM app_events
+                WHERE event_type = 'api_request'
+                ORDER BY id DESC
+                LIMIT 100
+              )
+            """
+        )
+        db.execute(
+            """
+            DELETE FROM app_events
+            WHERE id NOT IN (
+                SELECT id FROM app_events
+                ORDER BY id DESC
+                LIMIT 2000
+            )
             """
         )
 
@@ -313,6 +354,30 @@ def record_event(
                   )
                 """
             )
+        elif event_type == "api_request":
+            db.execute(
+                """
+                DELETE FROM app_events
+                WHERE event_type = 'api_request'
+                  AND id NOT IN (
+                    SELECT id FROM app_events
+                    WHERE event_type = 'api_request'
+                    ORDER BY id DESC
+                    LIMIT 100
+                  )
+                """
+            )
+        else:
+            db.execute(
+                """
+                DELETE FROM app_events
+                WHERE id NOT IN (
+                    SELECT id FROM app_events
+                    ORDER BY id DESC
+                    LIMIT 2000
+                )
+                """
+            )
 
 
 def insert_settings_snapshot(db: sqlite3.Connection, config_name: str, config: dict[str, Any], reason: str) -> None:
@@ -345,10 +410,11 @@ def upsert_channel(config_name: str, channel: dict[str, Any], db: sqlite3.Connec
             INSERT INTO channels(
               config_name, name, enabled, stream_key_env, has_inline_key,
               youtube_auto_start, youtube_auto_stop, youtube_dual_stream, youtube_studio_url,
+              chrome_profile,
               normalize_profile_json, raw_playlist_json, playlist_json, cloud_playlist_json,
               created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(config_name, name) DO UPDATE SET
               enabled=excluded.enabled,
               stream_key_env=excluded.stream_key_env,
@@ -357,6 +423,7 @@ def upsert_channel(config_name: str, channel: dict[str, Any], db: sqlite3.Connec
               youtube_auto_stop=excluded.youtube_auto_stop,
               youtube_dual_stream=excluded.youtube_dual_stream,
               youtube_studio_url=excluded.youtube_studio_url,
+              chrome_profile=excluded.chrome_profile,
               normalize_profile_json=excluded.normalize_profile_json,
               raw_playlist_json=excluded.raw_playlist_json,
               playlist_json=excluded.playlist_json,
@@ -373,6 +440,7 @@ def upsert_channel(config_name: str, channel: dict[str, Any], db: sqlite3.Connec
                 int(bool(channel.get("youtube_auto_stop"))),
                 int(bool(channel.get("youtube_dual_stream", True))),
                 channel.get("youtube_studio_url", ""),
+                str(channel.get("chrome_profile") or ""),
                 json.dumps(channel.get("normalize_profile", {}), sort_keys=True),
                 json.dumps(channel.get("raw_playlist", []), sort_keys=True),
                 json.dumps(channel.get("playlist", []), sort_keys=True),
