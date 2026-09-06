@@ -48,6 +48,7 @@ THUMBNAIL_MAX_BYTES = 2 * 1024 * 1024
 TRANSFER_MANIFEST_NAME = "castarro-transfer-manifest.json"
 TRANSFER_PACKAGE_VERSION = 1
 STREAM_CYCLE_RUNTIME_FILE = ROOT / "stream-cycle-runtime.json"
+STREAM_RELAY_RUNTIME_FILE = ROOT / "stream-relay-runtime.json"
 INTERNAL_JSON_FILES = {
     "backend-info.json",
     "castarro-transfer-manifest.json",
@@ -55,6 +56,7 @@ INTERNAL_JSON_FILES = {
     "package-lock.json",
     "package.json",
     "stream-cycle-runtime.json",
+    "stream-relay-runtime.json",
 }
 YOUTUBE_CHANNEL_NAME_MATCH_THRESHOLD = 0.80
 UI_PORT = int(os.environ.get("STREAM_UI_PORT", "8765"))
@@ -780,6 +782,7 @@ class AppState:
         self.stop_event = threading.Event()
         self.scheduler_channels: dict[tuple[str, str], dict[str, Any]] = {}
         self.stream_cycle_channels: dict[tuple[str, str], dict[str, Any]] = {}
+        self.stream_relay_channels: dict[tuple[str, str], dict[str, Any]] = {}
         self.alert_cooldowns: dict[tuple[str | None, str | None, str], float] = {}
         self.stream_exit_recorded: set[tuple[str, str]] = set()
         self.connection_watch: dict[tuple[str, str], dict[str, Any]] = {}
@@ -813,18 +816,22 @@ def request_stop_running_stream(
 
 def stream_cycle_runtime_items_locked() -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
-    for (config_name, channel_name), runtime in STATE.stream_cycle_channels.items():
+    for (config_name, target_key), runtime in STATE.stream_cycle_channels.items():
         if not isinstance(runtime, dict):
             continue
         if str(runtime.get("phase") or "") != "waiting_restart":
             continue
-        items.append(
-            {
-                "config": str(config_name),
-                "channel": str(channel_name),
-                "runtime": dict(runtime),
-            }
-        )
+        channel_part = str(runtime.get("channel") or target_key.split(":")[0])
+        stream_id_part = str(runtime.get("stream_id") or (target_key.split(":", 1)[1] if ":" in target_key else ""))
+        entry: dict[str, Any] = {
+            "config": str(config_name),
+            "channel": channel_part,
+            "target_key": str(target_key),
+            "runtime": dict(runtime),
+        }
+        if stream_id_part:
+            entry["stream_id"] = stream_id_part
+        items.append(entry)
     return items
 
 
@@ -891,15 +898,107 @@ def load_stream_cycle_runtime() -> None:
             continue
         config_name = str(item.get("config") or "").strip()
         channel_name = str(item.get("channel") or "").strip()
+        stream_id = str(item.get("stream_id") or "").strip()
+        target_key = str(item.get("target_key") or (f"{channel_name}:{stream_id}" if stream_id else channel_name)).strip()
         runtime = item.get("runtime") if isinstance(item.get("runtime"), dict) else {}
-        if not config_name or not channel_name or str(runtime.get("phase") or "") != "waiting_restart":
+        if not config_name or not target_key or str(runtime.get("phase") or "") != "waiting_restart":
             continue
-        restored[(config_name, channel_name)] = dict(runtime)
+        restored[(config_name, target_key)] = dict(runtime)
     if not restored:
         return
     with STATE.lock:
         STATE.stream_cycle_channels.update(restored)
     print(f"[automation] restored {len(restored)} stream cycle cooldown state(s)")
+
+
+def stream_relay_runtime_items_locked() -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for (config_name, channel_name), runtime in STATE.stream_relay_channels.items():
+        if not isinstance(runtime, dict):
+            continue
+        items.append(
+            {
+                "config": str(config_name),
+                "channel": str(channel_name),
+                "runtime": dict(runtime),
+            }
+        )
+    return items
+
+
+def write_stream_relay_runtime_items(items: list[dict[str, Any]]) -> None:
+    try:
+        STREAM_RELAY_RUNTIME_FILE.parent.mkdir(parents=True, exist_ok=True)
+        if not items:
+            STREAM_RELAY_RUNTIME_FILE.unlink(missing_ok=True)
+            return
+        payload = {
+            "version": 1,
+            "updated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+            "channels": items,
+        }
+        temp_path = STREAM_RELAY_RUNTIME_FILE.with_suffix(f"{STREAM_RELAY_RUNTIME_FILE.suffix}.tmp")
+        temp_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        temp_path.replace(STREAM_RELAY_RUNTIME_FILE)
+    except Exception as exc:
+        print(f"[automation] could not persist stream relay runtime: {exc}")
+
+
+def persist_stream_relay_runtime() -> None:
+    with STATE.lock:
+        items = stream_relay_runtime_items_locked()
+    write_stream_relay_runtime_items(items)
+
+
+def set_stream_relay_runtime(runtime_key: tuple[str, str], runtime: dict[str, Any]) -> None:
+    with STATE.lock:
+        STATE.stream_relay_channels[runtime_key] = runtime
+        items = stream_relay_runtime_items_locked()
+    write_stream_relay_runtime_items(items)
+
+
+def pop_stream_relay_runtime(runtime_key: tuple[str, str]) -> None:
+    with STATE.lock:
+        STATE.stream_relay_channels.pop(runtime_key, None)
+        items = stream_relay_runtime_items_locked()
+    write_stream_relay_runtime_items(items)
+
+
+def clear_stream_relay_runtime_for_config(config_name: str) -> None:
+    with STATE.lock:
+        for key in [key for key in STATE.stream_relay_channels if key[0] == config_name]:
+            STATE.stream_relay_channels.pop(key, None)
+        items = stream_relay_runtime_items_locked()
+    write_stream_relay_runtime_items(items)
+
+
+def load_stream_relay_runtime() -> None:
+    try:
+        payload = json.loads(STREAM_RELAY_RUNTIME_FILE.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return
+    except Exception as exc:
+        print(f"[automation] could not load stream relay runtime: {exc}")
+        return
+    channels = payload.get("channels") if isinstance(payload, dict) else []
+    if not isinstance(channels, list):
+        return
+    restored: dict[tuple[str, str], dict[str, Any]] = {}
+    for item in channels:
+        if not isinstance(item, dict):
+            continue
+        config_name = str(item.get("config") or "").strip()
+        channel_name = str(item.get("channel") or "").strip()
+        runtime = item.get("runtime") if isinstance(item.get("runtime"), dict) else {}
+        if not config_name or not channel_name:
+            continue
+        restored[(config_name, channel_name)] = dict(runtime)
+    if not restored:
+        return
+    with STATE.lock:
+        STATE.stream_relay_channels.update(restored)
+    print(f"[automation] restored {len(restored)} stream relay runtime state(s)")
+
 
 
 def desktop_oauth_redirect_uri(configured_redirect_uri: Any = "") -> str:
@@ -1023,6 +1122,7 @@ def record_request_trace(handler: BaseHTTPRequestHandler, status_code: int, outc
         or path.startswith("/api/storage/status")
         or path.startswith("/api/youtube/status")
         or path.startswith("/api/channel/streams")
+        or path.startswith("/api/channel/relay")
         or path.startswith("/api/data-usage")
         or path.startswith("/vendor/")
         or path == "/api/activity/clear"
@@ -1405,6 +1505,117 @@ def normalize_stream_cycle_settings(config: dict[str, Any]) -> dict[str, Any]:
     settings["channels"] = normalized_channels
     config["stream_cycles"] = settings
     return settings
+
+
+def normalize_stream_cycle_entry(
+    entry: dict[str, Any] | None,
+    channel_cycle_settings: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    raw = dict(entry) if isinstance(entry, dict) else {}
+    fallback_cooldown = 180
+    fallback_randomized = False
+    fallback_cooldown_rand = 0
+    if isinstance(channel_cycle_settings, dict):
+        fallback_cooldown = int(channel_cycle_settings.get("restart_delay_seconds") or 180)
+        fallback_randomized = bool(channel_cycle_settings.get("randomized"))
+        fallback_cooldown_rand = int(channel_cycle_settings.get("restart_delay_random_minutes") or 0)
+
+    duration_seconds = stream_cycle_duration_seconds(raw)
+    duration_min, duration_max = stream_cycle_random_bracket_seconds(
+        raw,
+        min_key="duration_min_seconds",
+        max_key="duration_max_seconds",
+        fallback_seconds=duration_seconds,
+        maximum_seconds=7 * 24 * 60 * 60,
+    )
+    fallback_duration_random_seconds = max(0, duration_max - duration_seconds)
+
+    restart_delay = stream_cycle_restart_delay_seconds(raw) if "restart_delay_seconds" in raw else float(fallback_cooldown)
+    delay_min, delay_max = stream_cycle_restart_delay_bracket_seconds(raw) if ("restart_delay_min_seconds" in raw or "restart_delay_max_seconds" in raw) else (int(restart_delay), int(restart_delay))
+    fallback_delay_random_seconds = max(0, delay_max - int(restart_delay)) if delay_max else (fallback_cooldown_rand * 60)
+
+    return {
+        "enabled": bool(raw.get("enabled", False)),
+        "duration_seconds": duration_seconds,
+        "restart_delay_seconds": int(restart_delay),
+        "randomized": bool(raw.get("randomized", fallback_randomized)),
+        "duration_random_minutes": stream_cycle_random_minutes(
+            raw,
+            "duration_random_minutes",
+            fallback_seconds=fallback_duration_random_seconds,
+        ),
+        "restart_delay_random_minutes": stream_cycle_random_minutes(
+            raw,
+            "restart_delay_random_minutes",
+            fallback_seconds=fallback_delay_random_seconds,
+        ),
+    }
+
+
+def normalize_stream_relay_settings(raw: Any) -> dict[str, Any]:
+    relay = dict(raw) if isinstance(raw, dict) else {}
+    cooldown_sec = int(relay.get("cooldown_seconds") or 75)
+    # YouTube requires ~30-60s to drain buffers and transition autostop broadcast to complete.
+    # Handover cooldown must be at least 1 minute (60 seconds minimum)
+    if cooldown_sec < 60:
+        cooldown_sec = 60
+    return {
+        "enabled": bool(relay.get("enabled", False)),
+        "cooldown_seconds": cooldown_sec,
+        "randomize_cooldown": bool(relay.get("randomize_cooldown", False)),
+        "cooldown_random_minutes": max(0, int(relay.get("cooldown_random_minutes") or 0)),
+        "loop": bool(relay.get("loop", True)),
+    }
+
+
+def channel_stream_relay_settings(channel: dict[str, Any]) -> dict[str, Any]:
+    return normalize_stream_relay_settings(channel.get("stream_relay") if isinstance(channel, dict) else None)
+
+
+def channel_stream_relay_status(config_name: str, channel_name: str, channel: dict[str, Any]) -> dict[str, Any]:
+    relay_settings = normalize_stream_relay_settings(channel.get("stream_relay") if isinstance(channel, dict) else None)
+    with STATE.lock:
+        runtime = dict(STATE.stream_relay_channels.get((config_name, channel_name)) or {})
+
+    phase = str(runtime.get("phase") or "idle")
+    cooldown_ends_at = float(runtime.get("cooldown_ends_at") or 0.0)
+    cooldown_left = max(0, int(cooldown_ends_at - time.time())) if phase == "waiting_cooldown" and cooldown_ends_at > 0 else 0
+    active_stream_id = str(runtime.get("active_stream_id") or "")
+    next_stream_id = str(runtime.get("next_stream_id") or "")
+
+    uptime_seconds = 0
+    remaining_seconds = 0
+    duration_seconds = int(runtime.get("duration_seconds") or 0)
+    if active_stream_id:
+        target_key = f"{channel_name}:{active_stream_id}"
+        with STATE.lock:
+            st = STATE.streams.get(target_key)
+            if not st and active_stream_id == "stream_1":
+                candidate = STATE.streams.get(channel_name)
+                if candidate and getattr(candidate, "stream_id", "stream_1") == "stream_1":
+                    st = candidate
+        if st and st.running.process.poll() is None:
+            uptime_seconds = max(0, int(time.time() - st.started_at))
+            if duration_seconds > 0:
+                remaining_seconds = max(0, duration_seconds - uptime_seconds)
+
+    return {
+        "enabled": bool(relay_settings["enabled"]),
+        "phase": phase,
+        "active_stream_id": active_stream_id,
+        "next_stream_id": next_stream_id,
+        "current_index": int(runtime.get("current_index") or 0),
+        "uptime_seconds": uptime_seconds,
+        "remaining_seconds": remaining_seconds,
+        "duration_seconds": duration_seconds,
+        "configured_duration_seconds": int(runtime.get("configured_duration_seconds") or 0),
+        "cooldown_seconds": int(runtime.get("cooldown_seconds") or relay_settings["cooldown_seconds"]),
+        "cooldown_remaining_seconds": cooldown_left,
+        "cycle_count": int(runtime.get("cycle_count") or 0),
+        "last_action": str(runtime.get("last_action") or ""),
+        "last_error": str(runtime.get("last_error") or ""),
+    }
+
 
 
 def normalize_scheduler_days(value: Any) -> list[str]:
@@ -5314,14 +5525,73 @@ def stream_cycle_status(config_name: str, config: dict[str, Any] | None = None) 
                 "restart_at": float(runtime.get("restart_at") or 0.0),
             }
         )
+
+    stream_rows: list[dict[str, Any]] = []
+    for channel in channels:
+        if not isinstance(channel, dict):
+            continue
+        cname = str(channel.get("name") or "").strip()
+        if not cname:
+            continue
+        c_streams = ensure_channel_streams(channel)
+        for s in c_streams:
+            sid = str(s.get("id") or "stream_1")
+            norm_cycle = normalize_stream_cycle_entry(s.get("stream_cycle"), settings)
+            stream_target_key = f"{cname}:{sid}"
+            s_runtime = runtime_snapshot.get((config_name, stream_target_key), {})
+            s_state = stream_snapshot.get(stream_target_key) or (stream_snapshot.get(cname) if sid == "stream_1" else None)
+
+            s_conf_duration = norm_cycle["duration_seconds"]
+            s_rand_sec = norm_cycle["duration_random_minutes"] * 60
+            s_duration = s_conf_duration
+            if norm_cycle["randomized"] and s_rand_sec > 0 and s_runtime.get("active_duration_seconds"):
+                s_duration = int(s_runtime.get("active_duration_seconds") or s_conf_duration)
+
+            s_running = bool(s_state and s_state.running.process.poll() is None)
+            s_elapsed = max(0.0, now - s_state.started_at) if s_running and s_state else 0.0
+            s_next_cycle = ""
+            if s_running and norm_cycle["enabled"]:
+                s_next_cycle = datetime.fromtimestamp(s_state.started_at + s_duration).astimezone().isoformat(timespec="seconds")
+            elif s_runtime.get("phase") == "waiting_restart" and s_runtime.get("restart_at"):
+                s_next_cycle = datetime.fromtimestamp(float(s_runtime.get("restart_at") or 0)).astimezone().isoformat(timespec="seconds")
+
+            s_restart_at = float(s_runtime.get("restart_at") or 0.0)
+            s_cooldown_left = max(0, int(s_restart_at - now)) if s_runtime.get("phase") == "waiting_restart" and s_restart_at > 0 else 0
+
+            stream_rows.append(
+                {
+                    "channel": cname,
+                    "stream_id": sid,
+                    "stream_name": str(s.get("name") or sid),
+                    "enabled": bool(norm_cycle["enabled"]),
+                    "duration_seconds": s_duration,
+                    "configured_duration_seconds": s_conf_duration,
+                    "restart_delay_seconds": norm_cycle["restart_delay_seconds"],
+                    "randomized": bool(norm_cycle["randomized"]),
+                    "duration_random_minutes": norm_cycle["duration_random_minutes"],
+                    "restart_delay_random_minutes": norm_cycle["restart_delay_random_minutes"],
+                    "elapsed_seconds": int(s_elapsed),
+                    "remaining_seconds": max(0, int(s_duration - s_elapsed)) if s_running else 0,
+                    "running": s_running,
+                    "phase": str(s_runtime.get("phase") or ("running" if s_running else "idle")),
+                    "last_action": str(s_runtime.get("last_action") or ""),
+                    "cycle_count": int(s_runtime.get("cycle_count") or 0),
+                    "next_cycle_at": s_next_cycle,
+                    "restart_at": s_restart_at,
+                    "cooldown_remaining_seconds": s_cooldown_left,
+                }
+            )
+
     return {
         "enabled": bool(settings.get("enabled")),
         "restart_delay_seconds": stream_cycle_restart_delay_seconds(settings),
         "randomized": bool(settings.get("randomized")),
         "restart_delay_random_minutes": int(settings.get("restart_delay_random_minutes") or 0),
         "channels": channel_rows,
+        "streams": stream_rows,
         "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
     }
+
 
 
 def recent_alert_events(
@@ -5960,8 +6230,14 @@ def stop_stream(
                 STATE.preview = None
             state.recovering = False
             state.last_reconnect_status = ""
-            if clear_cycle_runtime and STATE.stream_cycle_channels.pop((state.config_name, name), None) is not None:
-                cycle_runtime_changed = True
+            if clear_cycle_runtime:
+                if STATE.stream_cycle_channels.pop((state.config_name, name), None) is not None:
+                    cycle_runtime_changed = True
+                if ":" not in name:
+                    for k in list(STATE.stream_cycle_channels.keys()):
+                        if k[0] == state.config_name and k[1].startswith(f"{name}:"):
+                            STATE.stream_cycle_channels.pop(k, None)
+                            cycle_runtime_changed = True
             state.running.stop_requested = True
             request_stop_running_stream(state.running, source=request_source, reason=request_reason)
             if state.running.preview_manifest:
@@ -5994,8 +6270,17 @@ def stop_stream(
                     active_by_channel[ch] = s
         for ch, s in active_by_channel.items():
             STATE.streams[ch] = s
+        relay_runtime_changed = False
+        if request_source != "stream_relay":
+            for (cfg, ch), r_item in STATE.stream_relay_channels.items():
+                if (not channel_name or ch == channel_name) and r_item.get("phase") in {"running", "waiting_cooldown"}:
+                    r_item["phase"] = "idle"
+                    r_item["last_action"] = "paused_manual_stop"
+                    relay_runtime_changed = True
     if cycle_runtime_changed:
         persist_stream_cycle_runtime()
+    if relay_runtime_changed:
+        persist_stream_relay_runtime()
     return stopped
 
 
@@ -6152,6 +6437,27 @@ def get_channel_streams_api(config_name: str, channel_name: str, fetch_stats: bo
         if thumb_path and not thumb_url:
             thumb_url = f"/api/stream-thumbnail?config={quote(config_name)}&channel={quote(channel_name)}&stream_id={quote(sid)}"
 
+        channel_cycle_settings = config.get("stream_cycles") if isinstance(config.get("stream_cycles"), dict) else {}
+        norm_cycle = normalize_stream_cycle_entry(s.get("stream_cycle"), channel_cycle_settings)
+        stream_target_key = f"{channel_name}:{sid}"
+        with STATE.lock:
+            s_runtime = dict(STATE.stream_cycle_channels.get((config_name, stream_target_key)) or {})
+        s_restart_at = float(s_runtime.get("restart_at") or 0.0)
+        s_cooldown_left = max(0, int(s_restart_at - time.time())) if s_runtime.get("phase") == "waiting_restart" and s_restart_at > 0 else 0
+        s_conf_duration = norm_cycle["duration_seconds"]
+        s_rem_duration = max(0, int(s_conf_duration - uptime_seconds)) if is_running else 0
+        cycle_status = {
+            "enabled": bool(norm_cycle["enabled"]),
+            "running": is_running,
+            "phase": str(s_runtime.get("phase") or ("running" if is_running else "idle")),
+            "elapsed_seconds": uptime_seconds if is_running else 0,
+            "remaining_seconds": s_rem_duration,
+            "restart_at": s_restart_at,
+            "cooldown_remaining_seconds": s_cooldown_left,
+            "cycle_count": int(s_runtime.get("cycle_count") or 0),
+            "last_action": str(s_runtime.get("last_action") or ""),
+        }
+
         results.append({
             "id": sid,
             "channel": channel_name,
@@ -6179,8 +6485,18 @@ def get_channel_streams_api(config_name: str, channel_name: str, fetch_stats: bo
             "total_views": total_views,
             "avg_view_duration": avg_view_duration,
             "youtube_dual_stream": bool(s.get("youtube_dual_stream", True)),
+            "stream_cycle": norm_cycle,
+            "cycle_status": cycle_status,
         })
-    return {"ok": True, "channel": channel_name, "streams": results, "stats_refreshed": fetch_stats}
+    return {
+        "ok": True,
+        "channel": channel_name,
+        "streams": results,
+        "stats_refreshed": fetch_stats,
+        "stream_relay": normalize_stream_relay_settings(channel.get("stream_relay")),
+        "relay_status": channel_stream_relay_status(config_name, channel_name, channel),
+    }
+
 
 
 def add_channel_stream_api(config_name: str, body: dict[str, Any]) -> dict[str, Any]:
@@ -6210,6 +6526,10 @@ def add_channel_stream_api(config_name: str, body: dict[str, Any]) -> dict[str, 
         "scheduled_start_time": sstart,
         "stream_key": skey,
         "stream_key_env": "",
+        "youtube_broadcast_id": str(body.get("youtube_broadcast_id") or "").strip(),
+        "youtube_studio_url": str(body.get("youtube_studio_url") or "").strip(),
+        "playlist": body.get("playlist") if isinstance(body.get("playlist"), list) else list(channel.get("playlist") or []),
+        "stream_cycle": normalize_stream_cycle_entry(body.get("stream_cycle") or {}, channel.get("stream_cycle")),
         "enabled": True,
         "youtube_dual_stream": True,
     }
@@ -6379,6 +6699,7 @@ def save_channel_streams_api(config_name: str, body: dict[str, Any]) -> dict[str
     
     existing_streams = ensure_channel_streams(channel)
     existing_map = {str(s.get("id")): s for s in existing_streams}
+    channel_cycle_settings = config.get("stream_cycles") if isinstance(config.get("stream_cycles"), dict) else {}
     for rs in raw_streams:
         if isinstance(rs, dict):
             sid = str(rs.get("id"))
@@ -6387,13 +6708,76 @@ def save_channel_streams_api(config_name: str, body: dict[str, Any]) -> dict[str
                     rs["thumbnail_path"] = existing_map[sid]["thumbnail_path"]
                 if "youtube_dual_stream" not in rs:
                     rs["youtube_dual_stream"] = bool(existing_map[sid].get("youtube_dual_stream", True))
+                if "stream_cycle" not in rs and "stream_cycle" in existing_map[sid]:
+                    rs["stream_cycle"] = existing_map[sid]["stream_cycle"]
+                if "youtube_broadcast_id" not in rs and existing_map[sid].get("youtube_broadcast_id"):
+                    rs["youtube_broadcast_id"] = existing_map[sid]["youtube_broadcast_id"]
+                if "youtube_studio_url" not in rs and existing_map[sid].get("youtube_studio_url"):
+                    rs["youtube_studio_url"] = existing_map[sid]["youtube_studio_url"]
             else:
                 if "youtube_dual_stream" not in rs:
                     rs["youtube_dual_stream"] = True
-    
+
+            if "stream_cycle" in rs and isinstance(rs["stream_cycle"], dict):
+                rs["stream_cycle"] = normalize_stream_cycle_entry(rs["stream_cycle"], channel_cycle_settings)
+                if not rs["stream_cycle"].get("enabled"):
+                    pop_stream_cycle_runtime((config_name, f"{channel_name}:{sid}"))
+
     channel["streams"] = raw_streams
     save_config(config_name, config)
     return get_channel_streams_api(config_name, channel_name)
+
+
+def save_channel_relay_api(config_name: str, body: dict[str, Any]) -> dict[str, Any]:
+    config, error = load_config_or_none(config_name)
+    if not config:
+        raise ValueError(error or "Config not found.")
+    channel_name = str(body.get("channel") or "").strip()
+    channel = find_channel_by_name(config, channel_name)
+    if not channel:
+        raise ValueError(f"Channel '{channel_name}' not found.")
+
+    raw_relay = body.get("stream_relay") if isinstance(body.get("stream_relay"), dict) else body
+    relay_settings = normalize_stream_relay_settings(raw_relay)
+    channel["stream_relay"] = relay_settings
+    save_config(config_name, config)
+    return {
+        "ok": True,
+        "channel": channel_name,
+        "stream_relay": relay_settings,
+        "relay_status": channel_stream_relay_status(config_name, channel_name, channel),
+    }
+
+
+def toggle_channel_relay_api(config_name: str, body: dict[str, Any]) -> dict[str, Any]:
+    config, error = load_config_or_none(config_name)
+    if not config:
+        raise ValueError(error or "Config not found.")
+    channel_name = str(body.get("channel") or "").strip()
+    channel = find_channel_by_name(config, channel_name)
+    if not channel:
+        raise ValueError(f"Channel '{channel_name}' not found.")
+
+    cur_relay = normalize_stream_relay_settings(channel.get("stream_relay"))
+    new_enabled = not cur_relay["enabled"]
+    cur_relay["enabled"] = new_enabled
+    channel["stream_relay"] = cur_relay
+    save_config(config_name, config)
+
+    if not new_enabled:
+        with STATE.lock:
+            if (config_name, channel_name) in STATE.stream_relay_channels:
+                STATE.stream_relay_channels[(config_name, channel_name)]["phase"] = "idle"
+                STATE.stream_relay_channels[(config_name, channel_name)]["last_action"] = "disabled"
+        persist_stream_relay_runtime()
+
+    return {
+        "ok": True,
+        "channel": channel_name,
+        "stream_relay": cur_relay,
+        "relay_status": channel_stream_relay_status(config_name, channel_name, channel),
+    }
+
 
 
 def tail_file(path: Path, max_chars: int = 5000) -> str:
@@ -7241,181 +7625,548 @@ def evaluate_scheduler_for_config(config_name: str, config: dict[str, Any]) -> N
             STATE.scheduler_channels[runtime_key] = runtime
 
 
-def evaluate_stream_cycles_for_config(config_name: str, config: dict[str, Any]) -> None:
-    settings = normalize_stream_cycle_settings(config)
-    if not settings.get("enabled"):
-        clear_stream_cycle_runtime_for_config(config_name)
+def evaluate_single_cycle_target(
+    config_name: str,
+    config: dict[str, Any],
+    channel_name: str,
+    stream_id: str | None,
+    cycle_entry: dict[str, Any],
+    *,
+    now: float,
+) -> None:
+    target_key = f"{channel_name}:{stream_id}" if stream_id else channel_name
+    runtime_key = (config_name, target_key)
+
+    if not cycle_entry or not cycle_entry.get("enabled"):
+        pop_stream_cycle_runtime(runtime_key)
         return
 
+    configured_duration_seconds = int(cycle_entry.get("duration_seconds") or 12 * 3600)
+    restart_delay = float(cycle_entry.get("restart_delay_seconds", 180))
+    randomized = bool(cycle_entry.get("randomized"))
+    duration_random_seconds = int(cycle_entry.get("duration_random_minutes") or 0) * 60
+    restart_delay_random_seconds = int(cycle_entry.get("restart_delay_random_minutes") or 0) * 60
+
+    with STATE.lock:
+        if stream_id:
+            state = STATE.streams.get(target_key)
+            if not state and stream_id == "stream_1":
+                candidate = STATE.streams.get(channel_name)
+                if candidate and getattr(candidate, "stream_id", "stream_1") == "stream_1":
+                    state = candidate
+        else:
+            state = STATE.streams.get(channel_name)
+        runtime = dict(STATE.stream_cycle_channels.get(runtime_key) or {})
+
+    is_running = bool(state and state.config_name == config_name and state.running.process.poll() is None)
+    if is_running and state:
+        elapsed_seconds = max(0.0, now - state.started_at)
+        if randomized and duration_random_seconds > 0:
+            active_started_at = float(runtime.get("stream_started_at") or 0.0)
+            active_duration = int(runtime.get("active_duration_seconds") or 0)
+            if abs(active_started_at - state.started_at) > 0.001 or active_duration <= 0:
+                active_duration = configured_duration_seconds + random_seconds_between(
+                    0,
+                    duration_random_seconds,
+                    minimum_seconds=0,
+                )
+            duration_seconds = active_duration
+        else:
+            duration_seconds = configured_duration_seconds
+        runtime.update(
+            {
+                "phase": "running",
+                "last_evaluated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                "duration_seconds": duration_seconds,
+                "configured_duration_seconds": configured_duration_seconds,
+                "randomized": randomized,
+                "duration_random_minutes": int(cycle_entry.get("duration_random_minutes") or 0),
+                "active_duration_seconds": duration_seconds,
+                "stream_started_at": state.started_at,
+                "restart_at": 0.0,
+                "channel": channel_name,
+                "stream_id": stream_id or "",
+            }
+        )
+        set_stream_cycle_runtime(runtime_key, runtime)
+        if elapsed_seconds < duration_seconds:
+            return
+
+        event_details = {
+            "duration_seconds": duration_seconds,
+            "configured_duration_seconds": configured_duration_seconds,
+            "randomized": randomized,
+            "duration_random_minutes": int(cycle_entry.get("duration_random_minutes") or 0),
+            "elapsed_seconds": round(elapsed_seconds, 3),
+            "restart_delay_seconds": restart_delay,
+        }
+        if stream_id:
+            event_details["stream_id"] = stream_id
+        app_db.record_event(
+            "stream_cycle_due",
+            config_name,
+            channel_name,
+            event_details,
+        )
+        actual_restart_delay = restart_delay
+        if randomized and restart_delay_random_seconds > 0:
+            actual_restart_delay += random_seconds_between(0, restart_delay_random_seconds, minimum_seconds=0)
+        restart_at = time.time() + actual_restart_delay
+        runtime.update(
+            {
+                "phase": "waiting_restart",
+                "restart_at": restart_at,
+                "restart_delay_seconds": actual_restart_delay,
+                "randomized": randomized,
+                "restart_delay_random_minutes": int(cycle_entry.get("restart_delay_random_minutes") or 0),
+                "last_action": "stopped_for_cycle",
+                "last_stopped_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                "channel": channel_name,
+                "stream_id": stream_id or "",
+            }
+        )
+        set_stream_cycle_runtime(runtime_key, runtime)
+        stopped = stop_stream(
+            channel_name,
+            stream_id=stream_id,
+            clear_cycle_runtime=False,
+            request_source="stream_cycle",
+            request_reason=(
+                f"duration reached: elapsed={round(elapsed_seconds, 3)}s "
+                f"limit={duration_seconds}s cooldown={actual_restart_delay}s"
+            ),
+        )
+        if not stopped:
+            return
+        stop_event_details = {
+            "restart_at": restart_at,
+            "restart_delay_seconds": actual_restart_delay,
+            "randomized": randomized,
+            "restart_delay_random_minutes": int(cycle_entry.get("restart_delay_random_minutes") or 0),
+        }
+        if stream_id:
+            stop_event_details["stream_id"] = stream_id
+        app_db.record_event(
+            "stream_cycle_stopped",
+            config_name,
+            channel_name,
+            stop_event_details,
+        )
+        return
+
+    if runtime.get("phase") != "waiting_restart":
+        return
+
+    # Delay cycle restart while Playwright is active
+    with STATE.lock:
+        if channel_name in STATE.playwright_dismiss_channels:
+            return
+
+    restart_at = float(runtime.get("restart_at") or 0.0)
+    if restart_at and now < restart_at:
+        return
+
+    try:
+        assert_youtube_channel_keys_match(config_name, channel_name)
+        started = start_stream(config_name, channel_name, stream_id=stream_id)
+    except Exception as exc:
+        retry_delay = restart_delay
+        if randomized and restart_delay_random_seconds > 0:
+            retry_delay += random_seconds_between(0, restart_delay_random_seconds, minimum_seconds=0)
+        runtime.update(
+            {
+                "phase": "waiting_restart",
+                "restart_at": time.time() + max(retry_delay, 10.0),
+                "restart_delay_seconds": retry_delay,
+                "randomized": randomized,
+                "restart_delay_random_minutes": int(cycle_entry.get("restart_delay_random_minutes") or 0),
+                "last_action": "restart_failed",
+                "last_error": str(exc),
+                "channel": channel_name,
+                "stream_id": stream_id or "",
+            }
+        )
+        set_stream_cycle_runtime(runtime_key, runtime)
+        fail_event_details = {"message": str(exc), "restart_at": runtime["restart_at"]}
+        if stream_id:
+            fail_event_details["stream_id"] = stream_id
+        app_db.record_event(
+            "stream_cycle_restart_failed",
+            config_name,
+            channel_name,
+            fail_event_details,
+        )
+        return
+
+    if started:
+        runtime.update(
+            {
+                "phase": "running",
+                "restart_at": 0.0,
+                "last_action": "restarted",
+                "last_started_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                "active_duration_seconds": 0,
+                "stream_started_at": 0.0,
+                "cycle_count": int(runtime.get("cycle_count") or 0) + 1,
+                "last_error": "",
+                "channel": channel_name,
+                "stream_id": stream_id or "",
+            }
+        )
+        set_stream_cycle_runtime(runtime_key, runtime)
+        restart_event_details = {"cycle_count": runtime["cycle_count"]}
+        if stream_id:
+            restart_event_details["stream_id"] = stream_id
+        app_db.record_event(
+            "stream_cycle_restarted",
+            config_name,
+            channel_name,
+            restart_event_details,
+        )
+
+
+def evaluate_channel_relay(
+    config_name: str,
+    config: dict[str, Any],
+    channel: dict[str, Any],
+    channel_streams: list[dict[str, Any]],
+    *,
+    now: float,
+) -> None:
+    channel_name = str(channel.get("name") or "").strip()
+    if not channel_name:
+        return
+    relay_settings = normalize_stream_relay_settings(channel.get("stream_relay"))
+    runtime_key = (config_name, channel_name)
+
+    if not relay_settings.get("enabled"):
+        with STATE.lock:
+            if runtime_key in STATE.stream_relay_channels:
+                STATE.stream_relay_channels[runtime_key]["phase"] = "idle"
+        return
+
+    eligible_streams = [s for s in channel_streams if s.get("enabled", True)]
+    if not eligible_streams:
+        with STATE.lock:
+            if runtime_key in STATE.stream_relay_channels:
+                STATE.stream_relay_channels[runtime_key]["phase"] = "idle"
+        return
+
+    eligible_ids = [str(s.get("id") or "stream_1") for s in eligible_streams]
+    stream_map = {str(s.get("id") or "stream_1"): s for s in eligible_streams}
+
+    with STATE.lock:
+        runtime = dict(STATE.stream_relay_channels.get(runtime_key) or {})
+        running_stream_id = None
+        running_stream_state = None
+        for sid in eligible_ids:
+            target_key = f"{channel_name}:{sid}"
+            st = STATE.streams.get(target_key)
+            if not st and sid == "stream_1":
+                candidate = STATE.streams.get(channel_name)
+                if candidate and getattr(candidate, "stream_id", "stream_1") == "stream_1":
+                    st = candidate
+            if st and st.config_name == config_name and st.running.process.poll() is None:
+                running_stream_id = sid
+                running_stream_state = st
+                break
+
+    # CASE 1: A stream is currently active and running
+    if running_stream_id and running_stream_state:
+        cur_idx = eligible_ids.index(running_stream_id) if running_stream_id in eligible_ids else 0
+        next_idx = (cur_idx + 1) % len(eligible_ids)
+        next_sid = eligible_ids[next_idx]
+
+        stream_entry = stream_map.get(running_stream_id, {})
+        cycle_cfg = stream_entry.get("stream_cycle") if isinstance(stream_entry.get("stream_cycle"), dict) else {}
+        base_dur = stream_cycle_duration_seconds(cycle_cfg) if cycle_cfg else 21600
+        is_rand = bool(cycle_cfg.get("randomized"))
+        rand_sec = int(cycle_cfg.get("duration_random_minutes") or 0) * 60
+
+        active_dur = int(runtime.get("duration_seconds") or 0)
+        stored_started_at = float(runtime.get("stream_started_at") or 0.0)
+
+        # Initialize or lock in the random duration once per stream run
+        if runtime.get("phase") != "running" or runtime.get("active_stream_id") != running_stream_id or abs(stored_started_at - running_stream_state.started_at) > 0.001 or active_dur <= 0:
+            if is_rand and rand_sec > 0:
+                active_dur = base_dur + random_seconds_between(0, rand_sec, minimum_seconds=0)
+            else:
+                active_dur = base_dur
+
+        elapsed = max(0.0, now - running_stream_state.started_at)
+        runtime.update({
+            "channel": channel_name,
+            "phase": "running",
+            "active_stream_id": running_stream_id,
+            "next_stream_id": next_sid,
+            "current_index": cur_idx,
+            "stream_started_at": running_stream_state.started_at,
+            "duration_seconds": active_dur,
+            "configured_duration_seconds": base_dur,
+            "cooldown_ends_at": 0.0,
+            "last_action": "running",
+            "last_evaluated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        })
+        set_stream_relay_runtime(runtime_key, runtime)
+
+        # Stream still within its scheduled time turn
+        if elapsed < active_dur:
+            return
+
+        # DURATION REACHED -> Stop stream and transition to Handover Cooldown!
+        cooldown_sec = int(relay_settings.get("cooldown_seconds") or 75)
+        if relay_settings.get("randomize_cooldown") and relay_settings.get("cooldown_random_minutes", 0) > 0:
+            cooldown_sec += random_seconds_between(0, relay_settings["cooldown_random_minutes"] * 60, minimum_seconds=0)
+        if cooldown_sec < 60:
+            cooldown_sec = 60
+
+        cooldown_ends_at = now + cooldown_sec
+        runtime.update({
+            "phase": "waiting_cooldown",
+            "cooldown_ends_at": cooldown_ends_at,
+            "cooldown_seconds": cooldown_sec,
+            "previous_stream_id": running_stream_id,
+            "active_stream_id": "",
+            "next_stream_id": next_sid,
+            "last_action": "stopped_for_handover",
+            "last_stopped_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        })
+        set_stream_relay_runtime(runtime_key, runtime)
+
+        app_db.record_event(
+            "stream_relay_handover_cooldown_started",
+            config_name,
+            channel_name,
+            {
+                "previous_stream_id": running_stream_id,
+                "next_stream_id": next_sid,
+                "cooldown_seconds": cooldown_sec,
+                "cooldown_ends_at": cooldown_ends_at,
+            }
+        )
+
+        stop_stream(
+            channel_name,
+            stream_id=running_stream_id,
+            clear_cycle_runtime=False,
+            request_source="stream_relay",
+            request_reason=f"Sequential relay handover to {next_sid} after {round(elapsed, 1)}s (limit {active_dur}s)",
+        )
+        return
+
+    # CASE 2: No stream is currently running on this channel
+    current_phase = str(runtime.get("phase") or "idle")
+
+    if current_phase == "waiting_cooldown":
+        cooldown_ends_at = float(runtime.get("cooldown_ends_at") or 0.0)
+        if now < cooldown_ends_at:
+            # YouTube backend draining autostop buffers
+            return
+
+        target_sid = str(runtime.get("next_stream_id") or "")
+        if not target_sid or target_sid not in eligible_ids:
+            target_sid = eligible_ids[0]
+
+        target_idx = eligible_ids.index(target_sid)
+        if target_idx == 0 and not relay_settings.get("loop", True):
+            runtime["phase"] = "completed"
+            runtime["last_action"] = "relay_completed_no_loop"
+            set_stream_relay_runtime(runtime_key, runtime)
+            return
+
+        with STATE.lock:
+            if channel_name in STATE.playwright_dismiss_channels:
+                return
+
+        try:
+            assert_youtube_channel_keys_match(config_name, channel_name)
+            started = start_stream(config_name, channel_name, stream_id=target_sid)
+        except Exception as exc:
+            runtime.update({
+                "phase": "waiting_cooldown",
+                "cooldown_ends_at": now + 15.0,
+                "last_action": "start_failed",
+                "last_error": str(exc),
+            })
+            set_stream_relay_runtime(runtime_key, runtime)
+            app_db.record_event(
+                "stream_relay_start_failed",
+                config_name,
+                channel_name,
+                {"stream_id": target_sid, "error": str(exc)},
+            )
+            return
+
+        if started:
+            next_next_idx = (target_idx + 1) % len(eligible_ids)
+            cycle_cnt = int(runtime.get("cycle_count") or 0)
+            if target_idx == 0:
+                cycle_cnt += 1
+
+            stream_entry = stream_map.get(target_sid, {})
+            cycle_cfg = stream_entry.get("stream_cycle") if isinstance(stream_entry.get("stream_cycle"), dict) else {}
+            base_dur = stream_cycle_duration_seconds(cycle_cfg) if cycle_cfg else 21600
+            is_rand = bool(cycle_cfg.get("randomized"))
+            rand_sec = int(cycle_cfg.get("duration_random_minutes") or 0) * 60
+            calc_dur = base_dur + (random_seconds_between(0, rand_sec, minimum_seconds=0) if (is_rand and rand_sec > 0) else 0)
+
+            runtime.update({
+                "phase": "running",
+                "active_stream_id": target_sid,
+                "current_index": target_idx,
+                "next_stream_id": eligible_ids[next_next_idx],
+                "stream_started_at": now,
+                "duration_seconds": calc_dur,
+                "configured_duration_seconds": base_dur,
+                "cooldown_ends_at": 0.0,
+                "cycle_count": cycle_cnt,
+                "last_action": "handover_started",
+                "last_started_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                "last_error": "",
+            })
+            set_stream_relay_runtime(runtime_key, runtime)
+            app_db.record_event(
+                "stream_relay_handover_started",
+                config_name,
+                channel_name,
+                {"stream_id": target_sid, "cycle_count": cycle_cnt, "duration_seconds": calc_dur},
+            )
+        return
+
+    if current_phase == "idle":
+        target_sid = eligible_ids[0]
+        with STATE.lock:
+            if channel_name in STATE.playwright_dismiss_channels:
+                return
+        try:
+            assert_youtube_channel_keys_match(config_name, channel_name)
+            started = start_stream(config_name, channel_name, stream_id=target_sid)
+        except Exception as exc:
+            runtime.update({"phase": "idle", "last_action": "start_failed", "last_error": str(exc)})
+            set_stream_relay_runtime(runtime_key, runtime)
+            return
+
+        if started:
+            next_idx = 1 % len(eligible_ids)
+            stream_entry = stream_map.get(target_sid, {})
+            cycle_cfg = stream_entry.get("stream_cycle") if isinstance(stream_entry.get("stream_cycle"), dict) else {}
+            base_dur = stream_cycle_duration_seconds(cycle_cfg) if cycle_cfg else 21600
+            is_rand = bool(cycle_cfg.get("randomized"))
+            rand_sec = int(cycle_cfg.get("duration_random_minutes") or 0) * 60
+            calc_dur = base_dur + (random_seconds_between(0, rand_sec, minimum_seconds=0) if (is_rand and rand_sec > 0) else 0)
+
+            runtime.update({
+                "channel": channel_name,
+                "phase": "running",
+                "active_stream_id": target_sid,
+                "current_index": 0,
+                "next_stream_id": eligible_ids[next_idx],
+                "stream_started_at": now,
+                "duration_seconds": calc_dur,
+                "configured_duration_seconds": base_dur,
+                "cooldown_ends_at": 0.0,
+                "cycle_count": 1,
+                "last_action": "relay_started",
+                "last_started_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                "last_error": "",
+            })
+            set_stream_relay_runtime(runtime_key, runtime)
+            app_db.record_event(
+                "stream_relay_started",
+                config_name,
+                channel_name,
+                {"stream_id": target_sid, "duration_seconds": calc_dur},
+            )
+
+
+def evaluate_stream_cycles_for_config(config_name: str, config: dict[str, Any]) -> None:
+    settings = normalize_stream_cycle_settings(config)
     now = time.time()
-    restart_delay = stream_cycle_restart_delay_seconds(settings)
-    restart_delay_random_seconds = int(settings.get("restart_delay_random_minutes") or 0) * 60
-    for channel in config.get("channels", []):
+    channels = config.get("channels", []) if isinstance(config.get("channels"), list) else []
+
+    active_cycle_keys: set[str] = set()
+
+    for channel in channels:
         if not isinstance(channel, dict):
             continue
         channel_name = str(channel.get("name") or "").strip()
         if not channel_name:
             continue
-        entry = stream_cycle_entry_for_channel(config, channel_name)
-        if not entry or not entry.get("enabled"):
-            pop_stream_cycle_runtime((config_name, channel_name))
+
+        channel_streams = ensure_channel_streams(channel)
+
+        # Check if 24/7 Sequential Relay is enabled for this channel
+        relay_settings = normalize_stream_relay_settings(channel.get("stream_relay"))
+        if relay_settings.get("enabled"):
+            evaluate_channel_relay(
+                config_name,
+                config,
+                channel,
+                channel_streams,
+                now=now,
+            )
+            # Sequential relay manages stream timing and rotation exclusively for this channel
             continue
 
-        runtime_key = (config_name, channel_name)
-        configured_duration_seconds = stream_cycle_duration_seconds(entry)
-        with STATE.lock:
-            state = STATE.streams.get(channel_name)
-            runtime = dict(STATE.stream_cycle_channels.get(runtime_key) or {})
+        has_per_stream_cycles = False
 
-        is_running = bool(state and state.config_name == config_name and state.running.process.poll() is None)
-        if is_running and state:
-            elapsed_seconds = max(0.0, now - state.started_at)
-            duration_random_seconds = int(entry.get("duration_random_minutes") or 0) * 60
-            if settings.get("randomized") and duration_random_seconds > 0:
-                active_started_at = float(runtime.get("stream_started_at") or 0.0)
-                active_duration = int(runtime.get("active_duration_seconds") or 0)
-                if abs(active_started_at - state.started_at) > 0.001 or active_duration <= 0:
-                    active_duration = configured_duration_seconds + random_seconds_between(
-                        0,
-                        duration_random_seconds,
-                        minimum_seconds=0,
-                    )
-                duration_seconds = active_duration
+        for s in channel_streams:
+            sid = str(s.get("id") or "stream_1")
+            s_cycle = s.get("stream_cycle")
+            if s_cycle and isinstance(s_cycle, dict) and s_cycle.get("enabled"):
+                has_per_stream_cycles = True
+                target_key = f"{channel_name}:{sid}"
+                active_cycle_keys.add(target_key)
+                norm_entry = normalize_stream_cycle_entry(s_cycle, settings)
+                evaluate_single_cycle_target(
+                    config_name,
+                    config,
+                    channel_name,
+                    sid,
+                    norm_entry,
+                    now=now,
+                )
             else:
-                duration_seconds = configured_duration_seconds
-            runtime.update(
-                {
-                    "phase": "running",
-                    "last_evaluated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
-                    "duration_seconds": duration_seconds,
-                    "configured_duration_seconds": configured_duration_seconds,
-                    "randomized": bool(settings.get("randomized")),
-                    "duration_random_minutes": int(entry.get("duration_random_minutes") or 0),
-                    "active_duration_seconds": duration_seconds,
-                    "stream_started_at": state.started_at,
-                    "restart_at": 0.0,
-                }
-            )
-            set_stream_cycle_runtime(runtime_key, runtime)
-            if elapsed_seconds < duration_seconds:
-                continue
+                target_key = f"{channel_name}:{sid}"
+                if (config_name, target_key) in STATE.stream_cycle_channels and not s.get("enabled", True):
+                    pop_stream_cycle_runtime((config_name, target_key))
 
-            app_db.record_event(
-                "stream_cycle_due",
+        # Channel-level cycle fallback (when channel cycle is enabled and channel does not use per-stream cycles)
+        ch_entry = stream_cycle_entry_for_channel(config, channel_name)
+        if settings.get("enabled") and ch_entry and ch_entry.get("enabled") and not has_per_stream_cycles:
+            active_cycle_keys.add(channel_name)
+            ch_norm_entry = {
+                "enabled": True,
+                "duration_seconds": stream_cycle_duration_seconds(ch_entry),
+                "restart_delay_seconds": stream_cycle_restart_delay_seconds(settings),
+                "randomized": bool(settings.get("randomized")),
+                "duration_random_minutes": int(ch_entry.get("duration_random_minutes") or 0),
+                "restart_delay_random_minutes": int(settings.get("restart_delay_random_minutes") or 0),
+            }
+            evaluate_single_cycle_target(
                 config_name,
+                config,
                 channel_name,
-                {
-                    "duration_seconds": duration_seconds,
-                    "configured_duration_seconds": configured_duration_seconds,
-                    "randomized": bool(settings.get("randomized")),
-                    "duration_random_minutes": int(entry.get("duration_random_minutes") or 0),
-                    "elapsed_seconds": round(elapsed_seconds, 3),
-                    "restart_delay_seconds": restart_delay,
-                },
+                None,
+                ch_norm_entry,
+                now=now,
             )
-            actual_restart_delay = restart_delay
-            if settings.get("randomized") and restart_delay_random_seconds > 0:
-                actual_restart_delay += random_seconds_between(0, restart_delay_random_seconds, minimum_seconds=0)
-            restart_at = time.time() + actual_restart_delay
-            runtime.update(
-                {
-                    "phase": "waiting_restart",
-                    "restart_at": restart_at,
-                    "restart_delay_seconds": actual_restart_delay,
-                    "randomized": bool(settings.get("randomized")),
-                    "restart_delay_random_minutes": int(settings.get("restart_delay_random_minutes") or 0),
-                    "last_action": "stopped_for_cycle",
-                    "last_stopped_at": datetime.now().astimezone().isoformat(timespec="seconds"),
-                }
-            )
-            set_stream_cycle_runtime(runtime_key, runtime)
-            stopped = stop_stream(
-                channel_name,
-                clear_cycle_runtime=False,
-                request_source="stream_cycle",
-                request_reason=(
-                    f"duration reached: elapsed={round(elapsed_seconds, 3)}s "
-                    f"limit={duration_seconds}s cooldown={actual_restart_delay}s"
-                ),
-            )
-            if not stopped:
-                continue
-            app_db.record_event(
-                "stream_cycle_stopped",
-                config_name,
-                channel_name,
-                {
-                    "restart_at": restart_at,
-                    "restart_delay_seconds": actual_restart_delay,
-                    "randomized": bool(settings.get("randomized")),
-                    "restart_delay_random_minutes": int(settings.get("restart_delay_random_minutes") or 0),
-                },
-            )
-            continue
+        elif (config_name, channel_name) in STATE.stream_cycle_channels and not (settings.get("enabled") and ch_entry and ch_entry.get("enabled")):
+            pop_stream_cycle_runtime((config_name, channel_name))
 
-        if runtime.get("phase") != "waiting_restart":
-            continue
-        
-        # Delay cycle restart while Playwright is active
-        with STATE.lock:
-            if channel_name in STATE.playwright_dismiss_channels:
-                continue
-
-        restart_at = float(runtime.get("restart_at") or 0.0)
-        if restart_at and now < restart_at:
-            continue
-
-        try:
-            assert_youtube_channel_keys_match(config_name, channel_name)
-            started = start_stream(config_name, channel_name)
-        except Exception as exc:
-            retry_delay = restart_delay
-            if settings.get("randomized") and restart_delay_random_seconds > 0:
-                retry_delay += random_seconds_between(0, restart_delay_random_seconds, minimum_seconds=0)
-            runtime.update(
-                {
-                    "phase": "waiting_restart",
-                    "restart_at": time.time() + max(retry_delay, 10.0),
-                    "restart_delay_seconds": retry_delay,
-                    "randomized": bool(settings.get("randomized")),
-                    "restart_delay_random_minutes": int(settings.get("restart_delay_random_minutes") or 0),
-                    "last_action": "restart_failed",
-                    "last_error": str(exc),
-                }
-            )
-            set_stream_cycle_runtime(runtime_key, runtime)
-            app_db.record_event(
-                "stream_cycle_restart_failed",
-                config_name,
-                channel_name,
-                {"message": str(exc), "restart_at": runtime["restart_at"]},
-            )
-            continue
-
-        if started:
-            runtime.update(
-                {
-                    "phase": "running",
-                    "restart_at": 0.0,
-                    "last_action": "restarted",
-                    "last_started_at": datetime.now().astimezone().isoformat(timespec="seconds"),
-                    "active_duration_seconds": 0,
-                    "stream_started_at": 0.0,
-                    "cycle_count": int(runtime.get("cycle_count") or 0) + 1,
-                    "last_error": "",
-                }
-            )
-            set_stream_cycle_runtime(runtime_key, runtime)
-            app_db.record_event(
-                "stream_cycle_restarted",
-                config_name,
-                channel_name,
-                {"cycle_count": runtime["cycle_count"]},
-            )
+    # Clean up any stale runtimes for this config that are no longer active
+    with STATE.lock:
+        stale_keys = [
+            k for k in STATE.stream_cycle_channels.keys()
+            if k[0] == config_name and k[1] not in active_cycle_keys and STATE.stream_cycle_channels[k].get("phase") != "waiting_restart"
+        ]
+    for k in stale_keys:
+        pop_stream_cycle_runtime(k)
 
 
 def automation_loop() -> None:
-    while not STATE.stop_event.wait(15):
+    while not STATE.stop_event.wait(2):
+
         try:
             finalize_stream_lifecycle()
             evaluate_stream_connection_health()
@@ -8386,6 +9137,14 @@ class Handler(BaseHTTPRequestHandler):
                 json_response(self, get_channel_streams_api(config_name, channel_name, fetch_stats=True))
                 return
 
+            if parsed.path == "/api/channel/relay/save":
+                json_response(self, save_channel_relay_api(config_name, body))
+                return
+
+            if parsed.path == "/api/channel/relay/toggle":
+                json_response(self, toggle_channel_relay_api(config_name, body))
+                return
+
             if parsed.path == "/api/stream/start":
                 channel_name = body.get("channel") or None
                 stream_id = body.get("stream_id") or None
@@ -8557,6 +9316,7 @@ def main() -> int:
         if config:
             app_db.sync_config(config_name, config, "startup")
     load_stream_cycle_runtime()
+    load_stream_relay_runtime()
 
     port = int(os.environ.get("STREAM_UI_PORT", "8765"))
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)

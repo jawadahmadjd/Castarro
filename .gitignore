@@ -15,6 +15,7 @@ logs/
 debug.log
 stream_control.db
 stream_control.db-*
+stream-relay-runtime.json
 *.db
 *.sqlite
 *.sqlite3

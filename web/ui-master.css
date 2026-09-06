@@ -2698,7 +2698,8 @@ details[open] > .channel-summary::after {
   accent-color: var(--accent);
 }
 
-.youtube-stream-cycle-card .stream-cycle-grid {
+.youtube-stream-cycle-card .stream-cycle-grid,
+.stream-card .stream-cycle-grid {
   display: grid;
   gap: var(--space-2);
   grid-template-columns: repeat(2, max-content);
@@ -2707,11 +2708,165 @@ details[open] > .channel-summary::after {
   justify-content: start;
 }
 
-.youtube-stream-cycle-card .stream-cycle-grid section {
+.youtube-stream-cycle-card .stream-cycle-grid section,
+.stream-card .stream-cycle-grid section {
   display: grid;
   gap: var(--space-2);
   min-width: 0;
 }
+
+.channel-relay-panel {
+  margin-bottom: 20px;
+}
+
+.channel-relay-card {
+  background: var(--ui-surface-soft);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 20px;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.channel-relay-card.relay-enabled {
+  border-color: var(--success);
+  background: var(--ui-surface-soft);
+}
+
+.channel-relay-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.channel-relay-title-group {
+  flex: 1;
+  min-width: 260px;
+}
+
+.channel-relay-title-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 4px;
+}
+
+.channel-relay-title {
+  margin: 0;
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.channel-relay-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.relay-status-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  border-radius: 8px;
+  margin-top: 16px;
+  font-size: 0.9rem;
+  line-height: 1.4;
+}
+
+.relay-status-banner.running {
+  background: var(--ui-surface);
+  border: 1px solid var(--success);
+  color: var(--success);
+}
+
+.relay-status-banner.cooldown {
+  background: var(--ui-surface);
+  border: 1px solid var(--theme-warning);
+  color: var(--theme-warning);
+}
+
+.relay-status-banner.ready {
+  background: var(--ui-surface);
+  border: 1px solid var(--theme-primary);
+  color: var(--theme-primary);
+}
+
+.channel-relay-body {
+  margin-top: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.relay-cooldown-control {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.relay-options-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding-top: 6px;
+  border-top: 1px solid var(--line);
+}
+
+.relay-loop-check {
+  margin-left: auto;
+  font-weight: 600;
+}
+
+.stream-cycle-nested-card {
+  background: var(--ui-surface-soft);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 16px;
+  margin-top: 12px;
+}
+
+.stream-cycle-header-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: var(--space-2, 12px);
+}
+
+.stream-cycle-card-title {
+  font-size: 1rem;
+  font-weight: 700;
+}
+
+.stream-cycle-helper {
+  margin: 2px 0 0 0;
+}
+
+.stream-cycle-actions {
+  align-items: center;
+}
+
+.stream-cycle-meta-text {
+  margin: 8px 0 12px 0;
+}
+
+.stream-cycle-randomize {
+  margin-bottom: 12px;
+}
+
+.stream-cycle-random-fields {
+  margin-top: 12px;
+}
+
+.relay-num-input {
+  width: 70px;
+}
+
 
 .stream-cycle-hms {
   display: flex;

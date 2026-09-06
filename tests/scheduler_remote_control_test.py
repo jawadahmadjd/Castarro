@@ -137,7 +137,7 @@ def assert_stream_cycle_restarts_after_duration() -> None:
             running.stop_requested = True
             running.process.returncode = 0
 
-        def fake_start_stream(_config_dir: Path, _config: dict, channel: dict):
+        def fake_start_stream(_config_dir: Path, _config: dict, channel: dict, *args, **kwargs):
             return fake_running_stream(str(channel.get("name") or ""), log_dir=temp_root / "logs", pid=2002)
 
         try:

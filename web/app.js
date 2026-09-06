@@ -10101,6 +10101,60 @@ function readStreamCycleHmsSeconds(kind, fallbackSeconds = 0) {
   return total > 0 ? total : Math.max(0, Math.round(Number(fallbackSeconds) || 0));
 }
 
+function renderStreamCycleHmsInputsForStream(streamId, kind, parts, onChange, disabled = false) {
+  const safeParts = {
+    hours: Math.max(0, Math.floor(Number(parts?.hours) || 0)),
+    minutes: Math.max(0, Math.floor(Number(parts?.minutes) || 0)),
+    seconds: Math.max(0, Math.floor(Number(parts?.seconds) || 0)),
+  };
+  const fields = [
+    { part: "hours", label: "H", title: "Hours", value: safeParts.hours },
+    { part: "minutes", label: "M", title: "Minutes", value: safeParts.minutes },
+    { part: "seconds", label: "S", title: "Seconds", value: safeParts.seconds },
+  ];
+  return `
+    <div class="stream-cycle-hms" data-stream-id="${escapeAttr(streamId)}" data-stream-cycle-group="${escapeAttr(kind)}">
+      ${fields.map((field) => `
+        <label title="${escapeAttr(field.title)}">
+          <span>${escapeHtml(field.label)}</span>
+          <input
+            id="streamCycleHms_${escapeAttr(streamId)}_${escapeAttr(kind)}_${escapeAttr(field.part)}"
+            type="number"
+            min="0"
+            ${field.part === "hours" ? "" : "max=\"59\""}
+            step="1"
+            value="${escapeAttr(String(field.value))}"
+            data-stream-id="${escapeAttr(streamId)}"
+            data-stream-cycle-kind="${escapeAttr(kind)}"
+            data-stream-cycle-part="${escapeAttr(field.part)}"
+            onchange="${escapeAttr(onChange)}"
+            ${disabled ? "disabled" : ""}
+          >
+        </label>
+      `).join("")}
+    </div>
+  `;
+}
+
+function readStreamCycleHmsSecondsForStream(streamId, kind, fallbackSeconds = 0) {
+  const values = { hours: 0, minutes: 0, seconds: 0 };
+  let found = false;
+  document.querySelectorAll(`[data-stream-id="${streamId}"][data-stream-cycle-kind="${kind}"][data-stream-cycle-part]`).forEach((input) => {
+    const part = input.dataset.streamCyclePart;
+    if (!(part in values)) return;
+    found = true;
+    const number = Math.max(0, Math.floor(Number(input.value) || 0));
+    values[part] = number;
+  });
+  if (!found) return Math.max(0, Math.round(Number(fallbackSeconds) || 0));
+  const total = (values.hours * 3600) + (values.minutes * 60) + values.seconds;
+  if (kind === "duration") {
+    return Math.max(1, total);
+  }
+  return Math.max(0, total);
+}
+
+
 function renderStreamCycleSettingsPanels() {
   renderYoutubeSettingsPanel(state.configData || defaultConfigData());
   renderAutomationSettingsPanel(state.configData || defaultConfigData());
@@ -11200,6 +11254,253 @@ window.addEventListener("message", (event) => {
 let streamKeyMaskedState = {};
 let streamCardExpandedState = {};
 let streamStatsCache = {};
+let channelRelayCache = {};
+
+function renderChannelRelayControl(channelName, streamRelay, relayStatus, streams = []) {
+  const panel = $("channelRelayPanel");
+  if (!panel) return;
+
+  const relay = streamRelay || { enabled: false, cooldown_seconds: 75, randomize_cooldown: false, cooldown_random_minutes: 0, loop: true };
+  const status = relayStatus || { phase: "idle", cooldown_remaining_seconds: 0, remaining_seconds: 0, active_stream_id: "", next_stream_id: "" };
+
+  const isEnabled = Boolean(relay.enabled);
+  const phase = status.phase || "idle";
+  const cooldownSec = Number(relay.cooldown_seconds || 75);
+  const cHours = Math.floor(cooldownSec / 3600);
+  const cMins = Math.floor((cooldownSec % 3600) / 60);
+  const cSecs = cooldownSec % 60;
+
+  const randMins = Number(relay.cooldown_random_minutes || 0);
+  const isLoop = relay.loop !== false;
+
+  const activeStreamObj = streams.find(s => s.id === status.active_stream_id);
+  const nextStreamObj = streams.find(s => s.id === status.next_stream_id);
+  const activeName = activeStreamObj ? (activeStreamObj.name || activeStreamObj.id) : (status.active_stream_id || "Stream");
+  const nextName = nextStreamObj ? (nextStreamObj.name || nextStreamObj.id) : (status.next_stream_id || "Next Stream");
+
+  let statusHtml = "";
+  if (isEnabled) {
+    if (phase === "running") {
+      statusHtml = `
+        <div class="relay-status-banner running">
+          <span class="badge live pulse">🟢 RELAY ACTIVE</span>
+          <span class="relay-status-text"><strong>${escapeHtml(activeName)}</strong> is currently streaming (~<strong>${durationText(status.remaining_seconds || 0)}</strong> remaining). Handover to <strong>${escapeHtml(nextName)}</strong> starts next.</span>
+        </div>
+      `;
+    } else if (phase === "waiting_cooldown") {
+      statusHtml = `
+        <div class="relay-status-banner cooldown">
+          <span class="badge warn pulse">⏳ HANDOVER BUFFER</span>
+          <span class="relay-status-text">YouTube autostop draining buffer (~<strong>${durationText(status.cooldown_remaining_seconds || 0)}</strong> remaining). <strong>${escapeHtml(nextName)}</strong> will start automatically.</span>
+        </div>
+      `;
+    } else {
+      statusHtml = `
+        <div class="relay-status-banner ready">
+          <span class="badge primary">🔄 RELAY ARMED</span>
+          <span class="relay-status-text">Sequential relay rotation is armed. Rotation begins from the first stream.</span>
+        </div>
+      `;
+    }
+  }
+
+  panel.innerHTML = `
+    <div class="nested-card channel-relay-card ${isEnabled ? "relay-enabled" : ""}">
+      <div class="channel-relay-header">
+        <div class="channel-relay-title-group">
+          <div class="channel-relay-title-row">
+            <h3 class="channel-relay-title">🔄 24/7 Sequential Relay Rotation (Round-Robin)</h3>
+            <span class="badge ${isEnabled ? 'live' : ''}" id="channelRelayStatusBadge">${isEnabled ? (phase === 'waiting_cooldown' ? '⏳ Handover Cooldown' : '● Relay Active') : 'Off'}</span>
+          </div>
+          <p class="helper">
+            Rotates through all enabled streams one-by-one in an automated round-robin loop.
+            Each stream runs its configured duration (Base + Random), followed by a minimal handover cooldown before the next stream begins.
+          </p>
+        </div>
+        <div class="channel-relay-actions">
+          <button
+            class="pill ${isEnabled ? 'danger' : 'primary'}"
+            id="channelRelayToggleBtn"
+            type="button"
+            onclick="toggleChannelStreamRelay('${escapeJs(channelName)}')"
+          >
+            ${isEnabled ? '⏹ Stop Sequential Relay' : '▶ Enable Sequential Relay'}
+          </button>
+        </div>
+      </div>
+
+      ${statusHtml}
+
+      <div class="channel-relay-body">
+        <div class="relay-cooldown-control">
+          <label class="field-label-sm" title="Buffer duration between consecutive streams. YouTube autostop needs at least 1 minute to complete.">
+            Handover Cooldown Buffer (Min. 1m):
+          </label>
+          <div class="stream-cycle-hms relay-hms-group">
+            <label>
+              <input
+                id="relayCooldownH_${escapeHtml(channelName)}"
+                type="number"
+                min="0"
+                max="24"
+                class="field-input"
+                value="${cHours}"
+                onchange="updateChannelStreamRelayCooldown('${escapeJs(channelName)}')"
+              />
+              <span>h</span>
+            </label>
+            <label>
+              <input
+                id="relayCooldownM_${escapeHtml(channelName)}"
+                type="number"
+                min="0"
+                max="59"
+                class="field-input"
+                value="${cMins}"
+                onchange="updateChannelStreamRelayCooldown('${escapeJs(channelName)}')"
+              />
+              <span>m</span>
+            </label>
+            <label>
+              <input
+                id="relayCooldownS_${escapeHtml(channelName)}"
+                type="number"
+                min="0"
+                max="59"
+                class="field-input"
+                value="${cSecs}"
+                onchange="updateChannelStreamRelayCooldown('${escapeJs(channelName)}')"
+              />
+              <span>s</span>
+            </label>
+          </div>
+          <span class="helper helper-sm">
+            💡 <strong>YouTube Autostop Notice:</strong> Requires at least 1 minute (60s+) for YouTube to finalize autostop and drain network frames.
+          </span>
+        </div>
+
+        <div class="relay-options-row">
+          <label class="checkbox-label" title="Randomize handover delay within bracket">
+            <input
+              type="checkbox"
+              id="relayRandomizeCooldown_${escapeHtml(channelName)}"
+              ${relay.randomize_cooldown ? 'checked' : ''}
+              onchange="updateChannelStreamRelayOptions('${escapeJs(channelName)}')"
+            />
+            <span>Add random cooldown jitter (+0 to X mins):</span>
+          </label>
+          <input
+            type="number"
+            min="0"
+            max="60"
+            id="relayRandomMinutes_${escapeHtml(channelName)}"
+            class="field-input inline-num relay-num-input"
+            value="${randMins}"
+            onchange="updateChannelStreamRelayOptions('${escapeJs(channelName)}')"
+          />
+          <span class="helper-inline">mins</span>
+
+          <label class="checkbox-label relay-loop-check" title="Continue rotating back to Stream 1 indefinitely">
+            <input
+              type="checkbox"
+              id="relayLoopCheck_${escapeHtml(channelName)}"
+              ${isLoop ? 'checked' : ''}
+              onchange="updateChannelStreamRelayOptions('${escapeJs(channelName)}')"
+            />
+            <span>Infinite Loop (Stream 1 ➔ ... ➔ Stream N ➔ Stream 1)</span>
+          </label>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+async function toggleChannelStreamRelay(channelName) {
+  const cfg = state.config || "config.ready.json";
+  try {
+    const res = await fetchApi("/api/channel/relay/toggle", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ config: cfg, channel: channelName }),
+    });
+    if (!res || !res.ok) {
+      toast("Failed to toggle sequential relay: " + (res?.error || "Unknown error"), "danger");
+      return;
+    }
+    toast(`Sequential Relay ${res.stream_relay?.enabled ? "enabled" : "stopped"} for ${channelName}!`, res.stream_relay?.enabled ? "success" : "info");
+    await renderWorkspaceStreamsTab(channelName);
+  } catch (err) {
+    toast("Error toggling relay: " + err.message, "danger");
+  }
+}
+
+async function updateChannelStreamRelayCooldown(channelName) {
+  const cfg = state.config || "config.ready.json";
+  const h = Math.max(0, parseInt($(`relayCooldownH_${channelName}`)?.value, 10) || 0);
+  const m = Math.max(0, parseInt($(`relayCooldownM_${channelName}`)?.value, 10) || 0);
+  const s = Math.max(0, parseInt($(`relayCooldownS_${channelName}`)?.value, 10) || 0);
+
+  let totalSec = (h * 3600) + (m * 60) + s;
+  if (totalSec < 60) {
+    totalSec = 60;
+    if ($(`relayCooldownS_${channelName}`)) $(`relayCooldownS_${channelName}`).value = 60;
+    if ($(`relayCooldownM_${channelName}`)) $(`relayCooldownM_${channelName}`).value = 0;
+    if ($(`relayCooldownH_${channelName}`)) $(`relayCooldownH_${channelName}`).value = 0;
+    toast("Handover cooldown must be at least 1 minute (60s) for YouTube autostop buffer.", "warn");
+  }
+
+  const cached = channelRelayCache[channelName]?.stream_relay || {};
+  const newRelay = {
+    ...cached,
+    cooldown_seconds: totalSec,
+  };
+
+  try {
+    const res = await fetchApi("/api/channel/relay/save", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ config: cfg, channel: channelName, stream_relay: newRelay }),
+    });
+    if (res && res.ok) {
+      channelRelayCache[channelName] = { stream_relay: res.stream_relay, relay_status: res.relay_status };
+      toast(`Handover cooldown updated to ${durationText(totalSec)}!`, "success");
+    }
+  } catch (err) {
+    toast("Error saving cooldown: " + err.message, "danger");
+  }
+}
+
+async function updateChannelStreamRelayOptions(channelName) {
+  const cfg = state.config || "config.ready.json";
+  const randCheck = $(`relayRandomizeCooldown_${channelName}`)?.checked || false;
+  const randMin = Math.max(0, parseInt($(`relayRandomMinutes_${channelName}`)?.value, 10) || 0);
+  const loopCheck = $(`relayLoopCheck_${channelName}`) !== null ? $(`relayLoopCheck_${channelName}`).checked : true;
+
+  const cached = channelRelayCache[channelName]?.stream_relay || {};
+  const newRelay = {
+    ...cached,
+    randomize_cooldown: randCheck,
+    cooldown_random_minutes: randMin,
+    loop: loopCheck,
+  };
+
+  try {
+    const res = await fetchApi("/api/channel/relay/save", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ config: cfg, channel: channelName, stream_relay: newRelay }),
+    });
+    if (res && res.ok) {
+      channelRelayCache[channelName] = { stream_relay: res.stream_relay, relay_status: res.relay_status };
+    }
+  } catch (err) {
+    toast("Error saving relay options: " + err.message, "danger");
+  }
+}
+
+window.toggleChannelStreamRelay = toggleChannelStreamRelay;
+window.updateChannelStreamRelayCooldown = updateChannelStreamRelayCooldown;
+window.updateChannelStreamRelayOptions = updateChannelStreamRelayOptions;
 
 function toggleStreamKeyMask(streamId) {
   streamKeyMaskedState[streamId] = !streamKeyMaskedState[streamId];
@@ -11253,12 +11554,14 @@ async function renderWorkspaceStreamsTab(channelName, cachedStreamsData = null) 
   if (!container) return;
 
   const activeEl = document.activeElement;
-  if (activeEl && container.contains(activeEl) && (activeEl.tagName === "SELECT" || activeEl.tagName === "INPUT" || activeEl.tagName === "TEXTAREA")) {
+  if (activeEl && (container.contains(activeEl) || $("channelRelayPanel")?.contains(activeEl)) && (activeEl.tagName === "SELECT" || activeEl.tagName === "INPUT" || activeEl.tagName === "TEXTAREA")) {
     return;
   }
 
   if (!channelName) {
     container.innerHTML = `<div class="panel-empty">Please select a channel to manage its streams.</div>`;
+    const relayPanel = $("channelRelayPanel");
+    if (relayPanel) relayPanel.innerHTML = "";
     return;
   }
   if (channelName && !state.workspace.selectedChannelName) {
@@ -11267,6 +11570,8 @@ async function renderWorkspaceStreamsTab(channelName, cachedStreamsData = null) 
 
   try {
     let streams = cachedStreamsData;
+    let streamRelay = null;
+    let relayStatus = null;
     if (!streams) {
       const cfg = state.config || "config.ready.json";
       const data = await fetchApi(`/api/channel/streams?config=${encodeURIComponent(cfg)}&channel=${encodeURIComponent(channelName)}`);
@@ -11275,7 +11580,16 @@ async function renderWorkspaceStreamsTab(channelName, cachedStreamsData = null) 
         return;
       }
       streams = Array.isArray(data.streams) ? data.streams : [];
+      streamRelay = data.stream_relay || null;
+      relayStatus = data.relay_status || null;
+      channelRelayCache[channelName] = { stream_relay: streamRelay, relay_status: relayStatus };
+    } else {
+      const cached = channelRelayCache[channelName] || {};
+      streamRelay = cached.stream_relay || null;
+      relayStatus = cached.relay_status || null;
     }
+
+    renderChannelRelayControl(channelName, streamRelay, relayStatus, streams);
 
     if (!streams.length) {
       container.innerHTML = `
@@ -11371,6 +11685,41 @@ async function renderWorkspaceStreamsTab(channelName, cachedStreamsData = null) 
       const isDualOn = s.youtube_dual_stream !== false;
       const dualBadge = `<span class="badge ${isDualOn ? "live" : "warn"}" title="Dual Stream (Horizontal 16:9 + Vertical Shorts) ${isDualOn ? "Enabled" : "Disabled"}">📱 Shorts Dual: ${isDualOn ? "ON" : "OFF"}</span>`;
 
+      const streamCycle = s.stream_cycle || {};
+      const cycleActive = Boolean(streamCycle.enabled);
+      const cycleStatus = s.cycle_status || {};
+      const cyclePhase = String(cycleStatus.phase || (isRunning ? "running" : "idle"));
+      const cycleElapsed = Number(cycleStatus.elapsed_seconds || s.uptime_seconds || 0);
+      const cycleDuration = Number(streamCycle.duration_seconds || 12 * 3600);
+      const cycleCooldown = Number(streamCycle.restart_delay_seconds ?? 180);
+      const cycleRandomized = Boolean(streamCycle.randomized);
+      const cycleDurationRandMin = Number(streamCycle.duration_random_minutes || 0);
+      const cycleCooldownRandMin = Number(streamCycle.restart_delay_random_minutes || 0);
+      const cycleRemaining = Math.max(0, cycleDuration - cycleElapsed);
+      const cycleCooldownLeft = Number(cycleStatus.cooldown_remaining_seconds || 0);
+
+      let loopBadge = "";
+      if (cycleActive) {
+        if (isRunning) {
+          loopBadge = `<span class="badge live pulse" title="24/7 Stream Loop Active: ~${durationText(cycleRemaining)} remaining in this run">🔄 Loop: ${durationText(cycleRemaining)} left</span>`;
+        } else if (cyclePhase === "waiting_restart") {
+          loopBadge = `<span class="badge warn pulse" title="24/7 Stream Loop Cooldown: Restarting in ~${durationText(cycleCooldownLeft)}">⏳ Cooldown: ${durationText(cycleCooldownLeft)}</span>`;
+        } else {
+          loopBadge = `<span class="badge" title="24/7 Stream Loop is enabled and will auto-cycle when stream starts">🔄 Loop: Ready</span>`;
+        }
+      }
+
+      let relayBadge = "";
+      if (streamRelay && streamRelay.enabled) {
+        if (s.id === relayStatus?.active_stream_id) {
+          relayBadge = `<span class="badge live pulse" title="Sequential Relay: Active Stream (~${durationText(relayStatus.remaining_seconds || 0)} left)">🔄 Relay: Active (~${durationText(relayStatus.remaining_seconds || 0)} left)</span>`;
+        } else if (s.id === relayStatus?.next_stream_id) {
+          relayBadge = `<span class="badge primary pulse" title="Sequential Relay: Next in Line">📋 Next in Relay</span>`;
+        } else {
+          relayBadge = `<span class="badge text-muted" title="In Relay Rotation Queue">📋 In Relay Queue</span>`;
+        }
+      }
+
       return `
         <div class="stream-card ${isRunning ? "active-stream" : ""}" id="streamCard_${escapeHtml(s.id)}">
           <div class="stream-card-header" onclick="toggleStreamCardExpand('${escapeJs(s.id)}')">
@@ -11393,6 +11742,8 @@ async function renderWorkspaceStreamsTab(channelName, cachedStreamsData = null) 
                   ${statusBadge}
                   ${ytBadge}
                   ${dualBadge}
+                  ${relayBadge}
+                  ${loopBadge}
                   ${durationBadge}
                   ${viewerBadge}
                   ${totalViewsBadge}
@@ -11535,6 +11886,82 @@ async function renderWorkspaceStreamsTab(channelName, cachedStreamsData = null) 
                 placeholder="Leave blank for channel default, or select videos via Import button"
               />
             </div>
+            <div class="field-group stream-cycle-field-group">
+              <div class="nested-card stream-cycle-nested-card">
+                <div class="stream-cycle-header-row">
+                  <div>
+                    <div class="field-label stream-cycle-card-title">🔄 24/7 Stream Loop</div>
+                    <p class="helper stream-cycle-helper">Automatically run this stream for a set duration, stop it, cool down, then restart 24/7 without intervention.</p>
+                  </div>
+                  <div class="row gap-2 stream-cycle-actions">
+                    <span class="badge ${cycleActive ? (isRunning ? 'live' : 'warn') : ''}" id="streamCycleStatusBadge_${escapeHtml(s.id)}">${cycleActive ? (isRunning ? `${durationText(cycleElapsed)} elapsed` : (cyclePhase === 'waiting_restart' ? `Cooling down (${durationText(cycleCooldownLeft)} left)` : 'Ready')) : 'Off'}</span>
+                    <button
+                      id="streamCycleToggleBtn_${escapeHtml(s.id)}"
+                      class="${cycleActive ? 'pill danger' : 'pill success'}"
+                      type="button"
+                      onclick="toggleStreamCycleForStream('${escapeJs(channelName)}', '${escapeJs(s.id)}')"
+                    >${cycleActive ? 'Disable Stream Loop' : 'Enable Stream Loop'}</button>
+                  </div>
+                </div>
+
+                <div class="meta stream-cycle-meta-text" id="streamCycleMeta_${escapeHtml(s.id)}">
+                  ${escapeHtml(cycleActive ? `Every ${cycleRandomized ? streamCycleRandomSummary(cycleDuration, cycleDurationRandMin) : durationText(cycleDuration)} with ${cycleRandomized ? streamCycleRandomSummary(cycleCooldown, cycleCooldownRandMin) : durationText(cycleCooldown)} cooldown` : 'Automatic restart loop is off')}
+                </div>
+
+                <label class="switch stream-cycle-randomize">
+                  <input
+                    type="checkbox"
+                    id="streamCycleRandomize_${escapeHtml(s.id)}"
+                    ${cycleRandomized ? 'checked' : ''}
+                    onchange="updateStreamCycleSettingInline('${escapeJs(channelName)}', '${escapeJs(s.id)}', 'randomized', this.checked)"
+                  />
+                  <span>Randomize stream and cooldown</span>
+                  ${streamCycleInfoIcon('After the set stream duration or cooldown, Castarro will randomly add variation up to the specified minutes.')}
+                </label>
+
+                <div class="stream-cycle-grid">
+                  <section>
+                    <span class="field-hint">Run stream for</span>
+                    ${renderStreamCycleHmsInputsForStream(s.id, 'duration', durationHmsParts(cycleDuration), `updateStreamCycleDurationFromHms('${escapeJs(channelName)}', '${escapeJs(s.id)}')`)}
+                  </section>
+                  <section>
+                    <span class="field-hint">Cooldown before restart</span>
+                    ${renderStreamCycleHmsInputsForStream(s.id, 'cooldown', durationHmsParts(cycleCooldown), `updateStreamCycleCooldownFromHms('${escapeJs(channelName)}', '${escapeJs(s.id)}')`)}
+                  </section>
+                </div>
+
+                ${cycleRandomized ? `
+                  <div class="stream-cycle-random-fields">
+                    <label>
+                      <span class="field-hint">Stream random duration</span>
+                      <input
+                        id="streamCycleDurationRand_${escapeHtml(s.id)}"
+                        type="number"
+                        min="0"
+                        step="1"
+                        class="field-input"
+                        value="${escapeAttr(String(cycleDurationRandMin))}"
+                        onchange="updateStreamCycleSettingInline('${escapeJs(channelName)}', '${escapeJs(s.id)}', 'duration_random_minutes', this.value)"
+                      />
+                      <span class="setting-note">minutes added after set stream time</span>
+                    </label>
+                    <label>
+                      <span class="field-hint">Cooldown random duration</span>
+                      <input
+                        id="streamCycleCooldownRand_${escapeHtml(s.id)}"
+                        type="number"
+                        min="0"
+                        step="1"
+                        class="field-input"
+                        value="${escapeAttr(String(cycleCooldownRandMin))}"
+                        onchange="updateStreamCycleSettingInline('${escapeJs(channelName)}', '${escapeJs(s.id)}', 'restart_delay_random_minutes', this.value)"
+                      />
+                      <span class="setting-note">minutes added before restart</span>
+                    </label>
+                  </div>
+                ` : ''}
+              </div>
+            </div>
           </div>
         </div>
       `;
@@ -11543,6 +11970,86 @@ async function renderWorkspaceStreamsTab(channelName, cachedStreamsData = null) 
     container.innerHTML = `<div class="notice danger">Error loading streams: ${escapeHtml(err.message)}</div>`;
   }
 }
+
+async function toggleStreamCycleForStream(channelName, streamId) {
+  try {
+    const cfg = state.config || "config.ready.json";
+    const data = await fetchApi(`/api/channel/streams?config=${encodeURIComponent(cfg)}&channel=${encodeURIComponent(channelName)}`);
+    if (!data || !data.ok) return;
+    const streams = Array.isArray(data.streams) ? data.streams : [];
+    const target = streams.find((s) => String(s.id) === String(streamId));
+    if (target) {
+      target.stream_cycle = target.stream_cycle || {};
+      const nextEnabled = !Boolean(target.stream_cycle.enabled);
+      target.stream_cycle.enabled = nextEnabled;
+      if (!target.stream_cycle.duration_seconds) target.stream_cycle.duration_seconds = 12 * 3600;
+      if (target.stream_cycle.restart_delay_seconds === undefined) target.stream_cycle.restart_delay_seconds = 180;
+      const savePromise = fetchApi("/api/channel/streams/save", {
+        method: "POST",
+        body: JSON.stringify({
+          config: state.config,
+          channel: channelName,
+          streams: streams,
+        }),
+      });
+      state.activeStreamSavePromise = savePromise;
+      await savePromise;
+      toast(nextEnabled ? `24/7 stream loop enabled for ${target.name || streamId}.` : `24/7 stream loop disabled for ${target.name || streamId}.`, "success");
+      await renderWorkspaceStreamsTab(channelName);
+    }
+  } catch (err) {
+    toast(`Failed to toggle stream cycle: ${err.message}`, "danger");
+  }
+}
+window.toggleStreamCycleForStream = toggleStreamCycleForStream;
+
+async function updateStreamCycleSettingInline(channelName, streamId, key, value) {
+  try {
+    const cfg = state.config || "config.ready.json";
+    const data = await fetchApi(`/api/channel/streams?config=${encodeURIComponent(cfg)}&channel=${encodeURIComponent(channelName)}`);
+    if (!data || !data.ok) return;
+    const streams = Array.isArray(data.streams) ? data.streams : [];
+    const target = streams.find((s) => String(s.id) === String(streamId));
+    if (target) {
+      target.stream_cycle = target.stream_cycle || {};
+      if (key === "randomized" || key === "enabled") {
+        target.stream_cycle[key] = Boolean(value);
+      } else if (key === "duration_seconds" || key === "restart_delay_seconds") {
+        target.stream_cycle[key] = Math.max(key === "duration_seconds" ? 1 : 0, Math.round(Number(value) || 0));
+      } else if (key === "duration_random_minutes" || key === "restart_delay_random_minutes") {
+        target.stream_cycle[key] = Math.max(0, Math.round(Number(value) || 0));
+      }
+      const savePromise = fetchApi("/api/channel/streams/save", {
+        method: "POST",
+        body: JSON.stringify({
+          config: state.config,
+          channel: channelName,
+          streams: streams,
+        }),
+      });
+      state.activeStreamSavePromise = savePromise;
+      await savePromise;
+      toast(`Stream loop ${key.replace(/_/g, " ")} updated.`, "success");
+      await renderWorkspaceStreamsTab(channelName);
+    }
+  } catch (err) {
+    toast(`Failed to update stream cycle: ${err.message}`, "danger");
+  }
+}
+window.updateStreamCycleSettingInline = updateStreamCycleSettingInline;
+
+async function updateStreamCycleDurationFromHms(channelName, streamId) {
+  const seconds = readStreamCycleHmsSecondsForStream(streamId, "duration", 12 * 3600);
+  await updateStreamCycleSettingInline(channelName, streamId, "duration_seconds", seconds);
+}
+window.updateStreamCycleDurationFromHms = updateStreamCycleDurationFromHms;
+
+async function updateStreamCycleCooldownFromHms(channelName, streamId) {
+  const seconds = readStreamCycleHmsSecondsForStream(streamId, "cooldown", 180);
+  await updateStreamCycleSettingInline(channelName, streamId, "restart_delay_seconds", seconds);
+}
+window.updateStreamCycleCooldownFromHms = updateStreamCycleCooldownFromHms;
+
 
 async function updateStreamPlaylistInline(channelName, streamId, rawText) {
   try {
