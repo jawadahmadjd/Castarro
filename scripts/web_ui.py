@@ -1116,6 +1116,7 @@ def record_request_trace(handler: BaseHTTPRequestHandler, status_code: int, outc
         path.startswith("/preview/")
         or path.startswith("/api/video-thumbnail")
         or path.startswith("/api/stream-thumbnail")
+        or path.startswith("/api/stream-title-set-thumbnail")
         or path.startswith("/api/status")
         or path.startswith("/api/health")
         or path.startswith("/api/sync/status")
@@ -1559,13 +1560,96 @@ def normalize_stream_relay_settings(raw: Any) -> dict[str, Any]:
     # Handover cooldown must be at least 1 minute (60 seconds minimum)
     if cooldown_sec < 60:
         cooldown_sec = 60
-    return {
+    norm: dict[str, Any] = {
         "enabled": bool(relay.get("enabled", False)),
         "cooldown_seconds": cooldown_sec,
         "randomize_cooldown": bool(relay.get("randomize_cooldown", False)),
         "cooldown_random_minutes": max(0, int(relay.get("cooldown_random_minutes") or 0)),
         "loop": bool(relay.get("loop", True)),
     }
+    if "duration_seconds" in relay and relay["duration_seconds"] is not None:
+        try:
+            norm["duration_seconds"] = max(1, int(relay["duration_seconds"]))
+        except (ValueError, TypeError):
+            pass
+    if "randomize_duration" in relay or "randomized" in relay:
+        norm["randomize_duration"] = bool(relay.get("randomize_duration", relay.get("randomized", False)))
+    if "duration_random_minutes" in relay and relay["duration_random_minutes"] is not None:
+        try:
+            norm["duration_random_minutes"] = max(0, int(relay["duration_random_minutes"]))
+        except (ValueError, TypeError):
+            pass
+    return norm
+
+
+def resolve_channel_relay_duration(
+    config: dict[str, Any],
+    channel_name: str,
+    channel: dict[str, Any],
+    stream_entry: dict[str, Any],
+) -> tuple[int, bool, int]:
+    """
+    Resolves the base duration and random jitter for a stream running in sequential relay.
+    Resolution order:
+      1. Explicit stream-level cycle config (stream_cycle on the stream entry)
+      2. Relay-level duration config (channel.stream_relay.duration_seconds)
+      3. Channel-level stream cycle entry (config.stream_cycles.channels[channel])
+      4. Channel stream cycle (channel.stream_cycle)
+      5. Global stream cycle (config.stream_cycles)
+      6. Default fallback: 21600s (6 hours), 0 random.
+    Returns: (base_duration_seconds, is_randomized, random_jitter_seconds)
+    """
+    # 1. Per-stream cycle settings
+    cycle_cfg = stream_entry.get("stream_cycle") if isinstance(stream_entry.get("stream_cycle"), dict) else {}
+    if cycle_cfg and ("duration_seconds" in cycle_cfg or "duration" in cycle_cfg or "duration_hours" in cycle_cfg):
+        base_dur = stream_cycle_duration_seconds(cycle_cfg)
+        if base_dur > 0:
+            is_rand = bool(cycle_cfg.get("randomized"))
+            rand_sec = int(cycle_cfg.get("duration_random_minutes") or 0) * 60
+            return base_dur, is_rand, rand_sec
+
+    # 2. Relay-level duration settings
+    relay_cfg = channel.get("stream_relay") if isinstance(channel.get("stream_relay"), dict) else {}
+    if relay_cfg and "duration_seconds" in relay_cfg:
+        try:
+            base_dur = int(relay_cfg["duration_seconds"])
+            if base_dur > 0:
+                is_rand = bool(relay_cfg.get("randomize_duration", relay_cfg.get("randomized", False)))
+                rand_sec = int(relay_cfg.get("duration_random_minutes") or 0) * 60
+                return base_dur, is_rand, rand_sec
+        except (ValueError, TypeError):
+            pass
+
+    # 3. Channel-level stream cycle entry in config["stream_cycles"]["channels"]
+    ch_cycle_entry = stream_cycle_entry_for_channel(config, channel_name)
+    if ch_cycle_entry:
+        base_dur = stream_cycle_duration_seconds(ch_cycle_entry)
+        rand_min = int(ch_cycle_entry.get("duration_random_minutes") or 0)
+        cycle_global = config.get("stream_cycles") if isinstance(config.get("stream_cycles"), dict) else {}
+        is_rand = bool(cycle_global.get("randomized") or ch_cycle_entry.get("randomized")) or rand_min > 0
+        if base_dur > 0:
+            return base_dur, is_rand, rand_min * 60
+
+    # 4. Channel dictionary level stream_cycle
+    ch_stream_cycle = channel.get("stream_cycle") if isinstance(channel.get("stream_cycle"), dict) else {}
+    if ch_stream_cycle:
+        base_dur = stream_cycle_duration_seconds(ch_stream_cycle)
+        rand_min = int(ch_stream_cycle.get("duration_random_minutes") or 0)
+        is_rand = bool(ch_stream_cycle.get("randomized")) or rand_min > 0
+        if base_dur > 0:
+            return base_dur, is_rand, rand_min * 60
+
+    # 5. Global stream_cycles duration
+    global_cycle = config.get("stream_cycles") if isinstance(config.get("stream_cycles"), dict) else {}
+    if global_cycle and ("duration_seconds" in global_cycle or "duration_hours" in global_cycle):
+        base_dur = stream_cycle_duration_seconds(global_cycle)
+        rand_min = int(global_cycle.get("duration_random_minutes") or 0)
+        is_rand = bool(global_cycle.get("randomized")) or rand_min > 0
+        if base_dur > 0:
+            return base_dur, is_rand, rand_min * 60
+
+    # 6. Default fallback: 6 hours (21600s), 0 random
+    return 21600, False, 0
 
 
 def channel_stream_relay_settings(channel: dict[str, Any]) -> dict[str, Any]:
@@ -1612,9 +1696,64 @@ def channel_stream_relay_status(config_name: str, channel_name: str, channel: di
         "cooldown_seconds": int(runtime.get("cooldown_seconds") or relay_settings["cooldown_seconds"]),
         "cooldown_remaining_seconds": cooldown_left,
         "cycle_count": int(runtime.get("cycle_count") or 0),
+        "title_set_round": runtime.get("title_set_round"),
+        "active_title_set_index": runtime.get("active_title_set_index"),
         "last_action": str(runtime.get("last_action") or ""),
         "last_error": str(runtime.get("last_error") or ""),
     }
+
+
+YOUTUBE_TITLE_MAX_CHARS = 100
+
+
+def normalize_title_sets(raw: Any) -> list[dict[str, str]]:
+    """Per-stream rotation sets: each has a title, optional description and optional thumbnail."""
+    sets: list[dict[str, str]] = []
+    if not isinstance(raw, list):
+        return sets
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        entry = {
+            "title": str(item.get("title") or "").strip(),
+            "description": str(item.get("description") or "").strip(),
+            "thumbnail_path": str(item.get("thumbnail_path") or "").strip(),
+        }
+        if entry["title"] or entry["thumbnail_path"]:
+            sets.append(entry)
+    return sets
+
+
+def validate_title_sets(sets: list[dict[str, str]]) -> None:
+    for idx, entry in enumerate(sets, start=1):
+        if len(entry["title"]) > YOUTUBE_TITLE_MAX_CHARS:
+            raise ValueError(f"Set {idx}: title is {len(entry['title'])} characters; YouTube allows {YOUTUBE_TITLE_MAX_CHARS}.")
+        if "<" in entry["title"] or ">" in entry["title"]:
+            raise ValueError(f"Set {idx}: YouTube titles cannot contain '<' or '>'.")
+
+
+def relay_title_round_for_start(runtime: dict[str, Any], target_idx: int, any_title_sets: bool) -> int | None:
+    """
+    Round counter for title/thumbnail rotation. A round is one pass over all eligible streams.
+    Counting starts at the first new round after title sets exist, so a round already in
+    progress finishes with the titles it started with.
+    """
+    current = runtime.get("title_set_round")
+    if target_idx == 0:
+        if current is None:
+            return 0 if any_title_sets else None
+        return int(current) + 1
+    return None if current is None else int(current)
+
+
+def relay_title_set_for(stream_entry: dict[str, Any], title_round: int | None) -> dict[str, Any] | None:
+    if title_round is None:
+        return None
+    sets = normalize_title_sets(stream_entry.get("title_sets"))
+    if not sets:
+        return None
+    idx = int(title_round) % len(sets)
+    return {**sets[idx], "index": idx}
 
 
 
@@ -3315,11 +3454,58 @@ def youtube_start_replacement_times() -> tuple[str, str]:
     return start.isoformat(timespec="seconds"), end.isoformat(timespec="seconds")
 
 
+def thumbnail_content_type(path: Path) -> str:
+    suffix = path.suffix.lower()
+    return "image/jpeg" if suffix in {".jpg", ".jpeg"} else f"image/{suffix.lstrip('.')}"
+
+
+def apply_title_set_to_broadcast(
+    config_name: str,
+    channel_name: str,
+    access_token: str,
+    broadcast_id: str,
+    title_set: dict[str, Any],
+    target_stream: dict[str, Any] | None,
+) -> None:
+    """Push a rotation set onto an already-scheduled (upcoming/ready) broadcast."""
+    title = str(title_set.get("title") or (target_stream or {}).get("title") or "").strip()
+    description = str(title_set.get("description") or (target_stream or {}).get("description") or "").strip()
+    if title:
+        try:
+            details = youtube_service.video_details(access_token, broadcast_id) or {}
+            youtube_service.update_video_details(
+                access_token,
+                video_id=broadcast_id,
+                title=title,
+                description=description,
+                category_id=details.get("category_id"),
+                tags=details.get("tags"),
+                default_language=details.get("default_language"),
+                default_audio_language=details.get("default_audio_language"),
+            )
+        except Exception as exc:
+            app_db.record_event("youtube_title_set_update_failed", config_name, channel_name, {"broadcast_id": broadcast_id, "message": str(exc)})
+    thumb_path = Path(str(title_set.get("thumbnail_path") or ""))
+    if str(title_set.get("thumbnail_path") or "").strip() and thumb_path.is_file():
+        try:
+            youtube_service.upload_thumbnail(
+                access_token,
+                video_id=broadcast_id,
+                image_data=thumb_path.read_bytes(),
+                content_type=thumbnail_content_type(thumb_path),
+            )
+        except Exception as exc:
+            app_db.record_event("youtube_title_set_thumbnail_failed", config_name, channel_name, {"broadcast_id": broadcast_id, "message": str(exc)})
+    if isinstance(target_stream, dict):
+        target_stream["active_title_set"] = {"index": int(title_set.get("index") or 0), "title": title}
+
+
 def replace_stale_youtube_broadcast_for_start(
     config_name: str,
     config: dict[str, Any],
     channel: dict[str, Any],
     target_stream: dict[str, Any] | None = None,
+    title_set: dict[str, Any] | None = None,
 ) -> bool:
     channel_name = str(channel.get("name") or "").strip()
     if not channel_name:
@@ -3403,6 +3589,9 @@ def replace_stale_youtube_broadcast_for_start(
             if matched_stream_id:
                 channel["youtube_stream_id"] = matched_stream_id
             channel["youtube_studio_url"] = b_studio_url
+        if title_set:
+            apply_title_set_to_broadcast(config_name, channel_name, access_token, broadcast_id, title_set, target_stream)
+            save_config(config_name, config)
         return False
 
     # Otherwise, schedule a fresh broadcast for this stream key
@@ -3425,7 +3614,8 @@ def replace_stale_youtube_broadcast_for_start(
         privacy_status = "public"
 
     description = str(
-        (target_stream or {}).get("description")
+        (title_set or {}).get("description")
+        or (target_stream or {}).get("description")
         or (old_details or {}).get("description")
         or (source_broadcast or {}).get("description")
         or channel.get("youtube_broadcast_description")
@@ -3443,7 +3633,8 @@ def replace_stale_youtube_broadcast_for_start(
     scheduled_end_time = end_replacement
 
     stream_title_source = str(
-        (target_stream or {}).get("title")
+        (title_set or {}).get("title")
+        or (target_stream or {}).get("title")
         or (source_broadcast or {}).get("title")
         or channel.get("youtube_broadcast_title")
         or channel.get("live_title")
@@ -3474,8 +3665,12 @@ def replace_stale_youtube_broadcast_for_start(
         target_stream["youtube_studio_url"] = studio_url
         target_stream["youtube_broadcast_id"] = new_broadcast_id
         target_stream["youtube_stream_id"] = new_stream_id
-        target_stream["title"] = title
-        target_stream["description"] = description
+        if title_set:
+            # Keep the stream's own title/description untouched; they are the fallback when sets are removed.
+            target_stream["active_title_set"] = {"index": int(title_set.get("index") or 0), "title": title}
+        else:
+            target_stream["title"] = title
+            target_stream["description"] = description
         target_stream["privacy_status"] = privacy_status
         target_stream["scheduled_start_time"] = scheduled_start_time
 
@@ -3509,7 +3704,11 @@ def replace_stale_youtube_broadcast_for_start(
                     channel_name,
                     {"message": str(exc)},
                 )
-        thumbnail_path_str = str((target_stream or {}).get("thumbnail_path") or "").strip()
+        thumbnail_path_str = str(
+            (title_set or {}).get("thumbnail_path")
+            or (target_stream or {}).get("thumbnail_path")
+            or ""
+        ).strip()
         thumb_uploaded = False
         if thumbnail_path_str and Path(thumbnail_path_str).is_file():
             try:
@@ -3558,6 +3757,7 @@ def ensure_youtube_broadcasts_ready_for_start(
     config: dict[str, Any],
     channel_name: str | None,
     target_stream_id: str | None = None,
+    title_set: dict[str, Any] | None = None,
 ) -> list[str]:
     replaced: list[str] = []
     for channel in stream_manager.enabled_channels(config, channel_name):
@@ -3570,7 +3770,8 @@ def ensure_youtube_broadcasts_ready_for_start(
             if not s.get("enabled", True):
                 continue
             try:
-                if replace_stale_youtube_broadcast_for_start(config_name, config, channel, target_stream=s):
+                stream_title_set = title_set if target_stream_id else None
+                if replace_stale_youtube_broadcast_for_start(config_name, config, channel, target_stream=s, title_set=stream_title_set):
                     channel_replaced = True
             except Exception as exc:
                 print(f"[YOUTUBE PRESTART WARNING] Broadcast pre-start check for channel '{channel.get('name')}' stream '{sid}' warning: {exc}")
@@ -5751,14 +5952,21 @@ def auto_golive_transition_worker(
         state_obj.verification = {"is_live": False, "status": "error", "message": str(exc)}
 
 
-def start_stream(config_name: str, channel_name: str | None, stream_id: str | None = None) -> list[str]:
+def start_stream(
+    config_name: str,
+    channel_name: str | None,
+    stream_id: str | None = None,
+    title_set: dict[str, Any] | None = None,
+) -> list[str]:
     print(f"\n==========================================================================")
     print(f"[STREAM PIPELINE REQ] start_stream(config='{config_name}', channel='{channel_name}', stream_id='{stream_id}')")
+    if title_set:
+        print(f"[STREAM PIPELINE REQ] Title set #{int(title_set.get('index') or 0) + 1}: {title_set.get('title')}")
     print(f"==========================================================================")
 
     config, config_dir = stream_manager.load_config((ROOT / config_name).resolve())
     normalize_scheduler_settings(config)
-    ensure_youtube_broadcasts_ready_for_start(config_name, config, channel_name, target_stream_id=stream_id)
+    ensure_youtube_broadcasts_ready_for_start(config_name, config, channel_name, target_stream_id=stream_id, title_set=title_set)
     channels = stream_manager.enabled_channels(config, channel_name)
     print(f"[STREAM PIPELINE] Enabled channels matching request: {[c.get('name') for c in channels]}")
 
@@ -5809,9 +6017,11 @@ def start_stream(config_name: str, channel_name: str | None, stream_id: str | No
             prepared_channel = dict(prepared_channel)
             if s.get("name"):
                 prepared_channel["stream_name"] = str(s.get("name"))
-            if s.get("title"):
-                prepared_channel["live_title"] = str(s.get("title"))
-                prepared_channel["title"] = str(s.get("title"))
+            s_title = str((title_set or {}).get("title") or "") if stream_id and sid == stream_id else ""
+            s_title = s_title or str(s.get("title") or "")
+            if s_title:
+                prepared_channel["live_title"] = s_title
+                prepared_channel["title"] = s_title
             if s.get("thumbnail"):
                 prepared_channel["thumbnail"] = str(s.get("thumbnail"))
             if s.get("tags"):
@@ -6468,6 +6678,8 @@ def get_channel_streams_api(config_name: str, channel_name: str, fetch_stats: bo
             "scheduled_start_time": str(s.get("scheduled_start_time") or ""),
             "thumbnail_path": thumb_path,
             "thumbnail_url": thumb_url,
+            "title_sets": title_sets_payload(config_name, channel_name, sid, s),
+            "active_title_set": s.get("active_title_set") if isinstance(s.get("active_title_set"), dict) else None,
             "youtube_broadcast_id": s_broadcast_id,
             "youtube_studio_url": str(s.get("youtube_studio_url") or channel.get("youtube_studio_url") or ""),
             "stream_key": skey,
@@ -6685,6 +6897,172 @@ def stream_thumbnail_api(config_name: str, channel_name: str, stream_id: str) ->
     return p.read_bytes(), c_type
 
 
+TITLE_SET_THUMBNAIL_DIR = ROOT / ".runtime" / "thumbnails" / "title_sets"
+
+
+def title_sets_payload(config_name: str, channel_name: str, stream_id: str, stream: dict[str, Any]) -> list[dict[str, Any]]:
+    payload: list[dict[str, Any]] = []
+    for idx, entry in enumerate(normalize_title_sets(stream.get("title_sets"))):
+        thumb_url = ""
+        if entry["thumbnail_path"]:
+            # Cache-buster so a replaced image shows up immediately in the UI.
+            stamp = hashlib.sha1(entry["thumbnail_path"].encode("utf-8")).hexdigest()[:8]
+            thumb_url = (
+                f"/api/stream-title-set-thumbnail?config={quote(config_name)}&channel={quote(channel_name)}"
+                f"&stream_id={quote(stream_id)}&index={idx}&v={stamp}"
+            )
+        payload.append({**entry, "index": idx, "thumbnail_url": thumb_url})
+    return payload
+
+
+def find_stream_for_api(config: dict[str, Any], channel_name: str, stream_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    channel = find_channel_by_name(config, channel_name)
+    if not channel:
+        raise ValueError(f"Channel '{channel_name}' not found.")
+    target = next((s for s in ensure_channel_streams(channel) if str(s.get("id")) == str(stream_id)), None)
+    if not target:
+        raise ValueError(f"Stream '{stream_id}' not found.")
+    return channel, target
+
+
+def save_stream_title_sets_api(config_name: str, body: dict[str, Any]) -> dict[str, Any]:
+    config, error = load_config_or_none(config_name)
+    if not config:
+        raise ValueError(error or "Config not found.")
+    channel_name = str(body.get("channel") or "").strip()
+    stream_id = str(body.get("stream_id") or "").strip()
+    _channel, target = find_stream_for_api(config, channel_name, stream_id)
+    sets = normalize_title_sets(body.get("title_sets"))
+    validate_title_sets(sets)
+    target["title_sets"] = sets
+    save_config(config_name, config)
+    return {"ok": True, "channel": channel_name, "stream_id": stream_id, "title_sets": title_sets_payload(config_name, channel_name, stream_id, target)}
+
+
+def parse_title_sets_markdown(markdown: str) -> dict[int, list[str]]:
+    """
+    Read '### Stream N: ...' sections and their '**Titles**' numbered lists.
+    Returns {stream_number: [title, ...]} in list order.
+    """
+    result: dict[int, list[str]] = {}
+    current: int | None = None
+    in_titles = False
+    for raw in str(markdown or "").splitlines():
+        line = raw.strip()
+        heading = re.match(r"^#{2,4}\s+Stream\s+(\d+)\b", line, re.IGNORECASE)
+        if heading:
+            current = int(heading.group(1))
+            in_titles = False
+            continue
+        if line.startswith("#"):
+            current = None
+            continue
+        if current is None:
+            continue
+        if line.startswith("**"):
+            in_titles = line.lower().startswith("**titles")
+            continue
+        item = re.match(r"^\d+\.\s+(.+)$", line)
+        if in_titles and item:
+            result.setdefault(current, []).append(item.group(1).strip())
+    return result
+
+
+def import_title_sets_markdown_api(config_name: str, body: dict[str, Any]) -> dict[str, Any]:
+    """Stream N in the markdown maps to the Nth stream of the channel. Existing thumbnails/descriptions keep their slot."""
+    config, error = load_config_or_none(config_name)
+    if not config:
+        raise ValueError(error or "Config not found.")
+    channel_name = str(body.get("channel") or "").strip()
+    channel = find_channel_by_name(config, channel_name)
+    if not channel:
+        raise ValueError(f"Channel '{channel_name}' not found.")
+    parsed = parse_title_sets_markdown(str(body.get("markdown") or ""))
+    if not parsed:
+        raise ValueError("No '### Stream N' sections with a **Titles** list were found.")
+    streams = ensure_channel_streams(channel)
+    imported: list[dict[str, Any]] = []
+    for stream_no, titles in sorted(parsed.items()):
+        if stream_no < 1 or stream_no > len(streams):
+            continue
+        stream = streams[stream_no - 1]
+        existing = normalize_title_sets(stream.get("title_sets"))
+        sets = []
+        for idx, title in enumerate(titles):
+            prev = existing[idx] if idx < len(existing) else {}
+            sets.append({
+                "title": title,
+                "description": str(prev.get("description") or ""),
+                "thumbnail_path": str(prev.get("thumbnail_path") or ""),
+            })
+        validate_title_sets(sets)
+        stream["title_sets"] = sets
+        imported.append({"stream_number": stream_no, "stream_id": str(stream.get("id") or ""), "count": len(sets)})
+    if not imported:
+        raise ValueError(f"The markdown names streams that this channel does not have (it has {len(streams)}).")
+    save_config(config_name, config)
+    return {"ok": True, "channel": channel_name, "imported": imported}
+
+
+def upload_title_set_thumbnail_api(handler: BaseHTTPRequestHandler, query: dict[str, list[str]]) -> dict[str, Any]:
+    config_name = safe_config_name(query.get("config", [None])[0])
+    channel_name = str(query.get("channel", [""])[0]).strip()
+    stream_id = str(query.get("stream_id", [""])[0]).strip()
+    filename = sanitize_filename(query.get("filename", ["thumbnail.jpg"])[0])
+    try:
+        index = int(query.get("index", [""])[0])
+    except (TypeError, ValueError):
+        raise ValueError("Set index is required.")
+    suffix = Path(filename).suffix.lower()
+    if suffix not in THUMBNAIL_EXTENSIONS:
+        raise ValueError("Unsupported thumbnail file type.")
+
+    remaining = int(handler.headers.get("Content-Length", "0"))
+    if remaining <= 0:
+        raise ValueError("Thumbnail upload is empty.")
+    if remaining > THUMBNAIL_MAX_BYTES:
+        raise ValueError("Thumbnail must be 2 MB or smaller.")
+    image_data = handler.rfile.read(remaining)
+    if len(image_data) != remaining:
+        raise ValueError("Upload ended before the full thumbnail was received.")
+
+    config, error = load_config_or_none(config_name)
+    if not config:
+        raise ValueError(error or "Config not found.")
+    _channel, target = find_stream_for_api(config, channel_name, stream_id)
+    sets = normalize_title_sets(target.get("title_sets"))
+    if index < 0 or index > len(sets):
+        raise ValueError(f"Set index {index} is out of range (stream has {len(sets)} sets).")
+
+    TITLE_SET_THUMBNAIL_DIR.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.sha1(image_data).hexdigest()[:10]
+    dest_path = TITLE_SET_THUMBNAIL_DIR / f"{sanitize_filename(channel_name)}_{sanitize_filename(stream_id)}_set{index + 1}_{digest}{suffix}"
+    dest_path.write_bytes(image_data)
+
+    if index == len(sets):
+        sets.append({"title": "", "description": "", "thumbnail_path": str(dest_path)})
+    else:
+        sets[index]["thumbnail_path"] = str(dest_path)
+    target["title_sets"] = sets
+    save_config(config_name, config)
+    return {"ok": True, "channel": channel_name, "stream_id": stream_id, "index": index, "thumbnail_path": str(dest_path),
+            "title_sets": title_sets_payload(config_name, channel_name, stream_id, target)}
+
+
+def title_set_thumbnail_api(config_name: str, channel_name: str, stream_id: str, index: int) -> tuple[bytes, str]:
+    config, error = load_config_or_none(config_name)
+    if not config:
+        raise ValueError(error or "Config not found.")
+    _channel, target = find_stream_for_api(config, channel_name, stream_id)
+    sets = normalize_title_sets(target.get("title_sets"))
+    if index < 0 or index >= len(sets) or not sets[index]["thumbnail_path"]:
+        raise ValueError("No thumbnail attached to this set.")
+    path = Path(sets[index]["thumbnail_path"])
+    if not path.is_file():
+        raise ValueError(f"Thumbnail file not found: {path}")
+    return path.read_bytes(), thumbnail_content_type(path)
+
+
 def save_channel_streams_api(config_name: str, body: dict[str, Any]) -> dict[str, Any]:
     config, error = load_config_or_none(config_name)
     if not config:
@@ -6706,6 +7084,13 @@ def save_channel_streams_api(config_name: str, body: dict[str, Any]) -> dict[str
             if sid in existing_map:
                 if not rs.get("thumbnail_path") and existing_map[sid].get("thumbnail_path"):
                     rs["thumbnail_path"] = existing_map[sid]["thumbnail_path"]
+                if "title_sets" not in rs and existing_map[sid].get("title_sets"):
+                    rs["title_sets"] = existing_map[sid]["title_sets"]
+                if "active_title_set" not in rs and existing_map[sid].get("active_title_set"):
+                    rs["active_title_set"] = existing_map[sid]["active_title_set"]
+            if "title_sets" in rs:
+                rs["title_sets"] = normalize_title_sets(rs.get("title_sets"))
+                validate_title_sets(rs["title_sets"])
                 if "youtube_dual_stream" not in rs:
                     rs["youtube_dual_stream"] = bool(existing_map[sid].get("youtube_dual_stream", True))
                 if "stream_cycle" not in rs and "stream_cycle" in existing_map[sid]:
@@ -7854,6 +8239,18 @@ def evaluate_channel_relay(
 
     eligible_ids = [str(s.get("id") or "stream_1") for s in eligible_streams]
     stream_map = {str(s.get("id") or "stream_1"): s for s in eligible_streams}
+    any_title_sets = any(normalize_title_sets(s.get("title_sets")) for s in eligible_streams)
+
+    def title_set_start(target_idx: int, target_sid: str) -> tuple[int | None, dict[str, Any] | None, dict[str, Any]]:
+        title_round = relay_title_round_for_start(runtime, target_idx, any_title_sets)
+        title_set = relay_title_set_for(stream_map.get(target_sid, {}), title_round)
+        return title_round, title_set, ({"title_set": title_set} if title_set else {})
+
+    def title_set_runtime(title_round: int | None, title_set: dict[str, Any] | None) -> dict[str, Any]:
+        return {
+            "title_set_round": title_round,
+            "active_title_set_index": title_set.get("index") if title_set else None,
+        }
 
     with STATE.lock:
         runtime = dict(STATE.stream_relay_channels.get(runtime_key) or {})
@@ -7878,10 +8275,7 @@ def evaluate_channel_relay(
         next_sid = eligible_ids[next_idx]
 
         stream_entry = stream_map.get(running_stream_id, {})
-        cycle_cfg = stream_entry.get("stream_cycle") if isinstance(stream_entry.get("stream_cycle"), dict) else {}
-        base_dur = stream_cycle_duration_seconds(cycle_cfg) if cycle_cfg else 21600
-        is_rand = bool(cycle_cfg.get("randomized"))
-        rand_sec = int(cycle_cfg.get("duration_random_minutes") or 0) * 60
+        base_dur, is_rand, rand_sec = resolve_channel_relay_duration(config, channel_name, channel, stream_entry)
 
         active_dur = int(runtime.get("duration_seconds") or 0)
         stored_started_at = float(runtime.get("stream_started_at") or 0.0)
@@ -7957,6 +8351,45 @@ def evaluate_channel_relay(
     # CASE 2: No stream is currently running on this channel
     current_phase = str(runtime.get("phase") or "idle")
 
+    if current_phase == "running":
+        # The previously running stream exited on its own (e.g. video ended, process terminated, network error)
+        cooldown_sec = int(relay_settings.get("cooldown_seconds") or 75)
+        if relay_settings.get("randomize_cooldown") and relay_settings.get("cooldown_random_minutes", 0) > 0:
+            cooldown_sec += random_seconds_between(0, relay_settings["cooldown_random_minutes"] * 60, minimum_seconds=0)
+        if cooldown_sec < 60:
+            cooldown_sec = 60
+
+        cooldown_ends_at = now + cooldown_sec
+        prev_sid = str(runtime.get("active_stream_id") or "")
+        cur_idx = eligible_ids.index(prev_sid) if prev_sid in eligible_ids else int(runtime.get("current_index") or 0)
+        next_idx = (cur_idx + 1) % len(eligible_ids)
+        next_sid = eligible_ids[next_idx]
+
+        runtime.update({
+            "phase": "waiting_cooldown",
+            "cooldown_ends_at": cooldown_ends_at,
+            "cooldown_seconds": cooldown_sec,
+            "previous_stream_id": prev_sid,
+            "active_stream_id": "",
+            "next_stream_id": next_sid,
+            "last_action": "stream_exited_transition_to_cooldown",
+            "last_stopped_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        })
+        set_stream_relay_runtime(runtime_key, runtime)
+        app_db.record_event(
+            "stream_relay_handover_cooldown_started",
+            config_name,
+            channel_name,
+            {
+                "previous_stream_id": prev_sid,
+                "next_stream_id": next_sid,
+                "cooldown_seconds": cooldown_sec,
+                "cooldown_ends_at": cooldown_ends_at,
+                "reason": "stream process terminated unexpectedly or finished video playback",
+            },
+        )
+        return
+
     if current_phase == "waiting_cooldown":
         cooldown_ends_at = float(runtime.get("cooldown_ends_at") or 0.0)
         if now < cooldown_ends_at:
@@ -7978,9 +8411,10 @@ def evaluate_channel_relay(
             if channel_name in STATE.playwright_dismiss_channels:
                 return
 
+        title_round, title_set, start_kwargs = title_set_start(target_idx, target_sid)
         try:
             assert_youtube_channel_keys_match(config_name, channel_name)
-            started = start_stream(config_name, channel_name, stream_id=target_sid)
+            started = start_stream(config_name, channel_name, stream_id=target_sid, **start_kwargs)
         except Exception as exc:
             runtime.update({
                 "phase": "waiting_cooldown",
@@ -8004,10 +8438,7 @@ def evaluate_channel_relay(
                 cycle_cnt += 1
 
             stream_entry = stream_map.get(target_sid, {})
-            cycle_cfg = stream_entry.get("stream_cycle") if isinstance(stream_entry.get("stream_cycle"), dict) else {}
-            base_dur = stream_cycle_duration_seconds(cycle_cfg) if cycle_cfg else 21600
-            is_rand = bool(cycle_cfg.get("randomized"))
-            rand_sec = int(cycle_cfg.get("duration_random_minutes") or 0) * 60
+            base_dur, is_rand, rand_sec = resolve_channel_relay_duration(config, channel_name, channel, stream_entry)
             calc_dur = base_dur + (random_seconds_between(0, rand_sec, minimum_seconds=0) if (is_rand and rand_sec > 0) else 0)
 
             runtime.update({
@@ -8023,13 +8454,20 @@ def evaluate_channel_relay(
                 "last_action": "handover_started",
                 "last_started_at": datetime.now().astimezone().isoformat(timespec="seconds"),
                 "last_error": "",
+                **title_set_runtime(title_round, title_set),
             })
             set_stream_relay_runtime(runtime_key, runtime)
             app_db.record_event(
                 "stream_relay_handover_started",
                 config_name,
                 channel_name,
-                {"stream_id": target_sid, "cycle_count": cycle_cnt, "duration_seconds": calc_dur},
+                {
+                    "stream_id": target_sid,
+                    "cycle_count": cycle_cnt,
+                    "duration_seconds": calc_dur,
+                    "title_set_round": title_round,
+                    "title_set_index": title_set.get("index") if title_set else None,
+                },
             )
         return
 
@@ -8038,9 +8476,10 @@ def evaluate_channel_relay(
         with STATE.lock:
             if channel_name in STATE.playwright_dismiss_channels:
                 return
+        title_round, title_set, start_kwargs = title_set_start(0, target_sid)
         try:
             assert_youtube_channel_keys_match(config_name, channel_name)
-            started = start_stream(config_name, channel_name, stream_id=target_sid)
+            started = start_stream(config_name, channel_name, stream_id=target_sid, **start_kwargs)
         except Exception as exc:
             runtime.update({"phase": "idle", "last_action": "start_failed", "last_error": str(exc)})
             set_stream_relay_runtime(runtime_key, runtime)
@@ -8049,10 +8488,7 @@ def evaluate_channel_relay(
         if started:
             next_idx = 1 % len(eligible_ids)
             stream_entry = stream_map.get(target_sid, {})
-            cycle_cfg = stream_entry.get("stream_cycle") if isinstance(stream_entry.get("stream_cycle"), dict) else {}
-            base_dur = stream_cycle_duration_seconds(cycle_cfg) if cycle_cfg else 21600
-            is_rand = bool(cycle_cfg.get("randomized"))
-            rand_sec = int(cycle_cfg.get("duration_random_minutes") or 0) * 60
+            base_dur, is_rand, rand_sec = resolve_channel_relay_duration(config, channel_name, channel, stream_entry)
             calc_dur = base_dur + (random_seconds_between(0, rand_sec, minimum_seconds=0) if (is_rand and rand_sec > 0) else 0)
 
             runtime.update({
@@ -8067,6 +8503,7 @@ def evaluate_channel_relay(
                 "cooldown_ends_at": 0.0,
                 "cycle_count": 1,
                 "last_action": "relay_started",
+                **title_set_runtime(title_round, title_set),
                 "last_started_at": datetime.now().astimezone().isoformat(timespec="seconds"),
                 "last_error": "",
             })
@@ -8921,6 +9358,16 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 return
 
+            if parsed.path == "/api/stream-title-set-thumbnail":
+                config_name = safe_config_name(query.get("config", [DEFAULT_CONFIG])[0])
+                channel = query.get("channel", [""])[0] or ""
+                stream_id = query.get("stream_id", [""])[0] or ""
+                index = int(query.get("index", ["0"])[0] or 0)
+                update_request_trace(self, config_name=config_name, channel_name=channel)
+                data, c_type = title_set_thumbnail_api(config_name, channel, stream_id, index)
+                write_response(self, 200, data, c_type, {"Cache-Control": "public, max-age=86400"})
+                return
+
             path = WEB_ROOT / ("index.html" if parsed.path == "/" else parsed.path.lstrip("/"))
             path = path.resolve()
             if not str(path).startswith(str(WEB_ROOT.resolve())) or not path.exists():
@@ -8966,6 +9413,10 @@ class Handler(BaseHTTPRequestHandler):
                 json_response(self, upload_stream_thumbnail_api(self, query))
                 return
 
+            if parsed.path == "/api/channel/streams/title-sets/thumbnail":
+                json_response(self, upload_title_set_thumbnail_api(self, query))
+                return
+
             body = read_body(self)
             body_map = body if isinstance(body, dict) else {}
             update_request_trace(
@@ -9000,6 +9451,18 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path == "/api/config/save":
                 text = str(body.get("text", ""))
                 parsed_json = json.loads(text)
+                # Preserve existing stream_relay on channels if incoming config omitted or disabled it unexpectedly
+                current_cfg, _ = load_config_or_none(config_name)
+                if current_cfg and isinstance(parsed_json, dict) and isinstance(parsed_json.get("channels"), list):
+                    cur_ch_map = {str(c.get("name") or "").strip(): c for c in current_cfg.get("channels", []) if isinstance(c, dict)}
+                    for in_ch in parsed_json["channels"]:
+                        if isinstance(in_ch, dict):
+                            cname = str(in_ch.get("name") or "").strip()
+                            existing_ch = cur_ch_map.get(cname)
+                            if existing_ch and "stream_relay" in existing_ch and existing_ch["stream_relay"]:
+                                in_relay = in_ch.get("stream_relay")
+                                if not in_relay or (isinstance(in_relay, dict) and not in_relay.get("enabled") and existing_ch["stream_relay"].get("enabled")):
+                                    in_ch["stream_relay"] = existing_ch["stream_relay"]
                 save_config(config_name, parsed_json)
                 json_response(self, {"ok": True, "config": config_name})
                 return
@@ -9130,6 +9593,14 @@ class Handler(BaseHTTPRequestHandler):
 
             if parsed.path == "/api/channel/streams/save":
                 json_response(self, save_channel_streams_api(config_name, body))
+                return
+
+            if parsed.path == "/api/channel/streams/title-sets/save":
+                json_response(self, save_stream_title_sets_api(config_name, body))
+                return
+
+            if parsed.path == "/api/channel/streams/title-sets/import":
+                json_response(self, import_title_sets_markdown_api(config_name, body))
                 return
 
             if parsed.path == "/api/channel/streams/refresh-stats":

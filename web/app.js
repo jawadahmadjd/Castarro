@@ -9324,18 +9324,24 @@ function collectSettingsData() {
   config.youtube.default_account_id = normalizeAccountId(config.youtube.default_account_id || "");
 
   const existingChannels = Array.isArray(config.channels) ? config.channels : [];
-  const nextChannels = existingChannels.map((existingChannel) => ({
-    ...existingChannel,
-    streams: Array.isArray(existingChannel.streams) ? structuredClone(existingChannel.streams) : [],
-    live_profile: {
-      ...defaultLiveProfile(),
-      ...(existingChannel.live_profile || {}),
-      adaptive: normalizedAdaptiveLiveProfile(existingChannel.live_profile || {}),
-    },
-    normalize_profile: {
-      ...(existingChannel.normalize_profile || {}),
-    },
-  }));
+  const nextChannels = existingChannels.map((existingChannel) => {
+    const chName = String(existingChannel?.name || "").trim();
+    const cachedRelay = channelRelayCache[chName]?.stream_relay;
+    const relay = cachedRelay || existingChannel.stream_relay;
+    return {
+      ...existingChannel,
+      stream_relay: relay ? structuredClone(relay) : existingChannel.stream_relay,
+      streams: Array.isArray(existingChannel.streams) ? structuredClone(existingChannel.streams) : [],
+      live_profile: {
+        ...defaultLiveProfile(),
+        ...(existingChannel.live_profile || {}),
+        adaptive: normalizedAdaptiveLiveProfile(existingChannel.live_profile || {}),
+      },
+      normalize_profile: {
+        ...(existingChannel.normalize_profile || {}),
+      },
+    };
+  });
 
   document.querySelectorAll("#channelSettings .channel-settings").forEach((card) => {
     const index = Number(card.dataset.index);
@@ -9344,8 +9350,11 @@ function collectSettingsData() {
     const cardChannelName = String(card.dataset.channelName || "").trim();
     const existingChannelName = String(existingChannel?.name || "").trim();
     if (!existingChannelName || (cardChannelName && cardChannelName !== existingChannelName)) return;
+    const cachedRelay = channelRelayCache[cardChannelName]?.stream_relay || channelRelayCache[existingChannelName]?.stream_relay;
+    const channelRelay = cachedRelay || existingChannel.stream_relay;
     const channel = {
       ...existingChannel,
+      stream_relay: channelRelay ? structuredClone(channelRelay) : existingChannel.stream_relay,
       streams: Array.isArray(existingChannel.streams) ? structuredClone(existingChannel.streams) : [],
     };
     card.querySelectorAll("[data-channel-field]").forEach((input) => {
@@ -11265,6 +11274,14 @@ function renderChannelRelayControl(channelName, streamRelay, relayStatus, stream
 
   const isEnabled = Boolean(relay.enabled);
   const phase = status.phase || "idle";
+
+  const baseDurSec = Number(relay.duration_seconds || status.configured_duration_seconds || 21600);
+  const durHours = Math.floor(baseDurSec / 3600);
+  const durMins = Math.floor((baseDurSec % 3600) / 60);
+  const durSecs = baseDurSec % 60;
+  const durRandMins = Number(relay.duration_random_minutes !== undefined ? relay.duration_random_minutes : 0);
+  const isRandDur = Boolean(relay.randomize_duration ?? (durRandMins > 0));
+
   const cooldownSec = Number(relay.cooldown_seconds || 75);
   const cHours = Math.floor(cooldownSec / 3600);
   const cMins = Math.floor((cooldownSec % 3600) / 60);
@@ -11333,6 +11350,75 @@ function renderChannelRelayControl(channelName, streamRelay, relayStatus, stream
 
       <div class="channel-relay-body">
         <div class="relay-cooldown-control">
+          <label class="field-label-sm" title="Default run duration for each stream before handing over to the next stream.">
+            Stream Run Turn Duration (Base Time):
+          </label>
+          <div class="stream-cycle-hms relay-hms-group">
+            <label>
+              <input
+                id="relayDurationH_${escapeHtml(channelName)}"
+                type="number"
+                min="0"
+                max="72"
+                class="field-input"
+                value="${durHours}"
+                onchange="updateChannelStreamRelayDuration('${escapeJs(channelName)}')"
+              />
+              <span>h</span>
+            </label>
+            <label>
+              <input
+                id="relayDurationM_${escapeHtml(channelName)}"
+                type="number"
+                min="0"
+                max="59"
+                class="field-input"
+                value="${durMins}"
+                onchange="updateChannelStreamRelayDuration('${escapeJs(channelName)}')"
+              />
+              <span>m</span>
+            </label>
+            <label>
+              <input
+                id="relayDurationS_${escapeHtml(channelName)}"
+                type="number"
+                min="0"
+                max="59"
+                class="field-input"
+                value="${durSecs}"
+                onchange="updateChannelStreamRelayDuration('${escapeJs(channelName)}')"
+              />
+              <span>s</span>
+            </label>
+          </div>
+          <span class="helper helper-sm">
+            Default turn duration for each stream before rotating to the next stream in queue.
+          </span>
+        </div>
+
+        <div class="relay-options-row">
+          <label class="checkbox-label" title="Randomize stream duration variation">
+            <input
+              type="checkbox"
+              id="relayRandomizeDuration_${escapeHtml(channelName)}"
+              ${isRandDur ? 'checked' : ''}
+              onchange="updateChannelStreamRelayDurationOptions('${escapeJs(channelName)}')"
+            />
+            <span>Add random stream duration jitter (+0 to X mins):</span>
+          </label>
+          <input
+            type="number"
+            min="0"
+            max="1440"
+            id="relayDurationRandomMinutes_${escapeHtml(channelName)}"
+            class="field-input inline-num relay-num-input"
+            value="${durRandMins}"
+            onchange="updateChannelStreamRelayDurationOptions('${escapeJs(channelName)}')"
+          />
+          <span class="helper-inline">mins</span>
+        </div>
+
+        <div class="relay-cooldown-control relay-cooldown-control-spaced">
           <label class="field-label-sm" title="Buffer duration between consecutive streams. YouTube autostop needs at least 1 minute to complete.">
             Handover Cooldown Buffer (Min. 1m):
           </label>
@@ -11410,9 +11496,194 @@ function renderChannelRelayControl(channelName, streamRelay, relayStatus, stream
             <span>Infinite Loop (Stream 1 ➔ ... ➔ Stream N ➔ Stream 1)</span>
           </label>
         </div>
+
+        <div class="relay-options-row relay-title-sets-row">
+          <div class="relay-title-sets-text">
+            <strong>🏷 Title &amp; Thumbnail Rotation</strong>
+            <span class="helper helper-sm">${escapeHtml(titleSetRoundSummary(status, streams))}</span>
+          </div>
+          <label class="pill ghost small relay-title-sets-import" title="Load '### Stream N' → '**Titles**' lists. Stream N maps to the Nth stream below; existing thumbnails keep their slot.">
+            📄 Import Titles (.md)
+            <input type="file" accept=".md,text/markdown,text/plain" hidden onchange="importTitleSetsMarkdown('${escapeJs(channelName)}', this.files[0]); this.value='';" />
+          </label>
+        </div>
       </div>
     </div>
   `;
+}
+
+function titleSetRoundSummary(status, streams = []) {
+  const withSets = streams.filter((s) => Array.isArray(s.title_sets) && s.title_sets.length);
+  if (!withSets.length) {
+    return "No title sets yet. Each stream uses its own title and thumbnail.";
+  }
+  const round = status?.title_set_round;
+  if (round === null || round === undefined) {
+    return `${withSets.length} stream(s) have sets. Rotation starts with Set 1 when the relay next begins a round at the first stream.`;
+  }
+  return `Round ${Number(round) + 1} in progress: each stream uses its own Set ${Number(round) + 1} (wrapping on shorter lists).`;
+}
+
+async function importTitleSetsMarkdown(channelName, file) {
+  if (!file) return;
+  try {
+    const markdown = await file.text();
+    const res = await fetchApi("/api/channel/streams/title-sets/import", {
+      method: "POST",
+      body: JSON.stringify({ config: state.config || "config.ready.json", channel: channelName, markdown }),
+    });
+    if (!res || !res.ok) throw new Error(res?.error || "Import failed");
+    const summary = (res.imported || []).map((i) => `Stream ${i.stream_number}: ${i.count}`).join(", ");
+    toast(`Imported title sets (${summary}).`, "success");
+    await renderWorkspaceStreamsTab(channelName);
+  } catch (err) {
+    toast(`Title import failed: ${err.message}`, "danger");
+  }
+}
+window.importTitleSetsMarkdown = importTitleSetsMarkdown;
+
+function renderStreamTitleSetsCard(channelName, s, relayStatus) {
+  const sets = Array.isArray(s.title_sets) ? s.title_sets : [];
+  const activeIdx = s.id === relayStatus?.active_stream_id && relayStatus?.active_title_set_index !== null && relayStatus?.active_title_set_index !== undefined
+    ? Number(relayStatus.active_title_set_index)
+    : -1;
+  const sid = escapeHtml(s.id);
+  const rows = sets.map((set, idx) => {
+    const thumb = set.thumbnail_url ? apiRequestUrl(set.thumbnail_url) : "";
+    return `
+      <div class="title-set-row ${idx === activeIdx ? "active" : ""}" data-thumbnail-path="${escapeAttr(set.thumbnail_path || "")}" id="titleSetRow_${sid}_${idx}">
+        <div class="title-set-thumb">
+          ${thumb ? `<img src="${escapeAttr(thumb)}" alt="Set ${idx + 1} thumbnail">` : `<span class="title-set-thumb-empty">No thumbnail</span>`}
+          <label class="pill ghost small">
+            ${thumb ? "Replace" : "Upload"}
+            <input type="file" accept="image/jpeg,image/png" hidden onchange="uploadTitleSetThumbnail('${escapeJs(channelName)}', '${escapeJs(s.id)}', ${idx}, this.files[0])" />
+          </label>
+        </div>
+        <div class="title-set-fields">
+          <div class="title-set-label">
+            Set ${idx + 1} ${idx === activeIdx ? `<span class="badge live">On air</span>` : ""}
+            <button class="pill ghost icon-only small danger" type="button" title="Remove set" onclick="removeTitleSet('${escapeJs(channelName)}', '${escapeJs(s.id)}', ${idx})">🗑</button>
+          </div>
+          <input id="titleSetTitle_${sid}_${idx}" type="text" maxlength="100" class="field-input" value="${escapeAttr(set.title || "")}"
+            placeholder="Title for this set (max 100 characters)"
+            onchange="saveTitleSetsFromDom('${escapeJs(channelName)}', '${escapeJs(s.id)}')" />
+          <textarea id="titleSetDesc_${sid}_${idx}" class="field-input" rows="2"
+            placeholder="Description (optional; blank uses the stream's description)"
+            onchange="saveTitleSetsFromDom('${escapeJs(channelName)}', '${escapeJs(s.id)}')">${escapeHtml(set.description || "")}</textarea>
+        </div>
+      </div>
+    `;
+  }).join("");
+  return `
+    <div class="field-group stream-title-sets-group">
+      <div class="nested-card stream-cycle-nested-card">
+        <div class="stream-cycle-header-row">
+          <div>
+            <div class="field-label stream-cycle-card-title">🏷 Title &amp; Thumbnail Rotation (${sets.length} set${sets.length === 1 ? "" : "s"})</div>
+            <p class="helper stream-cycle-helper">With Sequential Relay on, round N of the relay uses Set N here, then wraps. Privacy stays as set above. No sets = the title and thumbnail above.</p>
+          </div>
+          <div class="row gap-2 stream-cycle-actions">
+            <button class="pill ghost small" type="button" onclick="addTitleSet('${escapeJs(channelName)}', '${escapeJs(s.id)}')">+ Add Set</button>
+          </div>
+        </div>
+        <div class="title-set-list" id="titleSetList_${sid}" data-count="${sets.length}">${rows}</div>
+      </div>
+    </div>
+  `;
+}
+
+function readTitleSetsFromDom(streamId) {
+  const list = document.getElementById(`titleSetList_${streamId}`);
+  const count = Number(list?.dataset.count || 0);
+  const sets = [];
+  for (let idx = 0; idx < count; idx += 1) {
+    const row = document.getElementById(`titleSetRow_${streamId}_${idx}`);
+    if (!row) continue;
+    sets.push({
+      title: String(document.getElementById(`titleSetTitle_${streamId}_${idx}`)?.value || "").trim(),
+      description: String(document.getElementById(`titleSetDesc_${streamId}_${idx}`)?.value || "").trim(),
+      thumbnail_path: row.dataset.thumbnailPath || "",
+    });
+  }
+  return sets;
+}
+
+async function postTitleSets(channelName, streamId, sets, message) {
+  const res = await fetchApi("/api/channel/streams/title-sets/save", {
+    method: "POST",
+    body: JSON.stringify({ config: state.config || "config.ready.json", channel: channelName, stream_id: streamId, title_sets: sets }),
+  });
+  if (!res || !res.ok) throw new Error(res?.error || "Save failed");
+  if (message) toast(message, "success");
+  return res;
+}
+
+async function saveTitleSetsFromDom(channelName, streamId) {
+  try {
+    // Keep rows that are still empty while the user is filling them in.
+    await postTitleSets(channelName, streamId, readTitleSetsFromDom(streamId).filter((set) => set.title || set.thumbnail_path), "Title sets saved.");
+  } catch (err) {
+    toast(`Failed to save title sets: ${err.message}`, "danger");
+  }
+}
+window.saveTitleSetsFromDom = saveTitleSetsFromDom;
+
+async function addTitleSet(channelName, streamId) {
+  const sets = readTitleSetsFromDom(streamId);
+  const title = prompt(`Title for Set ${sets.length + 1}:`, "");
+  if (title === null || !title.trim()) return;
+  try {
+    await postTitleSets(channelName, streamId, [...sets, { title: title.trim(), description: "", thumbnail_path: "" }], "Set added.");
+    await renderWorkspaceStreamsTab(channelName);
+  } catch (err) {
+    toast(`Failed to add set: ${err.message}`, "danger");
+  }
+}
+window.addTitleSet = addTitleSet;
+
+async function removeTitleSet(channelName, streamId, index) {
+  if (!confirm(`Remove Set ${index + 1}? Later sets move up one place.`)) return;
+  const sets = readTitleSetsFromDom(streamId).filter((_, idx) => idx !== index);
+  try {
+    await postTitleSets(channelName, streamId, sets, "Set removed.");
+    await renderWorkspaceStreamsTab(channelName);
+  } catch (err) {
+    toast(`Failed to remove set: ${err.message}`, "danger");
+  }
+}
+window.removeTitleSet = removeTitleSet;
+
+async function uploadTitleSetThumbnail(channelName, streamId, index, file) {
+  if (!file) return;
+  if (file.size > 2 * 1024 * 1024) {
+    toast("Thumbnail image must be 2 MB or smaller.", "warn");
+    return;
+  }
+  try {
+    const cfg = state.config || "config.ready.json";
+    const url = `/api/channel/streams/title-sets/thumbnail?config=${encodeURIComponent(cfg)}&channel=${encodeURIComponent(channelName)}&stream_id=${encodeURIComponent(streamId)}&index=${index}&filename=${encodeURIComponent(file.name)}`;
+    const res = await fetch(apiRequestUrl(url), {
+      method: "POST",
+      headers: { "Content-Type": file.type || "application/octet-stream" },
+      body: file,
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) throw new Error(data?.error || `HTTP ${res.status}`);
+    toast(`Thumbnail saved for Set ${index + 1}.`, "success");
+    await renderWorkspaceStreamsTab(channelName);
+  } catch (err) {
+    toast(`Thumbnail upload failed: ${err.message}`, "danger");
+  }
+}
+window.uploadTitleSetThumbnail = uploadTitleSetThumbnail;
+
+function syncConfigDataChannelRelay(channelName, streamRelay) {
+  if (state.configData && Array.isArray(state.configData.channels)) {
+    const ch = state.configData.channels.find((c) => String(c.name || "").trim() === String(channelName).trim());
+    if (ch && streamRelay) {
+      ch.stream_relay = structuredClone(streamRelay);
+    }
+  }
 }
 
 async function toggleChannelStreamRelay(channelName) {
@@ -11427,10 +11698,71 @@ async function toggleChannelStreamRelay(channelName) {
       toast("Failed to toggle sequential relay: " + (res?.error || "Unknown error"), "danger");
       return;
     }
+    syncConfigDataChannelRelay(channelName, res.stream_relay);
+    channelRelayCache[channelName] = { stream_relay: res.stream_relay, relay_status: res.relay_status };
     toast(`Sequential Relay ${res.stream_relay?.enabled ? "enabled" : "stopped"} for ${channelName}!`, res.stream_relay?.enabled ? "success" : "info");
     await renderWorkspaceStreamsTab(channelName);
   } catch (err) {
     toast("Error toggling relay: " + err.message, "danger");
+  }
+}
+
+async function updateChannelStreamRelayDuration(channelName) {
+  const cfg = state.config || "config.ready.json";
+  const h = Math.max(0, parseInt($(`relayDurationH_${channelName}`)?.value, 10) || 0);
+  const m = Math.max(0, parseInt($(`relayDurationM_${channelName}`)?.value, 10) || 0);
+  const s = Math.max(0, parseInt($(`relayDurationS_${channelName}`)?.value, 10) || 0);
+
+  let totalSec = (h * 3600) + (m * 60) + s;
+  if (totalSec <= 0) totalSec = 21600;
+
+  const cached = channelRelayCache[channelName]?.stream_relay || {};
+  const newRelay = {
+    ...cached,
+    duration_seconds: totalSec,
+  };
+
+  try {
+    const res = await fetchApi("/api/channel/relay/save", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ config: cfg, channel: channelName, stream_relay: newRelay }),
+    });
+    if (res && res.ok) {
+      syncConfigDataChannelRelay(channelName, res.stream_relay);
+      channelRelayCache[channelName] = { stream_relay: res.stream_relay, relay_status: res.relay_status };
+      toast(`Stream run duration updated to ${durationText(totalSec)}!`, "success");
+    }
+  } catch (err) {
+    toast("Error saving relay duration: " + err.message, "danger");
+  }
+}
+
+async function updateChannelStreamRelayDurationOptions(channelName) {
+  const cfg = state.config || "config.ready.json";
+  const randCheck = $(`relayRandomizeDuration_${channelName}`)?.checked || false;
+  const randMin = Math.max(0, parseInt($(`relayDurationRandomMinutes_${channelName}`)?.value, 10) || 0);
+
+  const cached = channelRelayCache[channelName]?.stream_relay || {};
+  const newRelay = {
+    ...cached,
+    randomize_duration: randCheck,
+    duration_random_minutes: randMin,
+  };
+
+  try {
+    const res = await fetchApi("/api/channel/relay/save", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ config: cfg, channel: channelName, stream_relay: newRelay }),
+    });
+    if (res && res.ok) {
+      syncConfigDataChannelRelay(channelName, res.stream_relay);
+      channelRelayCache[channelName] = { stream_relay: res.stream_relay, relay_status: res.relay_status };
+      toast("Relay random duration jitter updated!", "success");
+    }
+  } catch (err) {
+    toast("Error saving relay duration jitter: " + err.message, "danger");
   }
 }
 
@@ -11462,6 +11794,7 @@ async function updateChannelStreamRelayCooldown(channelName) {
       body: JSON.stringify({ config: cfg, channel: channelName, stream_relay: newRelay }),
     });
     if (res && res.ok) {
+      syncConfigDataChannelRelay(channelName, res.stream_relay);
       channelRelayCache[channelName] = { stream_relay: res.stream_relay, relay_status: res.relay_status };
       toast(`Handover cooldown updated to ${durationText(totalSec)}!`, "success");
     }
@@ -11491,6 +11824,7 @@ async function updateChannelStreamRelayOptions(channelName) {
       body: JSON.stringify({ config: cfg, channel: channelName, stream_relay: newRelay }),
     });
     if (res && res.ok) {
+      syncConfigDataChannelRelay(channelName, res.stream_relay);
       channelRelayCache[channelName] = { stream_relay: res.stream_relay, relay_status: res.relay_status };
     }
   } catch (err) {
@@ -11499,6 +11833,8 @@ async function updateChannelStreamRelayOptions(channelName) {
 }
 
 window.toggleChannelStreamRelay = toggleChannelStreamRelay;
+window.updateChannelStreamRelayDuration = updateChannelStreamRelayDuration;
+window.updateChannelStreamRelayDurationOptions = updateChannelStreamRelayDurationOptions;
 window.updateChannelStreamRelayCooldown = updateChannelStreamRelayCooldown;
 window.updateChannelStreamRelayOptions = updateChannelStreamRelayOptions;
 
@@ -11719,6 +12055,12 @@ async function renderWorkspaceStreamsTab(channelName, cachedStreamsData = null) 
           relayBadge = `<span class="badge text-muted" title="In Relay Rotation Queue">📋 In Relay Queue</span>`;
         }
       }
+      const titleSetCount = Array.isArray(s.title_sets) ? s.title_sets.length : 0;
+      if (titleSetCount && s.id === relayStatus?.active_stream_id && relayStatus?.active_title_set_index !== null && relayStatus?.active_title_set_index !== undefined) {
+        relayBadge += `<span class="badge primary" title="Title &amp; thumbnail set on air">🏷 Set ${Number(relayStatus.active_title_set_index) + 1}/${titleSetCount}</span>`;
+      } else if (titleSetCount) {
+        relayBadge += `<span class="badge text-muted" title="Title &amp; thumbnail sets for rotation">🏷 ${titleSetCount} sets</span>`;
+      }
 
       return `
         <div class="stream-card ${isRunning ? "active-stream" : ""}" id="streamCard_${escapeHtml(s.id)}">
@@ -11871,6 +12213,7 @@ async function renderWorkspaceStreamsTab(channelName, cachedStreamsData = null) 
                 </label>
               </div>
             </div>
+            ${renderStreamTitleSetsCard(channelName, s, relayStatus)}
             <div class="field-group stream-video-field-group">
               <div class="field-label-row">
                 <label class="field-label" for="streamVideoInput_${escapeHtml(s.id)}">Specific Video / Playlist for this Stream (Optional)</label>

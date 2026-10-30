@@ -236,3 +236,126 @@ def test_relay_manual_stop_pauses_relay():
         runtime = web_ui.STATE.stream_relay_channels[(config_name, channel_name)]
         assert runtime["phase"] == "idle"
         assert runtime["last_action"] == "paused_manual_stop"
+
+
+def test_resolve_channel_relay_duration_hierarchy():
+    channel_name = "Inside Us"
+    stream_entry = {"id": "stream_1", "name": "Test Stream"}
+    channel = {"name": channel_name}
+
+    # 1. Default fallback: 21600s (6h), False, 0s
+    config = {"channels": [channel]}
+    base_dur, is_rand, rand_sec = web_ui.resolve_channel_relay_duration(config, channel_name, channel, stream_entry)
+    assert base_dur == 21600
+    assert is_rand is False
+    assert rand_sec == 0
+
+    # 2. Inherits from channel-level stream_cycles in config["stream_cycles"]["channels"] (e.g. 100 mins random)
+    config = {
+        "stream_cycles": {
+            "enabled": False,
+            "randomized": True,
+            "channels": [
+                {
+                    "channel": "Inside Us",
+                    "duration_seconds": 21600,
+                    "duration_random_minutes": 100,
+                }
+            ],
+        },
+        "channels": [channel],
+    }
+    base_dur, is_rand, rand_sec = web_ui.resolve_channel_relay_duration(config, channel_name, channel, stream_entry)
+    assert base_dur == 21600
+    assert is_rand is True
+    assert rand_sec == 100 * 60
+
+    # 3. Relay-level duration overrides channel cycle
+    channel_with_relay = {
+        "name": channel_name,
+        "stream_relay": {
+            "duration_seconds": 18000,
+            "randomize_duration": True,
+            "duration_random_minutes": 50,
+        },
+    }
+    base_dur, is_rand, rand_sec = web_ui.resolve_channel_relay_duration(config, channel_name, channel_with_relay, stream_entry)
+    assert base_dur == 18000
+    assert is_rand is True
+    assert rand_sec == 50 * 60
+
+    # 4. Stream-level cycle overrides relay-level
+    stream_entry_with_cycle = {
+        "id": "stream_1",
+        "stream_cycle": {
+            "duration_seconds": 7200,
+            "randomized": True,
+            "duration_random_minutes": 15,
+        },
+    }
+    base_dur, is_rand, rand_sec = web_ui.resolve_channel_relay_duration(config, channel_name, channel_with_relay, stream_entry_with_cycle)
+    assert base_dur == 7200
+    assert is_rand is True
+    assert rand_sec == 15 * 60
+
+
+def test_relay_premature_stream_exit_transitions_to_cooldown():
+    channel_name = "Test Channel"
+    config_name = "config.relay_test.json"
+
+    streams = [
+        {"id": "stream_1", "enabled": True},
+        {"id": "stream_2", "enabled": True},
+    ]
+    channel = {
+        "name": channel_name,
+        "streams": streams,
+        "stream_relay": {
+            "enabled": True,
+            "cooldown_seconds": 75,
+            "loop": True,
+        },
+    }
+    config = {"channels": [channel]}
+
+    # State: stream_1 was running, but process has now exited (no entry in STATE.streams)
+    now = 2000.0
+    web_ui.STATE.stream_relay_channels[(config_name, channel_name)] = {
+        "phase": "running",
+        "active_stream_id": "stream_1",
+        "current_index": 0,
+        "next_stream_id": "stream_2",
+        "stream_started_at": 1000.0,
+    }
+    web_ui.STATE.streams.pop(f"{channel_name}:stream_1", None)
+
+    with patch.object(web_ui.app_db, "record_event") as mock_record, \
+         patch.object(web_ui, "persist_stream_relay_runtime"):
+        # When evaluate_channel_relay runs, it should detect stream exited and transition to waiting_cooldown
+        web_ui.evaluate_channel_relay(config_name, config, channel, streams, now=now)
+
+        runtime = web_ui.STATE.stream_relay_channels[(config_name, channel_name)]
+        assert runtime["phase"] == "waiting_cooldown"
+        assert runtime["next_stream_id"] == "stream_2"
+        assert runtime["previous_stream_id"] == "stream_1"
+        assert runtime["cooldown_seconds"] == 75
+        assert runtime["cooldown_ends_at"] == now + 75.0
+        assert runtime["last_action"] == "stream_exited_transition_to_cooldown"
+        assert mock_record.call_count >= 1
+
+
+def test_normalize_stream_relay_duration_and_random():
+    norm = web_ui.normalize_stream_relay_settings({
+        "enabled": True,
+        "duration_seconds": 21600,
+        "randomize_duration": True,
+        "duration_random_minutes": 100,
+        "cooldown_seconds": 75,
+    })
+    assert norm["enabled"] is True
+    assert norm["duration_seconds"] == 21600
+    assert norm["randomize_duration"] is True
+    assert norm["duration_random_minutes"] == 100
+    assert norm["cooldown_seconds"] == 75
+
+
