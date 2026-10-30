@@ -159,3 +159,10 @@ def test_new_broadcast_uses_set_and_keeps_stream_fallback_fields():
         assert stream["title"] == "Own title"
         assert stream["description"] == "Own description"
         assert stream["active_title_set"] == {"index": 4, "title": "Set title"}
+
+
+def test_mirrored_config_json_is_not_automated_twice():
+    with patch.object(web_ui, "available_configs", return_value=["config.json", "config.ready.json", "config_8streams.json"]):
+        assert web_ui.automation_config_names() == ["config.ready.json", "config_8streams.json"]
+    with patch.object(web_ui, "available_configs", return_value=["config.json", "other.json"]):
+        assert web_ui.automation_config_names() == ["config.json", "other.json"]

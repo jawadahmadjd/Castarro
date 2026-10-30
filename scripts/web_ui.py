@@ -8601,13 +8601,24 @@ def evaluate_stream_cycles_for_config(config_name: str, config: dict[str, Any]) 
         pop_stream_cycle_runtime(k)
 
 
+def automation_config_names() -> list[str]:
+    """
+    save_config() mirrors config.ready.json and config.json into each other, so when both exist
+    they are one config. Automating both would run two relays/schedulers on the same channels.
+    """
+    names = available_configs()
+    if "config.ready.json" in names and "config.json" in names:
+        names.remove("config.json")
+    return names
+
+
 def automation_loop() -> None:
     while not STATE.stop_event.wait(2):
 
         try:
             finalize_stream_lifecycle()
             evaluate_stream_connection_health()
-            for config_name in available_configs():
+            for config_name in automation_config_names():
                 config, _error = load_config_or_none(config_name)
                 if config:
                     evaluate_scheduler_for_config(config_name, config)
