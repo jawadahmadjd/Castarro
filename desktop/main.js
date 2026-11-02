@@ -55,6 +55,10 @@ let installUpdateOnQuit = false;
 let legacyDataRoot = null;
 let updateCheckTimer = null;
 let autoInstallUpdateTimer = null;
+// Tracked apart from updateState: the backend handoff monitor rewrites
+// updateState every few seconds while streams run, which used to erase the
+// "downloaded" flag before the auto-install timer could read it.
+let downloadedAppUpdateVersion = null;
 let backendUpdateHandoffTimer = null;
 let backendUpdateHandoffInFlight = false;
 let trayStatusTimer = null;
@@ -297,6 +301,10 @@ function publishUpdateState() {
 function setUpdateState(patch) {
   Object.assign(updateState, patch);
   publishUpdateState();
+}
+
+function hasDownloadedAppUpdate() {
+  return Boolean(downloadedAppUpdateVersion);
 }
 
 function scheduleClearUpdateMessage(delayMs = 15000) {
@@ -714,13 +722,15 @@ async function maybeHandoffIdleBackend(reason = "unknown", knownStatus = null) {
     const appVersion = currentAppVersion();
     if (runningStreams > 0) {
       diagnosticLog(`backend update handoff deferred old=${backendVersion} new=${appVersion} streams=${runningStreams} reason=${reason}`);
-      setUpdateState({
-        status: "backend-pending",
-        version: appVersion,
-        downloaded: false,
-        percent: 100,
-        message: `App update installed. Backend will switch from ${backendVersion} to ${appVersion} after active streams finish.`,
-      });
+      if (!hasDownloadedAppUpdate()) {
+        setUpdateState({
+          status: "backend-pending",
+          version: appVersion,
+          downloaded: false,
+          percent: 100,
+          message: `App update installed. Backend will switch from ${backendVersion} to ${appVersion} after active streams finish.`,
+        });
+      }
       startBackendUpdateHandoffMonitor("streams-running");
       return false;
     }
@@ -800,7 +810,7 @@ async function requestQuit(source = "unknown", mode = "ui-only", options = {}) {
     await captureStartupSnapshot(`quit-${source}`);
     if (mode === "restart-to-update") {
       quitMode = "ui-only";
-      installUpdateOnQuit = Boolean(options.installUpdate) && (updateState.downloaded || updateState.status === "downloaded");
+      installUpdateOnQuit = Boolean(options.installUpdate) && hasDownloadedAppUpdate();
     } else if (mode === "stop-streams-and-exit") {
       if (backendUrl) {
         await requestBackendPost(backendUrl, "/api/stream/stop", { channel: null });
@@ -812,7 +822,7 @@ async function requestQuit(source = "unknown", mode = "ui-only", options = {}) {
         diagnosticLog("full-stop requested without backend URL; continuing with app quit");
       }
       quitMode = "full-stop";
-      installUpdateOnQuit = Boolean(options.installUpdate) && (updateState.downloaded || updateState.status === "downloaded");
+      installUpdateOnQuit = Boolean(options.installUpdate) && hasDownloadedAppUpdate();
     } else {
       quitMode = "ui-only";
       installUpdateOnQuit = false;
@@ -1309,7 +1319,7 @@ function scheduleAutomaticUpdateInstall(version = null) {
 }
 
 async function installDownloadedUpdateAutomatically(version = null) {
-  if (isQuitting || !autoUpdater || !(updateState.downloaded || updateState.status === "downloaded")) return;
+  if (isQuitting || !autoUpdater || !hasDownloadedAppUpdate()) return;
   diagnosticLog(`automatic update install starting ${version || ""}`);
   setUpdateState({
     status: "installing",
@@ -1447,6 +1457,7 @@ function configureAutoUpdates() {
   autoUpdater.on("update-downloaded", (info) => {
     const version = info.version || null;
     diagnosticLog(`update downloaded ${version || ""}; scheduling automatic install`);
+    downloadedAppUpdateVersion = version || "unknown";
     setUpdateState({
       status: "downloaded",
       version,

@@ -55,6 +55,23 @@ def test_backend_handoff_waits_for_idle_and_restarts_current_runtime():
     assert "loadApplicationUi()" in handoff
 
 
+def test_backend_handoff_does_not_block_downloaded_app_update():
+    main = read("desktop/main.js")
+    handoff = main.split('async function maybeHandoffIdleBackend(', 1)[1].split("async function hideUiToTray", 1)[0]
+    auto_install = main.split("async function installDownloadedUpdateAutomatically(", 1)[1].split("function isPkexecAvailable", 1)[0]
+    request_quit = main.split('async function requestQuit(', 1)[1].split('ipcMain.handle("desktop:get-update-status"', 1)[0]
+    updater = main.split("function configureAutoUpdates()", 1)[1].split("function writePidFile", 1)[0]
+
+    # The handoff monitor rewrites updateState every few seconds while streams
+    # run; the install path must not depend on updateState.downloaded.
+    assert "downloadedAppUpdateVersion = version" in updater
+    assert "hasDownloadedAppUpdate()" in auto_install
+    assert "updateState.downloaded" not in auto_install
+    assert "updateState.downloaded" not in request_quit
+    running_branch = handoff.split("if (runningStreams > 0)", 1)[1].split("diagnosticLog(`backend update handoff starting", 1)[0]
+    assert "if (!hasDownloadedAppUpdate())" in running_branch
+
+
 def test_stream_cycle_cooldown_state_survives_backend_handoff():
     backend = read("scripts/web_ui.py")
 
@@ -70,5 +87,6 @@ if __name__ == "__main__":
     test_restart_to_update_keeps_stream_service_running()
     test_packaged_ui_loads_new_files_and_routes_to_existing_backend()
     test_backend_handoff_waits_for_idle_and_restarts_current_runtime()
+    test_backend_handoff_does_not_block_downloaded_app_update()
     test_stream_cycle_cooldown_state_survives_backend_handoff()
     print("no_downtime_update_contract_test: PASS")
