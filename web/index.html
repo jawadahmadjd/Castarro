@@ -19,7 +19,7 @@
             <h2>Global</h2>
           </div>
           <div class="sidebar-global-actions">
-            <button class="pill success" id="startAll">Start All Streams</button>
+            <button class="pill primary" id="startAll">Start All Streams</button>
           </div>
           <div class="command-notice" id="autoNotice">Loading dashboard...</div>
         </section>
@@ -38,20 +38,20 @@
             <div class="workspace-channel-skeleton skeleton-block"></div>
             <div class="workspace-channel-skeleton skeleton-block"></div>
           </div>
-          <button class="pill primary" id="addChannelRail" type="button">Add Channel</button>
+          <button class="pill tinted" id="addChannelRail" type="button" data-icon="plus">Add Channel</button>
         </section>
 
         <nav class="sidebar-section sidebar-tools" aria-label="Channel tools">
           <div class="sidebar-section-head">
             <h2>Channel Tools</h2>
           </div>
-          <button class="sidebar-tool-item active" id="railOpenDashboard" data-route="overview" type="button">Dashboard</button>
-          <button class="sidebar-tool-item" id="railOpenYoutube" data-route="youtube" type="button">YouTube</button>
-          <button class="sidebar-tool-item" id="railOpenStreams" data-route="streams" type="button">Streams</button>
-          <button class="sidebar-tool-item hidden" id="railOpenLive" data-route="youtube" type="button">Live</button>
-          <button class="sidebar-tool-item" id="railOpenHistory" data-route="history" type="button">History</button>
-          <button class="sidebar-tool-item" id="railOpenTroubleshoot" data-route="troubleshoot" type="button">Troubleshoot</button>
-          <button class="sidebar-tool-item" id="railOpenTransfer" data-route="transfer" type="button">Transfer</button>
+          <button class="sidebar-tool-item active" id="railOpenDashboard" data-icon="dashboard" data-route="overview" type="button">Dashboard</button>
+          <button class="sidebar-tool-item" id="railOpenYoutube" data-icon="youtube" data-route="youtube" type="button">YouTube</button>
+          <button class="sidebar-tool-item" id="railOpenStreams" data-icon="streams" data-route="streams" type="button">Streams</button>
+          <button class="sidebar-tool-item hidden" id="railOpenLive" data-icon="broadcast" data-route="youtube" type="button">Live</button>
+          <button class="sidebar-tool-item" id="railOpenHistory" data-icon="history" data-route="history" type="button">History</button>
+          <button class="sidebar-tool-item" id="railOpenTroubleshoot" data-icon="pulse" data-route="troubleshoot" type="button">Troubleshoot</button>
+          <button class="sidebar-tool-item" id="railOpenTransfer" data-icon="transfer" data-route="transfer" type="button">Transfer</button>
         </nav>
 
         <div class="sidebar-footer">
@@ -119,35 +119,35 @@
 
           <section class="workspace-status-band" id="workspaceStatusBand">
             <div class="workspace-status-item">
-              <span class="field-hint">Connection</span>
+              <span class="field-hint"><span class="icon-tile is-small tone-amber" data-icon="link" aria-hidden="true"></span>Connection</span>
               <strong id="workspaceStatusConnection">Checking</strong>
             </div>
             <div class="workspace-status-item">
-              <span class="field-hint">Readiness</span>
+              <span class="field-hint"><span class="icon-tile is-small tone-green" data-icon="check" aria-hidden="true"></span>Readiness</span>
               <strong id="workspaceStatusReadiness">Checking</strong>
             </div>
             <div class="workspace-status-item">
-              <span class="field-hint">Stream</span>
+              <span class="field-hint"><span class="icon-tile is-small tone-red" data-icon="broadcast" aria-hidden="true"></span>Stream</span>
               <strong id="workspaceStatusStream">Idle</strong>
             </div>
             <div class="workspace-status-item">
-              <span class="field-hint">Account</span>
+              <span class="field-hint"><span class="icon-tile is-small tone-blue" data-icon="user" aria-hidden="true"></span>Account</span>
               <strong id="workspaceStatusAccount">Not linked</strong>
             </div>
             <div class="workspace-status-item">
-              <span class="field-hint">CPU</span>
+              <span class="field-hint"><span class="icon-tile is-small tone-violet" data-icon="cpu" aria-hidden="true"></span>CPU</span>
               <strong id="workspaceUsageCpu">Checking</strong>
             </div>
             <div class="workspace-status-item">
-              <span class="field-hint">RAM</span>
+              <span class="field-hint"><span class="icon-tile is-small tone-teal" data-icon="chip" aria-hidden="true"></span>RAM</span>
               <strong id="workspaceUsageRam">Checking</strong>
             </div>
             <div class="workspace-status-item interactive-status-item" id="workspaceUsageTodayItem" role="button" tabindex="0" title="Click to view and select custom date range data usage" onclick="openDataUsageModal()">
-              <span class="field-hint">Data today</span>
+              <span class="field-hint"><span class="icon-tile is-small tone-sky" data-icon="database" aria-hidden="true"></span>Data today</span>
               <strong id="workspaceUsageData">Checking</strong>
             </div>
             <div class="workspace-status-item interactive-status-item" id="workspaceUsageMonthItem" role="button" tabindex="0" title="Click to view and select custom date range data usage" onclick="openDataUsageModal()">
-              <span class="field-hint">Data month 📅</span>
+              <span class="field-hint"><span class="icon-tile is-small tone-blue" data-icon="calendar" aria-hidden="true"></span>Data this month</span>
               <strong id="workspaceUsageDataMonth">Checking</strong>
             </div>
           </section>
@@ -271,10 +271,10 @@
                 <h2>Channel Streams</h2>
               </div>
               <div class="row wrap streams-header-actions">
-                <button class="pill secondary" id="refreshStreamStatsBtn" type="button" onclick="refreshChannelStreamStats()">🔄 Refresh Stats</button>
-                <button class="pill success" id="startChannelStreamsBtn" type="button" onclick="startAllChannelStreams()">▶ Start All Streams</button>
-                <button class="pill danger" id="stopChannelStreamsBtn" type="button" onclick="stopAllChannelStreams()">⏹ Stop All Streams</button>
-                <button class="pill primary" id="addStreamBtn" type="button" onclick="openAddStreamModal()">+ Add Stream</button>
+                <button class="pill secondary" id="refreshStreamStatsBtn" type="button" onclick="refreshChannelStreamStats()" data-icon="refresh">Refresh Stats</button>
+                <button class="pill success" id="startChannelStreamsBtn" type="button" onclick="startAllChannelStreams()" data-icon="play">Start All Streams</button>
+                <button class="pill danger" id="stopChannelStreamsBtn" type="button" onclick="stopAllChannelStreams()" data-icon="stop">Stop All Streams</button>
+                <button class="pill tinted" id="addStreamBtn" type="button" onclick="openAddStreamModal()" data-icon="plus">Add Stream</button>
               </div>
             </div>
             <div id="streamsManagerPanel">
@@ -506,7 +506,7 @@
               <h2 id="streamVideoPickerTitle">Select Stream Videos</h2>
               <p class="helper">Choose existing channel videos or pick new videos directly from your PC.</p>
             </div>
-            <button class="pill secondary small" type="button" id="streamPickerBrowsePcBtn" onclick="browseStreamVideosFromPc()">💻 Select from PC...</button>
+            <button class="pill secondary small" type="button" id="streamPickerBrowsePcBtn" onclick="browseStreamVideosFromPc()" data-icon="monitor">Select from PC...</button>
           </div>
         </div>
         <div class="stream-video-picker-body" id="streamVideoPickerList">
@@ -571,7 +571,7 @@
         <div class="modal-head">
           <div class="modal-head-row">
             <div>
-              <h2 id="dataUsageTitle">Data Usage Tracker 📅</h2>
+              <h2 id="dataUsageTitle">Data Usage Tracker</h2>
               <p class="helper">Select custom dates from calendar to track stream data usage without capping.</p>
             </div>
             <button class="pill ghost icon-only" type="button" onclick="closeDataUsageModal()" title="Close dialog">✕</button>

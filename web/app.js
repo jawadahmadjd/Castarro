@@ -454,10 +454,14 @@ function renderUsageMetrics(payload = state.status) {
   const metrics = state.usageMetrics || {};
   const usage = payload?.usage || {};
   if (cpuNode) {
-    cpuNode.textContent = Number.isFinite(Number(metrics.cpuPercent)) ? formatCpuUsage(metrics.cpuPercent) : "Unavailable";
+    const hasCpu = Number.isFinite(Number(metrics.cpuPercent));
+    cpuNode.textContent = hasCpu ? formatCpuUsage(metrics.cpuPercent) : "—";
+    cpuNode.classList.toggle("is-empty", !hasCpu);
   }
   if (ramNode) {
-    ramNode.textContent = Number.isFinite(Number(metrics.memoryBytes)) ? formatBytes(metrics.memoryBytes) : "Unavailable";
+    const hasRam = Number.isFinite(Number(metrics.memoryBytes));
+    ramNode.textContent = hasRam ? formatBytes(metrics.memoryBytes) : "—";
+    ramNode.classList.toggle("is-empty", !hasRam);
   }
   if (dataTodayNode) {
     dataTodayNode.textContent = formatBytes(usage.stream_transfer_today_bytes || 0);
@@ -1322,6 +1326,77 @@ function workspaceAlertIcon(name) {
   `;
 }
 
+const UI_ICON_PATHS = {
+  dashboard: '<rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/>',
+  youtube: '<rect x="2.5" y="5" width="19" height="14" rx="4"/><path d="m10 9.5 5 2.5-5 2.5z"/>',
+  streams: '<circle cx="12" cy="12" r="2"/><path d="M16.2 7.8a6 6 0 0 1 0 8.4M7.8 16.2a6 6 0 0 1 0-8.4M19 5a10 10 0 0 1 0 14M5 19A10 10 0 0 1 5 5"/>',
+  broadcast: '<circle cx="12" cy="12" r="2"/><path d="M16.2 7.8a6 6 0 0 1 0 8.4M7.8 16.2a6 6 0 0 1 0-8.4"/>',
+  history: '<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5M12 7v5l3 2"/>',
+  pulse: '<path d="M22 12h-4l-3 8L9 4l-3 8H2"/>',
+  transfer: '<path d="M7 4v16M3 8l4-4 4 4M17 20V4M21 16l-4 4-4-4"/>',
+  refresh: '<path d="M21 12a9 9 0 0 1-15 6.7L3 16M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M21 3v5h-5M3 21v-5h5"/>',
+  relay: '<path d="M17 2l4 4-4 4"/><path d="M3 11V9a3 3 0 0 1 3-3h15M7 22l-4-4 4-4"/><path d="M21 13v2a3 3 0 0 1-3 3H3"/>',
+  plus: '<path d="M12 5v14M5 12h14"/>',
+  edit: '<path d="M4 20h4L19 9l-4-4L4 16z"/>',
+  trash: '<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/>',
+  external: '<path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/>',
+  tag: '<path d="M3 12V4a1 1 0 0 1 1-1h8l9 9-9 9z"/><circle cx="8" cy="8" r="1.5"/>',
+  file: '<path d="M14 3H6a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8z"/><path d="M14 3v5h5"/>',
+  monitor: '<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/>',
+  clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+  hourglass: '<path d="M6 3h12M6 21h12M7 3c0 5 10 5 10 9s-10 4-10 9M17 3c0 5-10 5-10 9s10 4 10 9"/>',
+  users: '<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0M16 4.5a3.5 3.5 0 0 1 0 7M18 14a6 6 0 0 1 3.5 6"/>',
+  eye: '<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>',
+  phone: '<rect x="7" y="2.5" width="10" height="19" rx="2"/><path d="M11 18h2"/>',
+  next: '<path d="M5 5l8 7-8 7zM18 5v14"/>',
+  bolt: '<path d="M13 2 4 14h7l-1 8 9-12h-7z"/>',
+  sparkle: '<path d="M12 3v4M12 17v4M3 12h4M17 12h4M6 6l2.5 2.5M15.5 15.5 18 18M6 18l2.5-2.5M15.5 8.5 18 6"/>',
+  calendar: '<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/>',
+  user: '<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/>',
+  key: '<circle cx="8" cy="15" r="4"/><path d="m11 12 9-9M17 6l3 3"/>',
+  shield: '<path d="M12 3 4 6v6c0 5 3.5 8 8 9 4.5-1 8-4 8-9V6z"/>',
+  chat: '<path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12z"/>',
+  chip: '<rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/>',
+  film: '<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M7 3v18M17 3v18M3 8h4M3 16h4M17 8h4M17 16h4"/>',
+  cloud: '<path d="M7 18a5 5 0 1 1 1-9.9A6 6 0 0 1 19.5 10 4 4 0 0 1 18 18z"/>',
+  check: '<path d="m5 12 5 5 9-10"/>',
+  link: '<path d="M10 14a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1M14 10a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1"/>',
+  cpu: '<rect x="5" y="5" width="14" height="14" rx="2"/><rect x="9" y="9" width="6" height="6"/>',
+  database: '<ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/>',
+  bell: '<path d="M6 8a6 6 0 1 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10.3 21a1.9 1.9 0 0 0 3.4 0"/>',
+  sliders: '<path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/>',
+};
+
+const UI_SOLID_ICON_PATHS = {
+  play: '<path d="M7 4.5v15l12-7.5z"/>',
+  stop: '<rect x="6" y="6" width="12" height="12" rx="2"/>',
+};
+
+function uiIcon(name) {
+  const solid = UI_SOLID_ICON_PATHS[name];
+  return `<svg class="ui-icon${solid ? " is-solid" : ""}" viewBox="0 0 24 24" aria-hidden="true" focusable="false">${solid || UI_ICON_PATHS[name] || ""}</svg>`;
+}
+
+function uiIconTile(name, tone, small = false) {
+  return `<span class="icon-tile tone-${tone}${small ? " is-small" : ""}" aria-hidden="true">${uiIcon(name)}</span>`;
+}
+
+const UI_TONES = ["orange", "blue", "violet", "teal", "red", "amber", "green", "sky"];
+
+// Colour follows the channel's place in the full list, so searching never recolours it.
+function channelToneClass(channels, name) {
+  const index = Math.max(0, channels.findIndex((channel) => channel?.name === name));
+  return `tone-${UI_TONES[index % UI_TONES.length]}`;
+}
+
+// Static markup marks icon slots with data-icon; fill them once at boot.
+function hydrateStaticIcons(root = document) {
+  root.querySelectorAll("[data-icon]").forEach((node) => {
+    node.insertAdjacentHTML("afterbegin", uiIcon(node.dataset.icon));
+    node.removeAttribute("data-icon");
+  });
+}
+
 function renderWorkspaceAlertItem(item, index) {
   const id = workspaceAlertId(item, index);
   const detailId = `workspace-alert-detail-${index}`;
@@ -2053,14 +2128,14 @@ async function checkSystemUpdateInteractive(interactive = true) {
       if (banner && textNode) {
         banner.classList.remove("hidden");
         banner.classList.add("ready");
-        textNode.innerHTML = `<strong>✨ Update ${escapeHtml(latestVer)} is available!</strong> Current: ${escapeHtml(currentVer)}. (Active streams continue running without interruption)`;
+        textNode.innerHTML = `<strong>Update ${escapeHtml(latestVer)} is available!</strong> Current: ${escapeHtml(currentVer)}. (Active streams continue running without interruption)`;
         if (restartButton) {
           restartButton.hidden = false;
-          restartButton.textContent = "⚡ Update Now";
+          restartButton.textContent = "Update Now";
           restartButton.onclick = () => triggerSystemUpdateNow();
         }
       }
-      toast(`✨ Update ${latestVer} is available! Click 'Update Now' to apply.`, "info");
+      toast(`Update ${latestVer} is available! Click 'Update Now' to apply.`, "info");
     } else {
       if (interactive) {
         toast(`Castarro is up to date (${currentVer})!`, "success");
@@ -2112,12 +2187,13 @@ function renderStatus(payload) {
   const running = activeStreams.length;
 
   $("serverState").textContent = payload.config_exists ? `${running} live stream${running === 1 ? "" : "s"}` : "Config needed";
+  $("serverState").dataset.live = String(running > 0);
   const startAllButton = $("startAll");
   if (startAllButton) {
     const anyRunning = running > 0;
     const importBusy = isLiveImportBusy();
     startAllButton.textContent = anyRunning ? "Stop all streams" : "Start All Streams";
-    startAllButton.classList.toggle("success", !anyRunning);
+    startAllButton.classList.toggle("primary", !anyRunning);
     startAllButton.classList.toggle("danger", anyRunning);
     startAllButton.setAttribute("aria-label", anyRunning ? "Stop all streams" : "Start All Streams");
     startAllButton.disabled = !anyRunning && importBusy;
@@ -2383,6 +2459,8 @@ function getChannelReadinessViewModel(channel, payload) {
       value: health.mapped ? health.linkedAccountLabel : "Not linked",
       status: health.connected ? "Connected" : health.mapped ? "Reconnect" : "Link account",
       tone: health.connected ? "live" : "warn",
+      icon: "user",
+      iconTone: "red",
       routeTarget: "youtube",
     },
     {
@@ -2390,6 +2468,8 @@ function getChannelReadinessViewModel(channel, payload) {
       value: health.hasManualKey ? streamKeyLabel(channel) : "Missing",
       status: health.hasManualKey ? "Present" : "Needed",
       tone: health.hasManualKey ? "" : "warn",
+      icon: "key",
+      iconTone: "violet",
       routeTarget: "youtube",
     },
     {
@@ -2397,6 +2477,8 @@ function getChannelReadinessViewModel(channel, payload) {
       value: `${channel?.normalize_profile?.width || state.configData?.normalize_profile?.width || 1920}p source profile`,
       status: "Ready",
       tone: "",
+      icon: "sliders",
+      iconTone: "teal",
       routeTarget: "youtube",
     },
   ];
@@ -2487,7 +2569,7 @@ function renderWorkspaceChannelList(payload) {
     return `
       <div class="workspace-channel-card ${isSelected ? "is-active" : ""} ${hasMismatch ? "has-warning" : ""}" data-channel-name="${escapeAttr(channel.name)}">
       <button class="${cardClass}" type="button" onclick="switchWorkspaceChannel('${escapeJs(channel.name)}')" ${isSelected ? 'aria-current="true"' : ""}>
-        <span class="workspace-channel-logo" aria-hidden="true">${pictureSrc ? `<img src="${escapeAttr(pictureSrc)}" alt="">` : escapeHtml(logoText)}</span>
+        <span class="workspace-channel-logo ${channelToneClass(channels, channel.name)}" aria-hidden="true">${pictureSrc ? `<img src="${escapeAttr(pictureSrc)}" alt="">` : escapeHtml(logoText)}</span>
         <div class="workspace-channel-body">
           <div class="workspace-channel-item-head">
             <span class="channel-name workspace-channel-title ${titleSizeClass}" title="${escapeAttr(channelName)}">${escapeHtml(channelName)}</span>
@@ -2964,7 +3046,7 @@ function renderWorkspaceHeader(payload, channel) {
           aria-expanded="${state.workspace.alertsMenuOpen ? "true" : "false"}"
           onclick="event.stopPropagation(); toggleWorkspaceAlertsMenu()"
         >
-          <span aria-hidden="true">&#128276;</span>
+          ${uiIcon("bell")}
           ${unreadAlerts.length ? `<span class="workspace-alerts-count ${hasUnreadDangerAlerts ? "warn" : ""}">${unreadAlerts.length}</span>` : ""}
         </button>
         <div class="workspace-alerts-popover ${state.workspace.alertsMenuOpen ? "" : "hidden"}" id="workspaceAlertsPopover" aria-label="Notification history">
@@ -3012,12 +3094,18 @@ function renderWorkspaceStatusBand(payload, channel) {
     readinessNode.textContent = "Select channel";
     streamNode.textContent = "Idle";
     accountNode.textContent = "Not linked";
+    delete connectionNode.dataset.tone;
+    delete readinessNode.dataset.tone;
+    streamNode.dataset.tone = "idle";
     return;
   }
   const health = getChannelHealthViewModel(channel, payload);
   connectionNode.textContent = health.connected ? "Connected" : health.mapped ? "Reconnect account" : "Not linked";
+  connectionNode.dataset.tone = health.connected ? "ok" : "warn";
   readinessNode.textContent = health.ready ? "Ready" : "Needs setup";
+  readinessNode.dataset.tone = health.ready ? "ok" : "warn";
   streamNode.textContent = health.streamState;
+  streamNode.dataset.tone = health.streamRunning ? "live" : "idle";
   accountNode.textContent = health.linkedAccountLabel;
 }
 
@@ -3056,7 +3144,8 @@ function renderOverviewPanels(payload, channel) {
       <div class="readiness-list">
         ${rows.map((row) => `
           <button class="readiness-row" type="button" onclick="setWorkspaceRoute('${escapeJs(row.routeTarget)}')">
-            <span>
+            ${uiIconTile(row.icon, row.iconTone)}
+            <span class="readiness-row-text">
               <strong>${escapeHtml(row.label)}</strong>
               <small>${escapeHtml(row.value)}</small>
             </span>
@@ -6548,6 +6637,23 @@ function toggleYoutubeCardExpanded(event, key) {
   };
 }
 
+const YOUTUBE_CARD_ICONS = [
+  ["youtube-account", "user", "red"],
+  ["youtube-go-live", "broadcast", "blue"],
+  ["youtube-owner-setup", "shield", "violet"],
+  ["youtube-live-chat", "chat", "sky"],
+  ["youtube-encoder", "chip", "teal"],
+  ["youtube-stream-settings", "key", "violet"],
+  ["youtube-stream-cycle", "relay", "amber"],
+  ["youtube-cloud-videos", "cloud", "sky"],
+  ["youtube-videos", "film", "green"],
+];
+
+function youtubeCardIcon(key) {
+  const match = YOUTUBE_CARD_ICONS.find(([prefix]) => String(key || "").startsWith(prefix));
+  return match ? match.slice(1) : ["youtube", "red"];
+}
+
 function youtubeCollapsibleCard({
   key,
   title,
@@ -6562,9 +6668,11 @@ function youtubeCollapsibleCard({
 } = {}) {
   const open = isYoutubeCardExpanded(key, defaultOpen, autoOpenWhenFocused);
   const cardClass = `nested-card youtube-collapsible-card ${extraClass}`.trim();
+  const [icon, tone] = youtubeCardIcon(key);
   return `
     <details class="${cardClass}" ${attributes} ${open ? "open" : ""} ontoggle="setYoutubeCardExpanded('${escapeJs(key || "")}', this.open)">
       <summary class="youtube-card-summary" onclick="toggleYoutubeCardExpanded(event, '${escapeJs(key || "")}')">
+        ${uiIconTile(icon, tone)}
         <div class="youtube-card-summary-copy">
           <h3>${escapeHtml(title || "Card")}</h3>
           ${helper ? `<p class="helper">${escapeHtml(helper)}</p>` : ""}
@@ -11312,7 +11420,7 @@ function renderChannelRelayControl(channelName, streamRelay, relayStatus, stream
         </div>
       `;
     } else if (phase === "waiting_cooldown") {
-      phaseBadge = `<span class="badge warn" id="channelRelayStatusBadge">⏳ Handover</span>`;
+      phaseBadge = `<span class="badge warn" id="channelRelayStatusBadge">${uiIcon("hourglass")}Handover</span>`;
       statusHtml = `
         <div class="relay-status-banner cooldown">
           <span class="relay-status-text">Gap between streams: <strong>${escapeHtml(nextName)}</strong> starts in ~${durationText(status.cooldown_remaining_seconds || 0)}.</span>
@@ -11333,7 +11441,7 @@ function renderChannelRelayControl(channelName, streamRelay, relayStatus, stream
       <div class="channel-relay-header">
         <div class="channel-relay-title-group">
           <div class="channel-relay-title-row">
-            <h3 class="channel-relay-title">🔄 Sequential Relay (24/7)</h3>
+            <h3 class="channel-relay-title">${uiIconTile("relay", "blue", true)}Sequential Relay <small>24/7</small></h3>
             ${phaseBadge}
           </div>
           <p class="helper">Plays the enabled streams one after another (Stream 1 → Stream ${Math.max(1, streams.filter((s) => s.enabled !== false).length)}), with a short gap between them.</p>
@@ -11345,7 +11453,7 @@ function renderChannelRelayControl(channelName, streamRelay, relayStatus, stream
             type="button"
             onclick="toggleChannelStreamRelay('${escapeJs(channelName)}')"
           >
-            ${isEnabled ? '⏹ Stop Relay' : '▶ Start Relay'}
+            ${isEnabled ? `${uiIcon("stop")}Stop Relay` : `${uiIcon("play")}Start Relay`}
           </button>
         </div>
       </div>
@@ -11392,11 +11500,11 @@ function renderChannelRelayControl(channelName, streamRelay, relayStatus, stream
 
         <div class="relay-title-sets-row">
           <div class="relay-title-sets-text">
-            <strong>🏷 Title &amp; Thumbnail Rotation</strong>
+            <strong>Title &amp; Thumbnail Rotation</strong>
             <span class="helper helper-sm">${escapeHtml(titleSetRoundSummary(status, streams))}</span>
           </div>
           <label class="pill ghost small relay-title-sets-import" title="Load '### Stream N' → '**Titles**' lists. Stream N maps to the Nth stream below; existing thumbnails keep their slot.">
-            📄 Import Titles (.md)
+            ${uiIcon("file")}Import Titles (.md)
             <input type="file" accept=".md,text/markdown,text/plain" hidden onchange="importTitleSetsMarkdown('${escapeJs(channelName)}', this.files[0]); this.value='';" />
           </label>
         </div>
@@ -11435,63 +11543,79 @@ async function importTitleSetsMarkdown(channelName, file) {
 }
 window.importTitleSetsMarkdown = importTitleSetsMarkdown;
 
+// Open/closed state of the per-stream title set list and default-title editor; survives re-renders.
 const titleSetsOpenState = {};
+const streamDefaultsOpenState = {};
 
-function toggleTitleSetsOpen(streamId, open) {
-  titleSetsOpenState[streamId] = Boolean(open);
+function toggleTitleSetsOpen(streamId) {
+  titleSetsOpenState[streamId] = !titleSetsOpenState[streamId];
+  document.getElementById(`titleSetList_${streamId}`)?.classList.toggle("hidden", !titleSetsOpenState[streamId]);
+  const btn = document.getElementById(`titleSetsToggleBtn_${streamId}`);
+  if (btn) btn.textContent = titleSetsOpenState[streamId] ? "Hide sets" : "Show sets";
 }
 window.toggleTitleSetsOpen = toggleTitleSetsOpen;
 
+function toggleStreamDefaultsOpen(streamId) {
+  streamDefaultsOpenState[streamId] = !streamDefaultsOpenState[streamId];
+  document.getElementById(`streamDefaults_${streamId}`)?.classList.toggle("hidden", !streamDefaultsOpenState[streamId]);
+  const btn = document.getElementById(`streamDefaultsToggleBtn_${streamId}`);
+  if (btn) btn.textContent = streamDefaultsOpenState[streamId] ? "Hide" : "Edit";
+}
+window.toggleStreamDefaultsOpen = toggleStreamDefaultsOpen;
+
+function streamVideoSummaryHtml(items) {
+  const names = (items || []).map((item) => String(item || "").split(/[/\\]/).pop()).filter(Boolean);
+  if (!names.length) return `<em>Channel default videos</em>`;
+  return `${escapeHtml(names[0])}${names.length > 1 ? ` <em>+${names.length - 1} more</em>` : ""}`;
+}
+
+function activeTitleSetIndex(s, relayStatus) {
+  const idx = relayStatus?.active_title_set_index;
+  return s.id === relayStatus?.active_stream_id && idx !== null && idx !== undefined ? Number(idx) : -1;
+}
+
 function renderStreamTitleSetsCard(channelName, s, relayStatus) {
   const sets = Array.isArray(s.title_sets) ? s.title_sets : [];
-  const activeIdx = s.id === relayStatus?.active_stream_id && relayStatus?.active_title_set_index !== null && relayStatus?.active_title_set_index !== undefined
-    ? Number(relayStatus.active_title_set_index)
-    : -1;
+  const activeIdx = activeTitleSetIndex(s, relayStatus);
   const withThumbs = sets.filter((set) => set.thumbnail_url).length;
   const sid = escapeHtml(s.id);
+  const isOpen = Boolean(titleSetsOpenState[s.id]);
   const rows = sets.map((set, idx) => {
     const thumb = set.thumbnail_url ? apiRequestUrl(set.thumbnail_url) : "";
     return `
       <div class="title-set-row ${idx === activeIdx ? "active" : ""}" data-thumbnail-path="${escapeAttr(set.thumbnail_path || "")}" id="titleSetRow_${sid}_${idx}">
-        <div class="title-set-thumb">
-          ${thumb ? `<img src="${escapeAttr(thumb)}" alt="Set ${idx + 1} thumbnail" onerror="this.remove()">` : `<span class="title-set-thumb-empty">No thumbnail</span>`}
-          <label class="pill ghost small">
-            ${thumb ? "Replace" : "Upload"}
-            <input type="file" accept="image/jpeg,image/png" hidden onchange="uploadTitleSetThumbnail('${escapeJs(channelName)}', '${escapeJs(s.id)}', ${idx}, this.files[0])" />
-          </label>
-        </div>
-        <div class="title-set-fields">
-          <div class="title-set-label">
-            Set ${idx + 1} ${idx === activeIdx ? `<span class="badge live">On air</span>` : ""}
-            <button class="pill ghost icon-only small" type="button" title="Remove set ${idx + 1}" onclick="removeTitleSet('${escapeJs(channelName)}', '${escapeJs(s.id)}', ${idx})">🗑</button>
-          </div>
-          <input id="titleSetTitle_${sid}_${idx}" type="text" maxlength="100" class="field-input" value="${escapeAttr(set.title || "")}"
-            placeholder="Title for this set (max 100 characters)"
-            onchange="saveTitleSetsFromDom('${escapeJs(channelName)}', '${escapeJs(s.id)}')" />
-          <textarea id="titleSetDesc_${sid}_${idx}" class="field-input" rows="1"
-            placeholder="Description (optional; blank uses the stream's description)"
-            onchange="saveTitleSetsFromDom('${escapeJs(channelName)}', '${escapeJs(s.id)}')">${escapeHtml(set.description || "")}</textarea>
-        </div>
+        <span class="title-set-num" title="${idx === activeIdx ? "On air now" : `Set ${idx + 1}`}">${idx + 1}</span>
+        <label class="title-set-thumb" title="${thumb ? "Replace" : "Upload"} the thumbnail for Set ${idx + 1}">
+          ${thumb ? `<img src="${escapeAttr(thumb)}" alt="" onerror="this.remove()">` : `<span>+ Image</span>`}
+          <input type="file" accept="image/jpeg,image/png" hidden onchange="uploadTitleSetThumbnail('${escapeJs(channelName)}', '${escapeJs(s.id)}', ${idx}, this.files[0])" />
+        </label>
+        <input id="titleSetTitle_${sid}_${idx}" type="text" maxlength="100" class="field-input" value="${escapeAttr(set.title || "")}"
+          placeholder="Title (max 100 characters)" title="Title for Set ${idx + 1}"
+          onchange="saveTitleSetsFromDom('${escapeJs(channelName)}', '${escapeJs(s.id)}')" />
+        <textarea id="titleSetDesc_${sid}_${idx}" class="field-input title-set-desc" rows="1"
+          placeholder="Description (blank uses the stream's)" title="Description for Set ${idx + 1}"
+          onchange="saveTitleSetsFromDom('${escapeJs(channelName)}', '${escapeJs(s.id)}')">${escapeHtml(set.description || "")}</textarea>
+        <button class="title-set-remove" type="button" title="Remove set ${idx + 1}" onclick="removeTitleSet('${escapeJs(channelName)}', '${escapeJs(s.id)}', ${idx})">🗑</button>
       </div>
     `;
   }).join("");
   const summaryText = sets.length
-    ? `${sets.length} set${sets.length === 1 ? "" : "s"} · ${withThumbs} with thumbnail${activeIdx >= 0 ? ` · Set ${activeIdx + 1} on air` : ""}`
-    : "No sets: the relay uses the title and thumbnail above";
+    ? `${sets.length} set${sets.length === 1 ? "" : "s"} · ${withThumbs} with thumbnail${activeIdx >= 0 ? ` · Set ${activeIdx + 1} on air` : ""} · relay round N uses Set N`
+    : "No sets: the relay uses the title and thumbnail above.";
   return `
-    <details class="field-group stream-title-sets-group" ${titleSetsOpenState[s.id] ? "open" : ""} ontoggle="toggleTitleSetsOpen('${escapeJs(s.id)}', this.open)">
-      <summary class="stream-title-sets-summary">
-        <span class="field-label">🏷 Title &amp; Thumbnail Rotation</span>
-        <span class="helper helper-sm">${escapeHtml(summaryText)}</span>
-      </summary>
-      <div class="stream-title-sets-body">
-        <div class="stream-title-sets-head">
-          <p class="helper helper-sm">Relay round N uses Set N, then wraps. Privacy stays as set above.</p>
-          <button class="pill ghost small" type="button" onclick="addTitleSet('${escapeJs(channelName)}', '${escapeJs(s.id)}')">+ Add Set</button>
+    <div class="stream-row stream-row-top">
+      <span class="stream-row-label">Title sets</span>
+      <div class="stream-row-main">
+        <div class="stream-row-spread">
+          <span class="stream-row-text">${escapeHtml(summaryText)}</span>
+          <span class="stream-row-buttons">
+            <button class="pill ghost small" type="button" onclick="addTitleSet('${escapeJs(channelName)}', '${escapeJs(s.id)}')">+ Add set</button>
+            ${sets.length ? `<button class="pill ghost small" id="titleSetsToggleBtn_${sid}" type="button" onclick="toggleTitleSetsOpen('${escapeJs(s.id)}')">${isOpen ? "Hide sets" : "Show sets"}</button>` : ""}
+          </span>
         </div>
-        <div class="title-set-list" id="titleSetList_${sid}" data-count="${sets.length}">${rows}</div>
+        <div class="title-set-list ${isOpen ? "" : "hidden"}" id="titleSetList_${sid}" data-count="${sets.length}">${rows}</div>
       </div>
-    </details>
+    </div>
   `;
 }
 
@@ -11535,6 +11659,7 @@ async function addTitleSet(channelName, streamId) {
   const sets = readTitleSetsFromDom(streamId);
   const title = prompt(`Title for Set ${sets.length + 1}:`, "");
   if (title === null || !title.trim()) return;
+  titleSetsOpenState[streamId] = true;
   try {
     await postTitleSets(channelName, streamId, [...sets, { title: title.trim(), description: "", thumbnail_path: "" }], "Set added.");
     await renderWorkspaceStreamsTab(channelName);
@@ -11749,7 +11874,7 @@ function toggleStreamKeyMask(streamId) {
     input.type = streamKeyMaskedState[streamId] ? "text" : "password";
   }
   if (btn) {
-    btn.textContent = streamKeyMaskedState[streamId] ? "Hide" : "Show";
+    btn.textContent = streamKeyMaskedState[streamId] ? "Hide key" : "Show key";
   }
 }
 
@@ -11760,6 +11885,7 @@ function toggleStreamCardExpand(streamId) {
   if (body) {
     body.classList.toggle("hidden", !streamCardExpandedState[streamId]);
   }
+  document.getElementById(`streamCard_${streamId}`)?.classList.toggle("is-expanded", Boolean(streamCardExpandedState[streamId]));
   if (toggleBtn) {
     toggleBtn.classList.toggle("expanded", Boolean(streamCardExpandedState[streamId]));
   }
@@ -11840,7 +11966,7 @@ async function renderWorkspaceStreamsTab(channelName, cachedStreamsData = null) 
       return;
     }
 
-    container.innerHTML = streams.map((s) => {
+    container.innerHTML = streams.map((s, streamIndex) => {
       streamStatsCache[s.id] = streamStatsCache[s.id] || {};
       if (s.concurrent_viewers !== null && s.concurrent_viewers !== undefined) {
         streamStatsCache[s.id].concurrent_viewers = s.concurrent_viewers;
@@ -11867,24 +11993,24 @@ async function renderWorkspaceStreamsTab(channelName, cachedStreamsData = null) 
       const statusBadge = isRunning
         ? `<span class="badge live pulse">● RUNNING</span>`
         : isRecovering
-        ? `<span class="badge warn pulse">🔄 RECONNECTING...</span>`
-        : `<span class="badge">STOPPED</span>`;
+        ? `<span class="badge warn pulse">${uiIcon("refresh")}Reconnecting...</span>`
+        : `<span class="badge is-stopped">Stopped</span>`;
       
       // Stats only appear once there is something to show (uptime while on air, YouTube numbers after Refresh Stats).
       const durationBadge = (isRunning || isRecovering)
-        ? `<span class="badge duration-badge" title="Stream Uptime">⏱ ${escapeHtml(s.duration_formatted || "00:00:00")}</span>`
+        ? `<span class="badge duration-badge stream-stat-badge" title="Stream Uptime">${uiIcon("clock")}${escapeHtml(s.duration_formatted || "00:00:00")}</span>`
         : "";
 
       const viewerBadge = (s.concurrent_viewers !== null && s.concurrent_viewers !== undefined)
-        ? `<span class="badge viewers-badge" title="Live Concurrent Viewers">👥 ${s.concurrent_viewers.toLocaleString()} watching</span>`
+        ? `<span class="badge viewers-badge stream-stat-badge" title="Live Concurrent Viewers">${uiIcon("users")}${s.concurrent_viewers.toLocaleString()} watching</span>`
         : "";
 
       const totalViewsBadge = (s.total_views !== null && s.total_views !== undefined)
-        ? `<span class="badge views-badge" title="Total Broadcast Views">👁 ${s.total_views.toLocaleString()} views</span>`
+        ? `<span class="badge views-badge stream-stat-badge" title="Total Broadcast Views">${uiIcon("eye")}${s.total_views.toLocaleString()} views</span>`
         : "";
 
       const avgDurationBadge = s.avg_view_duration
-        ? `<span class="badge duration-badge" title="Average View Duration">Avg ${escapeHtml(s.avg_view_duration)}</span>`
+        ? `<span class="badge duration-badge stream-stat-badge" title="Average View Duration">Avg ${escapeHtml(s.avg_view_duration)}</span>`
         : "";
 
       const masked = !streamKeyMaskedState[s.id];
@@ -11905,12 +12031,12 @@ async function renderWorkspaceStreamsTab(channelName, cachedStreamsData = null) 
 
       let ytBadge = "";
       if (isYtLive) {
-        ytBadge = `<span class="badge live pulse" title="Verified LIVE on YouTube">🔴 YouTube: LIVE</span>`;
+        ytBadge = `<span class="badge live pulse" title="Verified LIVE on YouTube">YouTube: LIVE</span>`;
       } else if (isYtIngesting) {
-        ytBadge = `<span class="badge warn pulse" title="Ingesting stream to YouTube & transitioning to Live...">⏳ YouTube: Going Live...</span>`;
+        ytBadge = `<span class="badge warn pulse" title="Ingesting stream to YouTube & transitioning to Live...">${uiIcon("hourglass")}YouTube: Going Live...</span>`;
       } else if (s.youtube_broadcast_id) {
         const studioUrl = s.youtube_studio_url || `https://studio.youtube.com/video/${s.youtube_broadcast_id}/livestreaming`;
-        ytBadge = `<a href="${escapeAttr(studioUrl)}" target="_blank" class="badge" title="Open this broadcast in YouTube Studio" onclick="event.stopPropagation()">📺 Studio</a>`;
+        ytBadge = `<a href="${escapeAttr(studioUrl)}" target="_blank" class="badge studio-badge" title="Open this broadcast in YouTube Studio" onclick="event.stopPropagation()">Studio${uiIcon("external")}</a>`;
       }
 
       const actionBtn = (isRunning || isRecovering)
@@ -11918,14 +12044,14 @@ async function renderWorkspaceStreamsTab(channelName, cachedStreamsData = null) 
         : `<button class="pill success" id="streamCardBtn_${escapeHtml(s.id)}" type="button" onclick="startSingleStream('${escapeJs(channelName)}', '${escapeJs(s.id)}')">Start Stream</button>`;
 
       const goLiveBtn = (isRunning && !isYtLive && s.youtube_broadcast_id)
-        ? `<button class="pill primary small pulse" id="goLiveBtn_${escapeHtml(s.id)}" type="button" onclick="triggerGoLiveNow('${escapeJs(channelName)}', '${escapeJs(s.id)}')" title="Force immediate transition to YouTube Live">⚡ Go Live</button>`
+        ? `<button class="pill primary small pulse" id="goLiveBtn_${escapeHtml(s.id)}" type="button" onclick="triggerGoLiveNow('${escapeJs(channelName)}', '${escapeJs(s.id)}')" title="Force immediate transition to YouTube Live">${uiIcon("bolt")}Go Live</button>`
         : '';
 
       const scheduleBtn = `<button class="pill secondary" id="streamScheduleBtn_${escapeHtml(s.id)}" type="button" onclick="scheduleSingleStream('${escapeJs(channelName)}', '${escapeJs(s.id)}')">Schedule Stream</button>`;
 
       const isDualOn = s.youtube_dual_stream !== false;
       // Dual stream is on by default; only flag streams where it is off.
-      const dualBadge = isDualOn ? "" : `<span class="badge warn" title="Dual Stream (Horizontal 16:9 + Vertical Shorts) is disabled for this stream">📱 Shorts Dual: OFF</span>`;
+      const dualBadge = isDualOn ? "" : `<span class="badge warn" title="Dual Stream (Horizontal 16:9 + Vertical Shorts) is disabled for this stream">${uiIcon("phone")}Shorts Dual: OFF</span>`;
       const relayOn = Boolean(streamRelay && streamRelay.enabled);
 
       const streamCycle = s.stream_cycle || {};
@@ -11944,31 +12070,210 @@ async function renderWorkspaceStreamsTab(channelName, cachedStreamsData = null) 
       let loopBadge = "";
       if (cycleActive && !relayOn) {
         if (isRunning) {
-          loopBadge = `<span class="badge live pulse" title="24/7 Stream Loop Active: ~${durationText(cycleRemaining)} remaining in this run">🔄 Loop: ${durationText(cycleRemaining)} left</span>`;
+          loopBadge = `<span class="badge live pulse" title="24/7 Stream Loop Active: ~${durationText(cycleRemaining)} remaining in this run">${uiIcon("relay")}Loop: ${durationText(cycleRemaining)} left</span>`;
         } else if (cyclePhase === "waiting_restart") {
-          loopBadge = `<span class="badge warn pulse" title="24/7 Stream Loop Cooldown: Restarting in ~${durationText(cycleCooldownLeft)}">⏳ Cooldown: ${durationText(cycleCooldownLeft)}</span>`;
+          loopBadge = `<span class="badge warn pulse" title="24/7 Stream Loop Cooldown: Restarting in ~${durationText(cycleCooldownLeft)}">${uiIcon("hourglass")}Cooldown: ${durationText(cycleCooldownLeft)}</span>`;
         } else {
-          loopBadge = `<span class="badge" title="24/7 Stream Loop is enabled and will auto-cycle when stream starts">🔄 Loop: Ready</span>`;
+          loopBadge = `<span class="badge" title="24/7 Stream Loop is enabled and will auto-cycle when stream starts">${uiIcon("relay")}Loop: Ready</span>`;
         }
       }
 
       let relayBadge = "";
       if (streamRelay && streamRelay.enabled) {
         if (s.id === relayStatus?.active_stream_id) {
-          relayBadge = `<span class="badge live pulse" title="Sequential Relay: Active Stream (~${durationText(relayStatus.remaining_seconds || 0)} left)">🔄 Relay: Active (~${durationText(relayStatus.remaining_seconds || 0)} left)</span>`;
+          relayBadge = `<span class="badge live pulse" title="Sequential Relay: Active Stream (~${durationText(relayStatus.remaining_seconds || 0)} left)">${uiIcon("relay")}Relay: Active<span class="stream-stat-badge"> (~${durationText(relayStatus.remaining_seconds || 0)} left)</span></span>`;
         } else if (s.id === relayStatus?.next_stream_id) {
-          relayBadge = `<span class="badge primary" title="Sequential Relay: Next in Line">⏭ Next in Relay</span>`;
+          relayBadge = `<span class="badge primary" title="Sequential Relay: Next in Line">${uiIcon("next")}Next in Relay</span>`;
         } else if (s.enabled === false) {
           relayBadge = `<span class="badge text-muted" title="Disabled streams are skipped by the relay">Skipped (disabled)</span>`;
         }
       }
       const titleSetCount = Array.isArray(s.title_sets) ? s.title_sets.length : 0;
       if (titleSetCount && s.id === relayStatus?.active_stream_id && relayStatus?.active_title_set_index !== null && relayStatus?.active_title_set_index !== undefined) {
-        relayBadge += `<span class="badge primary" title="Title &amp; thumbnail set on air">🏷 Set ${Number(relayStatus.active_title_set_index) + 1}/${titleSetCount}</span>`;
+        relayBadge += `<span class="badge primary stream-stat-badge" title="Title &amp; thumbnail set on air">${uiIcon("tag")}Set ${Number(relayStatus.active_title_set_index) + 1}/${titleSetCount}</span>`;
       }
 
+      const sid = escapeHtml(s.id);
+      const chJs = escapeJs(channelName);
+      const sidJs = escapeJs(s.id);
+      const titleSets = Array.isArray(s.title_sets) ? s.title_sets : [];
+      const playlistItems = Array.isArray(s.playlist) ? s.playlist : [];
+      const broadcastTitle = s.title || (s.name && s.name !== "Main Stream Feed" ? s.name : "") || channelConfig.youtube_broadcast_title || channelConfig.live_title || channelConfig.title || channelName || "";
+      const description = String(s.description || "");
+
+      // While on air the strip carries the live numbers, so the header drops them (see .is-on-air CSS).
+      let onAirStrip = "";
+      if (isRunning || isRecovering) {
+        const isRelayStream = relayOn && s.id === relayStatus?.active_stream_id;
+        const setIdx = activeTitleSetIndex(s, relayStatus);
+        const airSet = setIdx >= 0 ? titleSets[setIdx] : null;
+        const airThumb = airSet?.thumbnail_url ? apiRequestUrl(airSet.thumbnail_url) : thumbSrc;
+        const nextStream = isRelayStream ? streams.find((x) => x.id === relayStatus?.next_stream_id && x.id !== s.id) : null;
+        const meta = [
+          isRecovering ? "Reconnecting to YouTube" : `Live ${s.duration_formatted || "00:00:00"}`,
+          s.concurrent_viewers !== null && s.concurrent_viewers !== undefined ? `${s.concurrent_viewers.toLocaleString()} watching` : "",
+          s.total_views !== null && s.total_views !== undefined ? `${s.total_views.toLocaleString()} views` : "",
+          s.avg_view_duration ? `avg ${s.avg_view_duration}` : "",
+          isRelayStream ? `${durationText(relayStatus.remaining_seconds || 0)} left in this turn` : (cycleActive && isRunning ? `${durationText(cycleRemaining)} left in this loop run` : ""),
+          nextStream ? `Next: ${nextStream.name || nextStream.id}` : "",
+        ].filter(Boolean).join(" · ");
+        const studioUrl = s.youtube_broadcast_id ? (s.youtube_studio_url || `https://studio.youtube.com/video/${s.youtube_broadcast_id}/livestreaming`) : "";
+        onAirStrip = `
+          <div class="stream-on-air">
+            ${airThumb ? `<img src="${escapeAttr(airThumb)}" alt="" onerror="this.remove()">` : ""}
+            <div class="stream-on-air-text">
+              ${isRecovering ? `<span class="badge warn">Reconnecting</span>` : `<span class="badge live">On air${airSet ? ` · Set ${setIdx + 1} of ${titleSets.length}` : ""}</span>`}
+              <div class="stream-on-air-title">${escapeHtml(airSet?.title || broadcastTitle)}</div>
+              <div class="stream-on-air-meta">${escapeHtml(meta)}</div>
+            </div>
+            ${studioUrl ? `<a class="pill ghost small" href="${escapeAttr(studioUrl)}" target="_blank" rel="noopener">Open in Studio</a>` : ""}
+          </div>
+        `;
+      }
+
+      const privacyField = `
+        <label class="stream-field">
+          <span class="stream-field-label">Privacy</span>
+          <select id="streamPrivacySelect_${sid}" class="field-input stream-privacy-select" onchange="updateStreamDetailInline('${chJs}', '${sidJs}', 'privacy_status', this.value)">
+            ${["public", "unlisted", "private"].map((p) => `<option value="${p}" ${(s.privacy_status || "public").toLowerCase() === p ? "selected" : ""}>${p[0].toUpperCase()}${p.slice(1)}</option>`).join("")}
+          </select>
+        </label>
+      `;
+      const startField = `
+        <label class="stream-field">
+          <span class="stream-field-label">Starts</span>
+          <input id="streamStartInput_${sid}" type="datetime-local" class="field-input" value="${escapeHtml(isoToDatetimeLocal(s.scheduled_start_time || "") || "")}"
+            onchange="updateStreamDetailInline('${chJs}', '${sidJs}', 'scheduled_start_time', this.value)" />
+        </label>
+      `;
+      const shortsField = `
+        <label class="stream-check" title="YouTube also shows this stream in the vertical Shorts feed (auto-crop, no extra CPU).">
+          <input type="checkbox" id="streamDualSwitch_${sid}" ${isDualOn ? "checked" : ""}
+            onchange="updateStreamDetailInline('${chJs}', '${sidJs}', 'youtube_dual_stream', this.checked)" />
+          Also stream to Shorts (vertical)
+        </label>
+      `;
+      const titleField = `
+        <label class="stream-field">
+          <span class="stream-field-label">Broadcast title</span>
+          <input id="streamTitleInput_${sid}" type="text" class="field-input" value="${escapeHtml(broadcastTitle)}"
+            oninput="updateStreamDetailInline('${chJs}', '${sidJs}', 'title', this.value)"
+            onchange="updateStreamDetailInline('${chJs}', '${sidJs}', 'title', this.value)"
+            placeholder="Broadcast title (e.g. Live Event #1)" />
+        </label>
+      `;
+      const descField = `
+        <label class="stream-field">
+          <span class="stream-field-label">Description</span>
+          <textarea id="streamDescInput_${sid}" class="field-input stream-desc-input" rows="2"
+            oninput="updateStreamDetailInline('${chJs}', '${sidJs}', 'description', this.value)"
+            onchange="updateStreamDetailInline('${chJs}', '${sidJs}', 'description', this.value)"
+            placeholder="Optional broadcast description...">${escapeHtml(description)}</textarea>
+        </label>
+      `;
+      const detailsBlock = (fields) => `
+        <div class="stream-details">
+          <div class="stream-thumb-slot-wrap">
+            <label class="stream-thumb-slot ${hasThumb ? "has-image" : ""}" title="${hasThumb ? "Replace" : "Upload"} the stream thumbnail">
+              ${hasThumb ? `<img src="${escapeAttr(thumbSrc)}" alt="" onerror="this.parentElement.classList.remove('has-image'); this.remove()">` : ""}
+              <span class="stream-thumb-slot-empty">+ Add thumbnail</span>
+              <input id="streamThumbnailInput_${sid}" type="file" accept="image/jpeg,image/png,image/gif,image/bmp" hidden
+                onchange="uploadStreamThumbnailInline('${chJs}', '${sidJs}', this.files[0])" />
+            </label>
+            <span class="stream-thumb-slot-note">${hasThumb ? "Click to replace" : "JPG or PNG"} · max 2 MB</span>
+          </div>
+          <div class="stream-details-fields">${fields}</div>
+        </div>
+      `;
+      const sourceRow = `
+        <div class="stream-row">
+          <span class="stream-row-label">Source</span>
+          <div class="stream-source">
+            <div class="stream-source-item">
+              <input id="streamKeyInput_${sid}" type="${masked ? "password" : "text"}" class="field-input stream-key-field" value="${escapeHtml(keyVal)}"
+                title="YouTube stream key"
+                oninput="updateStreamKeyInline('${chJs}', '${sidJs}', this.value)"
+                onchange="updateStreamKeyInline('${chJs}', '${sidJs}', this.value)"
+                placeholder="Paste YouTube stream key" />
+              <button id="streamKeyToggleBtn_${sid}" class="pill ghost small" type="button" onclick="toggleStreamKeyMask('${sidJs}')">${masked ? "Show key" : "Hide key"}</button>
+            </div>
+            <div class="stream-source-item">
+              <span class="stream-video-summary" id="streamVideoSummary_${sid}" title="${escapeAttr(playlistItems.join(", "))}">${streamVideoSummaryHtml(playlistItems)}</span>
+              <input id="streamVideoInput_${sid}" type="hidden" value="${escapeHtml(streamPlaylist)}" />
+              <button class="pill ghost small" type="button" onclick="openStreamVideoPickerModal('${chJs}', '${sidJs}')">Choose videos</button>
+            </div>
+          </div>
+        </div>
+      `;
+      const timingRow = relayOn
+        ? `
+          <div class="stream-row">
+            <span class="stream-row-label">24/7 timing</span>
+            <span class="stream-row-text">Run time and gaps come from the Sequential Relay above.</span>
+          </div>
+        `
+        : `
+          <div class="stream-row">
+            <span class="stream-row-label">24/7 loop</span>
+            <div class="stream-loop">
+              <label class="mini-switch" title="Run for the set time, rest, then restart, around the clock">
+                <input type="checkbox" id="streamCycleToggle_${sid}" ${cycleActive ? "checked" : ""} onchange="toggleStreamCycleForStream('${chJs}', '${sidJs}')" />
+                <span>${cycleActive ? "On" : "Off"}</span>
+              </label>
+              <span class="stream-loop-part">Run ${renderStreamCycleHmsInputsForStream(s.id, "duration", durationHmsParts(cycleDuration), `updateStreamCycleDurationFromHms('${chJs}', '${sidJs}')`)}</span>
+              <span class="stream-loop-part">Rest ${renderStreamCycleHmsInputsForStream(s.id, "cooldown", durationHmsParts(cycleCooldown), `updateStreamCycleCooldownFromHms('${chJs}', '${sidJs}')`)}</span>
+              <label class="stream-check" title="Adds up to the given number of minutes to each run and rest, at random">
+                <input type="checkbox" id="streamCycleRandomize_${sid}" ${cycleRandomized ? "checked" : ""}
+                  onchange="updateStreamCycleSettingInline('${chJs}', '${sidJs}', 'randomized', this.checked)" />
+                Random${cycleRandomized ? "" : " extra"}
+              </label>
+              ${cycleRandomized ? `
+                <span class="stream-loop-part">
+                  +<input id="streamCycleDurationRand_${sid}" type="number" min="0" step="1" class="field-input" value="${escapeAttr(String(cycleDurationRandMin))}"
+                    title="Up to this many extra minutes per run"
+                    onchange="updateStreamCycleSettingInline('${chJs}', '${sidJs}', 'duration_random_minutes', this.value)" />
+                  / +<input id="streamCycleCooldownRand_${sid}" type="number" min="0" step="1" class="field-input" value="${escapeAttr(String(cycleCooldownRandMin))}"
+                    title="Up to this many extra minutes per rest"
+                    onchange="updateStreamCycleSettingInline('${chJs}', '${sidJs}', 'restart_delay_random_minutes', this.value)" />
+                  min
+                </span>
+              ` : ""}
+            </div>
+          </div>
+        `;
+      // With title sets the sets are what goes on air, so they come first and the stream's own
+      // title, description and thumbnail fold into a "Default title" row.
+      const bodyRows = titleSets.length
+        ? `
+          <div class="stream-row">
+            <span class="stream-row-label">Broadcast</span>
+            <div class="stream-inline-fields">${privacyField}${startField}${shortsField}</div>
+          </div>
+          ${renderStreamTitleSetsCard(channelName, s, relayStatus)}
+          <div class="stream-row stream-row-top">
+            <span class="stream-row-label">Default title</span>
+            <div class="stream-row-main">
+              <div class="stream-row-spread">
+                <span class="stream-row-text stream-row-ellipsis">“${escapeHtml(broadcastTitle)}” · ${hasThumb ? "has a thumbnail" : "no thumbnail"} · used only when no set applies</span>
+                <button class="pill ghost small" id="streamDefaultsToggleBtn_${sid}" type="button" onclick="toggleStreamDefaultsOpen('${sidJs}')">${streamDefaultsOpenState[s.id] ? "Hide" : "Edit"}</button>
+              </div>
+              <div class="${streamDefaultsOpenState[s.id] ? "" : "hidden"}" id="streamDefaults_${sid}">${detailsBlock(titleField + descField)}</div>
+            </div>
+          </div>
+          ${sourceRow}
+        `
+        : `
+          ${detailsBlock(`
+            <div class="stream-title-privacy">${titleField}${privacyField}</div>
+            ${descField}
+            <div class="stream-inline-fields">${startField}${shortsField}</div>
+          `)}
+          ${sourceRow}
+          ${renderStreamTitleSetsCard(channelName, s, relayStatus)}
+        `;
+
       return `
-        <div class="stream-card ${isRunning ? "active-stream" : ""}" id="streamCard_${escapeHtml(s.id)}">
+        <div class="stream-card tone-${UI_TONES[streamIndex % UI_TONES.length]} ${isRunning ? "active-stream" : ""} ${isExpanded ? "is-expanded" : ""} ${isRunning || isRecovering ? "is-on-air" : ""}" id="streamCard_${escapeHtml(s.id)}">
           <div class="stream-card-header" onclick="toggleStreamCardExpand('${escapeJs(s.id)}')">
             <div class="stream-card-left">
               <button
@@ -11983,7 +12288,7 @@ async function renderWorkspaceStreamsTab(channelName, cachedStreamsData = null) 
               <div class="stream-card-info">
                 <div class="stream-title-row">
                   <h3 class="stream-title" id="streamTitleText_${escapeHtml(s.id)}">${escapeHtml(s.name || "Stream")}</h3>
-                  <button class="pill ghost icon-only small" type="button" onclick="event.stopPropagation(); promptRenameStream('${escapeJs(channelName)}', '${escapeJs(s.id)}', '${escapeJs(s.name || "")}')" title="Rename Stream Name">✏️</button>
+                  <button class="pill ghost icon-only small" type="button" onclick="event.stopPropagation(); promptRenameStream('${escapeJs(channelName)}', '${escapeJs(s.id)}', '${escapeJs(s.name || "")}')" title="Rename Stream Name" aria-label="Rename stream">${uiIcon("edit")}</button>
                 </div>
                 <div class="stream-badges">
                   ${statusBadge}
@@ -12002,217 +12307,13 @@ async function renderWorkspaceStreamsTab(channelName, cachedStreamsData = null) 
               ${goLiveBtn}
               ${scheduleBtn}
               ${actionBtn}
-              <button class="pill ghost icon-only danger" type="button" onclick="deleteStreamFromChannel('${escapeJs(channelName)}', '${escapeJs(s.id)}')" title="Delete Stream">🗑</button>
+              <button class="pill ghost icon-only danger" type="button" onclick="deleteStreamFromChannel('${escapeJs(channelName)}', '${escapeJs(s.id)}')" title="Delete Stream" aria-label="Delete stream">${uiIcon("trash")}</button>
             </div>
           </div>
-          <div class="stream-card-body ${isExpanded ? "" : "hidden"}" id="streamCardBody_${escapeHtml(s.id)}">
-            <div class="field-group">
-              <label class="field-label" for="streamKeyInput_${escapeHtml(s.id)}">Stream Key</label>
-              <div class="stream-key-input-group">
-                <input
-                  id="streamKeyInput_${escapeHtml(s.id)}"
-                  type="${masked ? "password" : "text"}"
-                  class="field-input stream-key-field"
-                  value="${escapeHtml(keyVal)}"
-                  oninput="updateStreamKeyInline('${escapeJs(channelName)}', '${escapeJs(s.id)}', this.value)"
-                  onchange="updateStreamKeyInline('${escapeJs(channelName)}', '${escapeJs(s.id)}', this.value)"
-                  placeholder="Paste YouTube Stream Key (e.g. xxxx-xxxx-xxxx-xxxx)"
-                />
-                <button
-                  id="streamKeyToggleBtn_${escapeHtml(s.id)}"
-                  class="pill ghost small"
-                  type="button"
-                  onclick="toggleStreamKeyMask('${escapeJs(s.id)}')"
-                >${masked ? "Show" : "Hide"}</button>
-              </div>
-            </div>
-            <div class="field-group youtube-stream-schedule-group">
-              <div class="field-label-row">
-                <label class="field-label">Broadcast & Schedule Settings</label>
-              </div>
-              <div class="form-grid schedule-form-grid">
-                <label class="field-label-sm">
-                  Stream Name
-                  <input
-                    id="streamNameInput_${escapeHtml(s.id)}"
-                    type="text"
-                    class="field-input"
-                    value="${escapeHtml(s.name || "")}"
-                    oninput="updateStreamDetailInline('${escapeJs(channelName)}', '${escapeJs(s.id)}', 'name', this.value)"
-                    onchange="updateStreamDetailInline('${escapeJs(channelName)}', '${escapeJs(s.id)}', 'name', this.value)"
-                    placeholder="Stream Name (e.g. Diseases)"
-                  />
-                </label>
-                <label class="field-label-sm">
-                  Broadcast Title
-                  <input
-                    id="streamTitleInput_${escapeHtml(s.id)}"
-                    type="text"
-                    class="field-input"
-                    value="${escapeHtml(s.title || (s.name && s.name !== "Main Stream Feed" ? s.name : "") || channelConfig.youtube_broadcast_title || channelConfig.live_title || channelConfig.title || channelName || "")}"
-                    oninput="updateStreamDetailInline('${escapeJs(channelName)}', '${escapeJs(s.id)}', 'title', this.value)"
-                    onchange="updateStreamDetailInline('${escapeJs(channelName)}', '${escapeJs(s.id)}', 'title', this.value)"
-                    placeholder="Broadcast Title (e.g. Live Event #1)"
-                  />
-                  ${relayOn && Array.isArray(s.title_sets) && s.title_sets.length ? `<span class="setting-note">Used only when no rotation set applies.</span>` : ""}
-                </label>
-                <label class="field-label-sm">
-                  Privacy Status
-                  <select
-                    id="streamPrivacySelect_${escapeHtml(s.id)}"
-                    class="field-input"
-                    onchange="updateStreamDetailInline('${escapeJs(channelName)}', '${escapeJs(s.id)}', 'privacy_status', this.value)"
-                  >
-                    ${["public", "unlisted", "private"].map((p) => `<option value="${p}" ${(s.privacy_status || "public").toLowerCase() === p ? "selected" : ""}>${p}</option>`).join("")}
-                  </select>
-                </label>
-                <label class="field-label-sm">
-                  Scheduled Start Time
-                  <input
-                    id="streamStartInput_${escapeHtml(s.id)}"
-                    type="datetime-local"
-                    class="field-input"
-                    value="${escapeHtml(isoToDatetimeLocal(s.scheduled_start_time || "") || "")}"
-                    onchange="updateStreamDetailInline('${escapeJs(channelName)}', '${escapeJs(s.id)}', 'scheduled_start_time', this.value)"
-                  />
-                </label>
-                <label class="field-label-sm">
-                  Thumbnail Image (Optional)
-                  <input
-                    id="streamThumbnailInput_${escapeHtml(s.id)}"
-                    type="file"
-                    accept="image/jpeg,image/png,image/gif,image/bmp"
-                    class="field-input"
-                    onchange="uploadStreamThumbnailInline('${escapeJs(channelName)}', '${escapeJs(s.id)}', this.files[0])"
-                  />
-                  ${hasThumb ? `
-                    <div class="stream-thumb-preview-card">
-                      <img src="${escapeAttr(thumbSrc)}" alt="" class="stream-thumb-preview-img" onerror="this.closest('.stream-thumb-preview-card')?.remove()">
-                      <div class="stream-thumb-preview-body">
-                        <div class="stream-thumb-status">✓ Thumbnail Attached</div>
-                        <div class="stream-thumb-path" title="${escapeAttr(s.thumbnail_path)}">${escapeHtml((s.thumbnail_path || "").split(/[/\\]/).pop() || "Thumbnail Image")}</div>
-                      </div>
-                    </div>
-                  ` : ''}
-                </label>
-              </div>
-              <label class="field-label-sm description-label">
-                Description
-                <textarea
-                  id="streamDescInput_${escapeHtml(s.id)}"
-                  class="field-input stream-desc-input"
-                  rows="4"
-                  oninput="updateStreamDetailInline('${escapeJs(channelName)}', '${escapeJs(s.id)}', 'description', this.value)"
-                  onchange="updateStreamDetailInline('${escapeJs(channelName)}', '${escapeJs(s.id)}', 'description', this.value)"
-                  placeholder="Optional broadcast description..."
-                >${escapeHtml(s.description || "")}</textarea>
-              </label>
-              <div class="stream-dual-toggle-wrap">
-                <label class="switch stream-dual-switch" title="When enabled, YouTube automatically broadcasts this stream to the vertical Shorts feed along with the standard horizontal feed with zero server CPU load.">
-                  <input
-                    type="checkbox"
-                    id="streamDualSwitch_${escapeHtml(s.id)}"
-                    ${isDualOn ? "checked" : ""}
-                    onchange="updateStreamDetailInline('${escapeJs(channelName)}', '${escapeJs(s.id)}', 'youtube_dual_stream', this.checked)"
-                  />
-                  <span>📱 Also stream to YouTube Shorts (vertical auto-crop)</span>
-                </label>
-              </div>
-            </div>
-            ${renderStreamTitleSetsCard(channelName, s, relayStatus)}
-            <div class="field-group stream-video-field-group">
-              <div class="field-label-row">
-                <label class="field-label" for="streamVideoInput_${escapeHtml(s.id)}">Videos for this stream (optional)</label>
-                <button class="pill ghost small" type="button" onclick="openStreamVideoPickerModal('${escapeJs(channelName)}', '${escapeJs(s.id)}')">📁 Import / Select Videos</button>
-              </div>
-              <input
-                id="streamVideoInput_${escapeHtml(s.id)}"
-                type="text"
-                class="field-input"
-                value="${escapeHtml(streamPlaylist)}"
-                oninput="updateStreamPlaylistInline('${escapeJs(channelName)}', '${escapeJs(s.id)}', this.value)"
-                onchange="updateStreamPlaylistInline('${escapeJs(channelName)}', '${escapeJs(s.id)}', this.value)"
-                placeholder="Leave blank for channel default, or select videos via Import button"
-              />
-            </div>
-            ${relayOn ? `
-            <p class="helper stream-relay-timing-note">⏱ Run time and gaps for this stream are set by the Sequential Relay above.</p>
-            ` : `<div class="field-group stream-cycle-field-group">
-              <div class="nested-card stream-cycle-nested-card">
-                <div class="stream-cycle-header-row">
-                  <div>
-                    <div class="field-label stream-cycle-card-title">🔄 24/7 Stream Loop</div>
-                    <p class="helper stream-cycle-helper">Automatically run this stream for a set duration, stop it, cool down, then restart 24/7 without intervention.</p>
-                  </div>
-                  <div class="row gap-2 stream-cycle-actions">
-                    <span class="badge ${cycleActive ? (isRunning ? 'live' : 'warn') : ''}" id="streamCycleStatusBadge_${escapeHtml(s.id)}">${cycleActive ? (isRunning ? `${durationText(cycleElapsed)} elapsed` : (cyclePhase === 'waiting_restart' ? `Cooling down (${durationText(cycleCooldownLeft)} left)` : 'Ready')) : 'Off'}</span>
-                    <button
-                      id="streamCycleToggleBtn_${escapeHtml(s.id)}"
-                      class="${cycleActive ? 'pill danger' : 'pill success'}"
-                      type="button"
-                      onclick="toggleStreamCycleForStream('${escapeJs(channelName)}', '${escapeJs(s.id)}')"
-                    >${cycleActive ? 'Disable Stream Loop' : 'Enable Stream Loop'}</button>
-                  </div>
-                </div>
-
-                <div class="meta stream-cycle-meta-text" id="streamCycleMeta_${escapeHtml(s.id)}">
-                  ${escapeHtml(cycleActive ? `Every ${cycleRandomized ? streamCycleRandomSummary(cycleDuration, cycleDurationRandMin) : durationText(cycleDuration)} with ${cycleRandomized ? streamCycleRandomSummary(cycleCooldown, cycleCooldownRandMin) : durationText(cycleCooldown)} cooldown` : 'Automatic restart loop is off')}
-                </div>
-
-                <label class="switch stream-cycle-randomize">
-                  <input
-                    type="checkbox"
-                    id="streamCycleRandomize_${escapeHtml(s.id)}"
-                    ${cycleRandomized ? 'checked' : ''}
-                    onchange="updateStreamCycleSettingInline('${escapeJs(channelName)}', '${escapeJs(s.id)}', 'randomized', this.checked)"
-                  />
-                  <span>Randomize stream and cooldown</span>
-                  ${streamCycleInfoIcon('After the set stream duration or cooldown, Castarro will randomly add variation up to the specified minutes.')}
-                </label>
-
-                <div class="stream-cycle-grid">
-                  <section>
-                    <span class="field-hint">Run stream for</span>
-                    ${renderStreamCycleHmsInputsForStream(s.id, 'duration', durationHmsParts(cycleDuration), `updateStreamCycleDurationFromHms('${escapeJs(channelName)}', '${escapeJs(s.id)}')`)}
-                  </section>
-                  <section>
-                    <span class="field-hint">Cooldown before restart</span>
-                    ${renderStreamCycleHmsInputsForStream(s.id, 'cooldown', durationHmsParts(cycleCooldown), `updateStreamCycleCooldownFromHms('${escapeJs(channelName)}', '${escapeJs(s.id)}')`)}
-                  </section>
-                </div>
-
-                ${cycleRandomized ? `
-                  <div class="stream-cycle-random-fields">
-                    <label>
-                      <span class="field-hint">Stream random duration</span>
-                      <input
-                        id="streamCycleDurationRand_${escapeHtml(s.id)}"
-                        type="number"
-                        min="0"
-                        step="1"
-                        class="field-input"
-                        value="${escapeAttr(String(cycleDurationRandMin))}"
-                        onchange="updateStreamCycleSettingInline('${escapeJs(channelName)}', '${escapeJs(s.id)}', 'duration_random_minutes', this.value)"
-                      />
-                      <span class="setting-note">minutes added after set stream time</span>
-                    </label>
-                    <label>
-                      <span class="field-hint">Cooldown random duration</span>
-                      <input
-                        id="streamCycleCooldownRand_${escapeHtml(s.id)}"
-                        type="number"
-                        min="0"
-                        step="1"
-                        class="field-input"
-                        value="${escapeAttr(String(cycleCooldownRandMin))}"
-                        onchange="updateStreamCycleSettingInline('${escapeJs(channelName)}', '${escapeJs(s.id)}', 'restart_delay_random_minutes', this.value)"
-                      />
-                      <span class="setting-note">minutes added before restart</span>
-                    </label>
-                  </div>
-                ` : ''}
-              </div>
-            </div>`}
+          <div class="stream-card-body ${isExpanded ? "" : "hidden"}" id="streamCardBody_${sid}">
+            ${onAirStrip}
+            ${bodyRows}
+            ${timingRow}
           </div>
         </div>
       `;
@@ -12308,6 +12409,11 @@ async function updateStreamPlaylistInline(channelName, streamId, rawText) {
       ? rawText.map((t) => String(t || "").trim()).filter(Boolean)
       : String(rawText || "").split(",").map((t) => t.trim()).filter(Boolean);
     syncStreamToStateConfig(channelName, streamId, (s) => { s.playlist = items; });
+    const summary = document.getElementById(`streamVideoSummary_${streamId}`);
+    if (summary) {
+      summary.innerHTML = streamVideoSummaryHtml(items);
+      summary.title = items.join(", ");
+    }
     const cfg = state.config || "config.ready.json";
     const data = await fetchApi(`/api/channel/streams?config=${encodeURIComponent(cfg)}&channel=${encodeURIComponent(channelName)}`);
     if (!data || !data.ok) return;
@@ -12404,8 +12510,6 @@ async function updateStreamDetailInline(channelName, streamId, field, rawValue) 
       if (field === "name") {
         const titleEl = document.getElementById(`streamTitleText_${streamId}`);
         if (titleEl) titleEl.textContent = val || "Stream";
-        const inputEl = document.getElementById(`streamNameInput_${streamId}`);
-        if (inputEl && inputEl.value !== val) inputEl.value = val;
       }
       toast(`Stream ${field.replace("_", " ")} updated.`, "success");
     }
@@ -12528,7 +12632,7 @@ async function openStreamVideoPickerModal(channelName, streamId, autoSelectPaths
       listContainer.innerHTML = `
         <div class="streams-empty-state stream-picker-empty">
           <p class="helper">No video files found for <strong>${escapeHtml(channelName)}</strong>.</p>
-          <button class="pill primary small" type="button" onclick="browseStreamVideosFromPc()">💻 Select / Add Videos from PC...</button>
+          <button class="pill primary small" type="button" onclick="browseStreamVideosFromPc()">${uiIcon("monitor")}Select / Add Videos from PC...</button>
         </div>
       `;
       return;
@@ -13047,6 +13151,7 @@ async function updateStreamKeyInline(channelName, streamId, newKey) {
   }
 }
 
+hydrateStaticIcons();
 readOnboardingState();
 readWorkspaceAlertIds();
 applySettingsSection(state.settingsTab);
