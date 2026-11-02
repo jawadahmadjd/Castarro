@@ -6482,10 +6482,12 @@ def stop_stream(
             STATE.streams[ch] = s
         relay_runtime_changed = False
         if request_source != "stream_relay":
+            # Keep the relay "running" so the evaluator hands over to the next
+            # stream (same title round) after the cooldown. Setting it idle here
+            # restarted the relay from stream 1 on a new title round.
             for (cfg, ch), r_item in STATE.stream_relay_channels.items():
-                if (not channel_name or ch == channel_name) and r_item.get("phase") in {"running", "waiting_cooldown"}:
-                    r_item["phase"] = "idle"
-                    r_item["last_action"] = "paused_manual_stop"
+                if (not channel_name or ch == channel_name) and r_item.get("phase") == "running":
+                    r_item["last_action"] = "manual_stop"
                     relay_runtime_changed = True
     if cycle_runtime_changed:
         persist_stream_cycle_runtime()
@@ -8353,6 +8355,8 @@ def evaluate_channel_relay(
 
     if current_phase == "running":
         # The previously running stream exited on its own (e.g. video ended, process terminated, network error)
+        # or was stopped manually; either way the relay continues with the next stream.
+        manual_stop = runtime.get("last_action") == "manual_stop"
         cooldown_sec = int(relay_settings.get("cooldown_seconds") or 75)
         if relay_settings.get("randomize_cooldown") and relay_settings.get("cooldown_random_minutes", 0) > 0:
             cooldown_sec += random_seconds_between(0, relay_settings["cooldown_random_minutes"] * 60, minimum_seconds=0)
@@ -8372,7 +8376,7 @@ def evaluate_channel_relay(
             "previous_stream_id": prev_sid,
             "active_stream_id": "",
             "next_stream_id": next_sid,
-            "last_action": "stream_exited_transition_to_cooldown",
+            "last_action": "manual_stop_transition_to_cooldown" if manual_stop else "stream_exited_transition_to_cooldown",
             "last_stopped_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         })
         set_stream_relay_runtime(runtime_key, runtime)
@@ -8385,7 +8389,11 @@ def evaluate_channel_relay(
                 "next_stream_id": next_sid,
                 "cooldown_seconds": cooldown_sec,
                 "cooldown_ends_at": cooldown_ends_at,
-                "reason": "stream process terminated unexpectedly or finished video playback",
+                "reason": (
+                    "stream stopped manually"
+                    if manual_stop
+                    else "stream process terminated unexpectedly or finished video playback"
+                ),
             },
         )
         return

@@ -207,14 +207,34 @@ def test_relay_skips_disabled_streams():
         assert runtime["next_stream_id"] == "stream_3"  # Skipped disabled stream_2!
 
 
-def test_relay_manual_stop_pauses_relay():
+def test_relay_manual_stop_continues_with_next_stream():
     channel_name = "Test Channel"
     config_name = "config.relay_test.json"
 
+    streams = [
+        {"id": f"stream_{i}", "enabled": True, "title_sets": [{"title": f"S{i} set {n}"} for n in range(1, 4)]}
+        for i in range(1, 6)
+    ]
+    channel = {
+        "name": channel_name,
+        "streams": streams,
+        "stream_relay": {"enabled": True, "cooldown_seconds": 75, "loop": True},
+    }
+    config = {"channels": [channel]}
+
+    # Earlier tests leave mock streams for this channel in STATE.streams.
+    for key in [k for k in web_ui.STATE.streams if k == channel_name or k.startswith(f"{channel_name}:")]:
+        web_ui.STATE.streams.pop(key, None)
+
+    # Relay is on stream 3 (index 2), title round 1 (set 2).
     web_ui.STATE.stream_relay_channels[(config_name, channel_name)] = {
         "phase": "running",
-        "active_stream_id": "stream_1",
-        "next_stream_id": "stream_2",
+        "active_stream_id": "stream_3",
+        "current_index": 2,
+        "next_stream_id": "stream_4",
+        "cycle_count": 7,
+        "title_set_round": 1,
+        "active_title_set_index": 1,
     }
 
     mock_state = MagicMock()
@@ -223,19 +243,46 @@ def test_relay_manual_stop_pauses_relay():
     mock_state.running.preview_manifest = None
     mock_state.cloud_asset_ids = []
     mock_state.transferred_bytes.return_value = 0
-    web_ui.STATE.streams[f"{channel_name}:stream_1"] = mock_state
+    web_ui.STATE.streams[f"{channel_name}:stream_3"] = mock_state
 
-    with patch.object(web_ui, "request_stop_running_stream"), \
+    with tempfile.TemporaryDirectory() as tmp_dir, \
+         patch.object(web_ui, "STREAM_RELAY_RUNTIME_FILE", Path(tmp_dir) / "relay.json"), \
+         patch.object(web_ui, "request_stop_running_stream"), \
+         patch.object(web_ui, "start_stream") as mock_start, \
+         patch.object(web_ui, "assert_youtube_channel_keys_match"), \
          patch.object(web_ui.app_db, "record_stream_stop"), \
-         patch.object(web_ui.app_db, "record_event"), \
-         patch.object(web_ui, "persist_stream_relay_runtime"):
+         patch.object(web_ui.app_db, "record_event"):
 
-        # User manually calls stop_stream with request_source="manual"
-        web_ui.stop_stream(channel_name, stream_id="stream_1", request_source="manual")
+        web_ui.stop_stream(channel_name, stream_id="stream_3", request_source="api_stream_stop")
 
         runtime = web_ui.STATE.stream_relay_channels[(config_name, channel_name)]
-        assert runtime["phase"] == "idle"
-        assert runtime["last_action"] == "paused_manual_stop"
+        assert runtime["phase"] == "running"
+        assert runtime["last_action"] == "manual_stop"
+
+        # Next evaluation: no stream running -> handover cooldown towards stream_4, not a restart at stream_1.
+        now = 3000.0
+        web_ui.evaluate_channel_relay(config_name, config, channel, streams, now=now)
+        runtime = web_ui.STATE.stream_relay_channels[(config_name, channel_name)]
+        assert runtime["phase"] == "waiting_cooldown"
+        assert runtime["next_stream_id"] == "stream_4"
+        assert runtime["last_action"] == "manual_stop_transition_to_cooldown"
+        assert mock_start.call_count == 0
+
+        # Cooldown over -> stream_4 starts on the same title round.
+        mock_start.return_value = [f"{channel_name}:stream_4"]
+        web_ui.evaluate_channel_relay(config_name, config, channel, streams, now=runtime["cooldown_ends_at"] + 1.0)
+        mock_start.assert_called_once_with(
+            config_name, channel_name, stream_id="stream_4", title_set={"title": "S4 set 2", "description": "", "thumbnail_path": "", "index": 1}
+        )
+        runtime = web_ui.STATE.stream_relay_channels[(config_name, channel_name)]
+        assert runtime["phase"] == "running"
+        assert runtime["current_index"] == 3
+        assert runtime["title_set_round"] == 1
+        assert runtime["active_title_set_index"] == 1
+        assert runtime["cycle_count"] == 7
+
+    web_ui.STATE.streams.pop(f"{channel_name}:stream_3", None)
+    web_ui.STATE.stream_relay_channels.pop((config_name, channel_name), None)
 
 
 def test_resolve_channel_relay_duration_hierarchy():
